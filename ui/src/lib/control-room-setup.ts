@@ -264,6 +264,26 @@ export function nestNameForChannel(channel: string): string {
   return words ? words.charAt(0).toUpperCase() + words.slice(1) : "New nest";
 }
 
+// ─── Server settings → Surfaces (po-1448) ─────────────────────────────────
+
+/** A fresh buffer key: 32 random bytes, base64 (what `openssl rand -base64 32` gives). Made in the browser; sent only on Save. */
+export function generateBufferKey(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return btoa(String.fromCharCode(...bytes));
+}
+
+/** The URLs the hosted Slack app must list, from the public base URL; null when it isn't set. Same paths as the server's slackUrls(). */
+export function hostedSlackUrls(baseUrl: string | null | undefined): { redirect: string; events: string; interactions: string; commands: string } | null {
+  const base = (baseUrl ?? "").trim().replace(/\/+$/, "");
+  if (!base) return null;
+  return {
+    redirect: `${base}/surfaces/slack/oauth/callback`,
+    events: `${base}/surfaces/slack/hosted/events`,
+    interactions: `${base}/surfaces/slack/hosted/interactions`,
+    commands: `${base}/surfaces/slack/hosted/commands`,
+  };
+}
+
 // ─── Channel activity (po-1446) ────────────────────────────────────────────
 
 /** Why the gate skipped a message, in plain words. Unknown codes are de-snake-cased. */

@@ -344,6 +344,29 @@ describe("po-1432 review: shared-deployment cause and capped name lists", () => 
   });
 });
 
+describe("po-1448: Server settings → Surfaces helpers", () => {
+  it("generateBufferKey makes 32 random bytes in base64, different every time", async () => {
+    const { generateBufferKey } = await import("./control-room-setup");
+    const a = generateBufferKey();
+    const b = generateBufferKey();
+    expect(a).toHaveLength(44);
+    expect(Uint8Array.from(atob(a), (c) => c.charCodeAt(0))).toHaveLength(32);
+    expect(a).not.toBe(b);
+  });
+
+  it("hostedSlackUrls builds the four Slack URLs from the public base URL, and nothing without one", async () => {
+    const { hostedSlackUrls } = await import("./control-room-setup");
+    expect(hostedSlackUrls("https://nest.acme.com/")).toEqual({
+      redirect: "https://nest.acme.com/surfaces/slack/oauth/callback",
+      events: "https://nest.acme.com/surfaces/slack/hosted/events",
+      interactions: "https://nest.acme.com/surfaces/slack/hosted/interactions",
+      commands: "https://nest.acme.com/surfaces/slack/hosted/commands",
+    });
+    expect(hostedSlackUrls("")).toBeNull();
+    expect(hostedSlackUrls(null)).toBeNull();
+  });
+});
+
 describe("po-1446: channel activity in plain words", () => {
   const base = { days: 7, since: "", received: 0, buffered: 0, skipped: {}, waiting: 0, judged: { proposed: 0, nothing_kept: 0, failed: 0 }, cards: { posted: 0, queued: 0, held: 0 } };
 
