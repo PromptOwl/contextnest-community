@@ -10,6 +10,7 @@
  */
 import type {
   SurfacesBinding,
+  SurfacesBindingActivity,
   SurfacesBindingPreview,
   SurfacesInstallRef,
   SurfacesSeedItem,
@@ -261,6 +262,64 @@ export function unresolved(picks: readonly ChannelPick[], views: Record<string, 
 export function nestNameForChannel(channel: string): string {
   const words = channel.replace(/[-_.]+/g, " ").trim();
   return words ? words.charAt(0).toUpperCase() + words.slice(1) : "New nest";
+}
+
+// ─── Server settings → Surfaces (po-1448) ─────────────────────────────────
+
+/** A fresh buffer key: 32 random bytes, base64 (what `openssl rand -base64 32` gives). Made in the browser; sent only on Save. */
+export function generateBufferKey(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return btoa(String.fromCharCode(...bytes));
+}
+
+/** The URLs the hosted Slack app must list, from the public base URL; null when it isn't set. Same paths as the server's slackUrls(). */
+export function hostedSlackUrls(baseUrl: string | null | undefined): { redirect: string; events: string; interactions: string; commands: string } | null {
+  const base = (baseUrl ?? "").trim().replace(/\/+$/, "");
+  if (!base) return null;
+  return {
+    redirect: `${base}/surfaces/slack/oauth/callback`,
+    events: `${base}/surfaces/slack/hosted/events`,
+    interactions: `${base}/surfaces/slack/hosted/interactions`,
+    commands: `${base}/surfaces/slack/hosted/commands`,
+  };
+}
+
+// ─── Channel activity (po-1446) ────────────────────────────────────────────
+
+/** Why the gate skipped a message, in plain words. Unknown codes are de-snake-cased. */
+const SKIP_TEXT: Record<string, string> = {
+  too_short: "too short",
+  bot_or_system: "from bots or Slack itself",
+  external_or_guest: "from guests or other organizations",
+  opted_out: "from people who said skip me",
+  duplicate: "duplicates",
+  paused: "sent while paused",
+  not_enabled: "sent before listening was on",
+  ask_requester: "🧠 asks from guests or people who said skip me",
+  buffer_error: "not stored (server error)",
+};
+
+/** The activity counts as a few plain sentences, in the order a tester asks them. */
+export function activityLines(a: SurfacesBindingActivity, quietMinutes: number): string[] {
+  const n = (k: number, one: string, many = `${one}s`) => `${k} ${k === 1 ? one : many}`;
+  const skipped = Object.entries(a.skipped).filter(([, v]) => v > 0);
+  const dropped = skipped.reduce((s, [, v]) => s + v, 0);
+  const lines = [
+    `${n(a.received, "message")} received · ${a.buffered} kept for judging · ${dropped} skipped` +
+      (skipped.length ? ` (${skipped.map(([k, v]) => `${v} ${SKIP_TEXT[k] ?? k.replace(/_/g, " ")}`).join(", ")})` : ""),
+  ];
+  if (a.waiting) lines.push(`${n(a.waiting, "thread")} waiting for the ${quietMinutes}-minute quiet window`);
+  const j = a.judged;
+  const total = j.proposed + j.nothing_kept + j.failed;
+  lines.push(
+    total
+      ? `${n(total, "thread")} judged: ${j.proposed} proposed, ${j.nothing_kept} with nothing worth keeping${j.failed ? `, ${j.failed} failed` : ""}. The Decision ledger says why for each.`
+      : "No thread judged yet.",
+  );
+  const c = a.cards;
+  lines.push(`${n(c.posted, "card")} posted${c.queued ? ` · ${c.queued} queued for tomorrow (daily limit)` : ""}${c.held ? ` · ${c.held} held (no eligible reviewer in the channel)` : ""}`);
+  if (!a.received) lines.push("Nothing arrived. Check that Nest is in the channel and the message buffer key is set.");
+  return lines;
 }
 
 // ─── The starter dry run ───────────────────────────────────────────────────

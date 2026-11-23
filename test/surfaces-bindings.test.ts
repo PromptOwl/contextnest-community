@@ -446,11 +446,156 @@ describe("guard re-checks (§4.17)", () => {
     const after = await row(id);
     expect(after.status).toBe("paused_guard");
     expect(after.capture_ok).toBe(1);
-    const nonAdmin = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, {}, dave.apiKey);
+    const nonAdmin = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, { reason: "test resume" }, dave.apiKey);
     expect(nonAdmin.status).toBe(403);
-    const res = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, {}, alice.apiKey);
+    const res = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, { reason: "test resume" }, alice.apiKey);
     expect(res.status).toBe(200);
     expect(res.data.binding.status).toBe("active");
+  });
+
+  it("po-1437: a nest admin pauses listening; the guard never resumes it; Resume brings it back with the reason cleared", async () => {
+    const n = await newNest(alice);
+    await share(n, dave);
+    setConv("C-1437", ["SA", "SD"]);
+    const b = await bind({ conversation_id: "C-1437", nest_id: n });
+    expect(b.status).toBe(201);
+    const id = b.data.binding.id;
+    paused.length = 0;
+
+    const nonAdmin = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/pause`, { reason: "launch week" }, dave.apiKey);
+    expect(nonAdmin.status).toBe(403);
+    // A reason is required, so the team can see why.
+    for (const body of [{}, { reason: "  " }, { reason: "ok" }]) {
+      expect((await jsonRequest(app, "POST", `/surfaces/bindings/${id}/pause`, body, alice.apiKey)).status, JSON.stringify(body)).toBe(422);
+    }
+    expect((await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, {}, alice.apiKey)).status).toBe(422);
+    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${id}`, undefined, alice.apiKey)).status).toBe(422);
+    expect((await row(id)).status).toBe("active");
+    const p = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/pause`, { reason: "launch week" }, alice.apiKey);
+    expect(p.status, JSON.stringify(p.data)).toBe(200);
+    expect(p.data.binding).toMatchObject({ status: "paused_guard", paused_by_admin: true });
+    // The pause hooks purge the buffer and withdraw pending cards, as for any pause.
+    expect(paused).toEqual([{ bindingId: id, reason: "admin" }]);
+    // No "the guard failed" alert for a pause an admin chose.
+    expect((await S.db.getDb().all("SELECT 1 FROM surface_notices WHERE binding_id = ? AND kind = 'binding_paused'", [id])).length).toBe(0);
+    expect((await jsonRequest(app, "POST", `/surfaces/bindings/${id}/pause`, { reason: "again" }, alice.apiKey)).status).toBe(409);
+
+    // A passing guard sweep leaves it paused.
+    await S.runner.handleSurfaceSignal(installId, { surface: "slack", workspace: "T1", kind: "member_joined", conversation: "C-1437", user: "SD" });
+    await S.runner.runGuardSweep();
+    expect((await row(id)).status).toBe("paused_guard");
+
+    const res = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, { reason: "launch is over" }, alice.apiKey);
+    expect(res.status, JSON.stringify(res.data)).toBe(200);
+    expect(res.data.binding).toMatchObject({ status: "active", paused_by_admin: false });
+
+    // The history keeps every change, newest first, with the actual person (id + email) and the reason.
+    expect((await jsonRequest(app, "GET", `/surfaces/bindings/${id}/history`, undefined, dave.apiKey)).status).toBe(403);
+    const h = await jsonRequest(app, "GET", `/surfaces/bindings/${id}/history`, undefined, alice.apiKey);
+    expect(h.status, JSON.stringify(h.data)).toBe(200);
+    expect(h.data.history.map((e: any) => [e.action, e.reason, e.by?.email ?? null])).toEqual([
+      ["resumed", "launch is over", alice.email],
+      ["paused", "launch week", alice.email],
+      ["started", null, alice.email],
+    ]);
+    expect(h.data.history[0].by.user_id).toBe(alice.userId);
+  });
+
+  it("po-1437: a pause nobody chose (the guard) and a removal go on the history too", async () => {
+    const n = await newNest(alice);
+    await share(n, dave);
+    setConv("C-1437g", ["SA", "SD"]);
+    const id = (await bind({ conversation_id: "C-1437g", nest_id: n })).data.binding.id;
+    setConv("C-1437g", ["SA"]);
+    await S.runner.handleSurfaceSignal(installId, { surface: "slack", workspace: "T1", kind: "member_left", conversation: "C-1437g", user: "SD" });
+    await S.runner.runGuardSweep();
+    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${id}`, { reason: "channel retired" }, alice.apiKey)).status).toBe(200);
+    const h = (await jsonRequest(app, "GET", `/surfaces/bindings/${id}/history`, undefined, alice.apiKey)).data.history;
+    expect(h.map((e: any) => [e.action, e.by ? "person" : "nest"])).toEqual([
+      ["removed", "person"],
+      ["paused", "nest"],
+      ["started", "person"],
+    ]);
+    expect(h[1].reason).toMatch(/^Paused by Nest/);
+  });
+
+  it("po-1437: moving a channel to another nest = remove, then bind the same channel to the new nest", async () => {
+    const n1 = await newNest(alice);
+    const n2 = await newNest(alice);
+    setConv("C-1437m", ["SA"]);
+    const first = await bind({ conversation_id: "C-1437m", nest_id: n1 });
+    expect(first.status).toBe(201);
+    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${first.data.binding.id}`, { reason: "test remove" }, alice.apiKey)).status).toBe(200);
+    const moved = await bind({ conversation_id: "C-1437m", nest_id: n2 });
+    expect(moved.status, JSON.stringify(moved.data)).toBe(201);
+    expect(moved.data.binding).toMatchObject({ nest_id: n2, status: "active" });
+  });
+
+  it("po-1437 review: a second stop is 409 with no extra history row; a move names the nest from the server; history stays per nest", async () => {
+    const n1 = await newNest(alice, "Old Nest");
+    const n2 = await newNest(alice, "New Nest");
+    setConv("C-1437r", ["SA"]);
+    const id = (await bind({ conversation_id: "C-1437r", nest_id: n1 })).data.binding.id;
+    // moved_to_nest_id is resolved server-side; a free-text moved_to is ignored.
+    const del = await jsonRequest(app, "DELETE", `/surfaces/bindings/${id}`, { reason: "new team", moved_to_nest_id: n2, moved_to: "<!channel>" }, alice.apiKey);
+    expect(del.status, JSON.stringify(del.data)).toBe(200);
+    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${id}`, { reason: "double click" }, alice.apiKey)).status).toBe(409);
+    const old = (await S.db.getDb().all("SELECT action, reason, nest_id FROM surface_binding_history WHERE binding_id = ? ORDER BY created_at", [id])) as any[];
+    expect(old.map((h) => h.action)).toEqual(["started", "moved"]);
+    expect(old[1].reason).toBe("new team (moved to New Nest)");
+
+    // Re-bound to the new nest (same row): its admins see only the new nest's history.
+    expect((await bind({ conversation_id: "C-1437r", nest_id: n2 })).status).toBe(201);
+    const h = (await jsonRequest(app, "GET", `/surfaces/bindings/${id}/history`, undefined, alice.apiKey)).data.history;
+    expect(h.map((e: any) => e.action)).toEqual(["started"]);
+  });
+
+  it("po-1446: activity maps verdicts and card states, and counts only the last 7 UTC days", async () => {
+    const n = await newNest(alice);
+    setConv("C-1446", ["SA"]);
+    const id = (await bind({ conversation_id: "C-1446", nest_id: n })).data.binding.id;
+    const db = S.db.getDb();
+    const now = new Date().toISOString();
+    const old = new Date(Date.now() - 10 * 86_400_000).toISOString();
+    const counter = (day: string, metric: string, value: number) =>
+      db.run("INSERT INTO surface_counters (org_id, nest_id, binding_id, day, metric, value, created_at) VALUES ('default', ?, ?, ?, ?, ?, ?)", [n, id, day, metric, value, now]);
+    await counter(now.slice(0, 10), "buffered", 4);
+    await counter(now.slice(0, 10), "drop_too_short", 2);
+    await counter(old.slice(0, 10), "buffered", 50); // outside the window
+    const win = (status: string, verdict: string | null, judgedAt: string | null) =>
+      db.run(
+        "INSERT INTO surface_windows (id, binding_id, nest_id, thread_key, opened_at, last_message_at, status, verdict, judged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [randomUUID(), id, n, randomUUID(), now, now, status, verdict, judgedAt],
+      );
+    await win("open", null, null);
+    await win("judged", "propose", now);
+    await win("judged", "no_op", now);
+    await win("judged", "filtered", now);
+    await win("judged", "error", now);
+    await win("judged", "budget_exhausted", now);
+    await win("judged", "propose", old); // outside the window
+    await win("discarded", "discarded", now); // never counted
+    const card = (state: string, postedAt: string | null, createdAt: string) =>
+      db.run(
+        "INSERT INTO surface_proposals (id, window_id, binding_id, nest_id, card_kind, state, posted_at, expires_at, created_at) VALUES (?, ?, ?, ?, 'single', ?, ?, ?, ?)",
+        [randomUUID(), randomUUID(), id, n, state, postedAt, now, createdAt],
+      );
+    await card("held", null, now);
+    await card("queued", null, now);
+    await card("decided", now, now); // reached the channel
+    await card("expired", null, now); // expired while held: never posted
+    await card("posted", old, old); // outside the window
+
+    const a = (await jsonRequest(app, "GET", `/surfaces/bindings/${id}/activity`, undefined, alice.apiKey)).data;
+    expect(a).toMatchObject({
+      days: 7,
+      received: 6,
+      buffered: 4,
+      skipped: { too_short: 2 },
+      waiting: 1,
+      judged: { proposed: 1, nothing_kept: 2, failed: 2 },
+      cards: { posted: 1, queued: 1, held: 1 },
+    });
   });
 
   it("resume refuses while the guard still fails", async () => {
@@ -460,7 +605,7 @@ describe("guard re-checks (§4.17)", () => {
     const b = await bind({ conversation_id: "C-16b", nest_id: n });
     setConv("C-16b", ["SA"]);
     await jsonRequest(app, "POST", `/surfaces/bindings/${b.data.binding.id}/recheck`, {}, alice.apiKey);
-    const res = await jsonRequest(app, "POST", `/surfaces/bindings/${b.data.binding.id}/resume`, {}, alice.apiKey);
+    const res = await jsonRequest(app, "POST", `/surfaces/bindings/${b.data.binding.id}/resume`, { reason: "test resume" }, alice.apiKey);
     expect(res.status).toBe(409);
   });
 
@@ -601,10 +746,10 @@ describe("binding state machine (§12): active | paused_guard | paused_by_member
     expect(view.data.binding.booted_at).toBeTruthy();
     expect("boot_reason" in view.data.binding).toBe(false);
     // re-bind refused while the booting member is present and hasn't consented
-    const resume = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, {}, alice.apiKey);
+    const resume = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, { reason: "test resume" }, alice.apiKey);
     expect(resume.status).toBe(409);
     await S.bindings.consentToReturn({ bindingId: id, surfaceUserId: "SC" });
-    const ok = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, {}, alice.apiKey);
+    const ok = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, { reason: "test resume" }, alice.apiKey);
     expect(ok.status).toBe(200);
     expect(ok.data.binding.status).toBe("active");
   });
@@ -615,7 +760,7 @@ describe("binding state machine (§12): active | paused_guard | paused_by_member
     const b = await bind({ conversation_id: "C-BOOT2", nest_id: n });
     await S.bindings.bootBinding({ bindingId: b.data.binding.id, surfaceUserId: "SC" });
     setConv("C-BOOT2", ["SA"]);
-    const ok = await jsonRequest(app, "POST", `/surfaces/bindings/${b.data.binding.id}/resume`, {}, alice.apiKey);
+    const ok = await jsonRequest(app, "POST", `/surfaces/bindings/${b.data.binding.id}/resume`, { reason: "test resume" }, alice.apiKey);
     expect(ok.status).toBe(200);
   });
 
@@ -634,7 +779,7 @@ describe("binding state machine (§12): active | paused_guard | paused_by_member
     const n = await newNest(alice);
     setConv("C-DEL", ["SA"]);
     const b = await bind({ conversation_id: "C-DEL", nest_id: n });
-    const del = await jsonRequest(app, "DELETE", `/surfaces/bindings/${b.data.binding.id}`, undefined, alice.apiKey);
+    const del = await jsonRequest(app, "DELETE", `/surfaces/bindings/${b.data.binding.id}`, { reason: "test remove" }, alice.apiKey);
     expect(del.status).toBe(200);
     expect(del.data.binding.status).toBe("removed");
     expect(paused).toEqual([{ bindingId: b.data.binding.id, reason: "removed" }]);
