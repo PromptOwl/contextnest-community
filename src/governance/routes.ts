@@ -59,6 +59,11 @@ import {
   filterAccessible,
   resolveCallerEmail,
   canRequestDeletion,
+  versionHistoryScope,
+  versionVisible,
+  liveVersionOf,
+  canReadVersionNumber,
+  type VersionHistoryScope,
 } from "./access-guard.js";
 import { handleAnnotationReply } from "../annotations/routes.js";
 import { notifyComment } from "./mention-notify.js";
@@ -753,6 +758,29 @@ governanceNodeRoutes.get("/:nodeId{.+}/stewards", async (c) => {
   });
 });
 
+/** The version-history scope for this request's caller and credential. */
+async function callerVersionScope(
+  c: { get(key: "keyCapability"): unknown },
+  nestId: string,
+  nodeId: string,
+  userId: string,
+  userEmail: string,
+  storage: Parameters<typeof liveVersionOf>[0],
+): Promise<VersionHistoryScope> {
+  return versionHistoryScope(nestId, nodeId, userId, userEmail, {
+    readOnlyKey: c.get("keyCapability") === "read",
+    liveVersion: await liveVersionOf(storage, nodeId),
+  });
+}
+
+/** A version row without who wrote it (and through which agent). */
+function withoutEditor<T extends { editedBy?: string; editedBySystem?: string; client?: unknown }>(
+  v: T,
+): Omit<T, "editedBy" | "editedBySystem" | "client"> {
+  const { editedBy: _e, editedBySystem: _s, client: _c, ...rest } = v;
+  return rest;
+}
+
 // GET /nests/:nestId/nodes/:nodeId/versions
 governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
   const nestId = c.req.param("nestId")!;
@@ -771,16 +799,22 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
     );
   }
 
-  const allVersions = await versions.getVersions(nestId, nodeId);
-  const approved = await versions.getApprovedVersion(nestId, nodeId);
-
   // getVersions returns content:"" (bodies live on disk, not the table). Attach
   // each version's stored change log — the unified diff from the version before
   // it — which is one small file read apiece. Reconstructing every body here
   // instead would replay the chain once per row and ship N full copies of the
   // document just to open the history panel; the single body a caller actually
   // previews or restores is fetched by GET .../versions/:version.
-  const { versions: versionManager } = await engineCache.get(nestId);
+  const { storage, versions: versionManager } = await engineCache.get(nestId);
+
+  // Passing the node gate is not the same as reading every version (PO-1465):
+  // a visibility-only reader sees the approved versions only (plus their own
+  // draft), and identities stay with members on a full credential.
+  const scope = await callerVersionScope(c, nestId, nodeId, userId, userEmail, storage);
+  const allVersions = (await versions.getVersions(nestId, nodeId)).filter((v) =>
+    versionVisible(scope, v),
+  );
+  const approved = await versions.getApprovedVersion(nestId, nodeId);
 
   // Who approved/rejected each version, and why. node_versions carries the
   // status but not the resolver's email or note, so the latest resolution per
@@ -817,18 +851,23 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
   }
 
   const enriched = await Promise.all(
-    allVersions.map(async (v) => {
-      const r = byVersion.get(v.version);
+    allVersions.map(async (version) => {
+      const r = byVersion.get(version.version);
+      const v = scope.identities ? version : withoutEditor(version);
       const resolution = r
         ? {
-            resolvedBy: r.resolvedBy,
+            ...(scope.identities ? { resolvedBy: r.resolvedBy } : {}),
             resolutionStatus: r.status,
-            resolutionNote: r.resolutionNote,
+            // Reviewer notes are the team's discussion, not approved content.
+            ...(scope.approvedOnly ? {} : { resolutionNote: r.resolutionNote }),
             resolutionKind: r.resolutionKind,
           }
         : {};
+      // A change log is the diff from the version before, which may be one
+      // this caller cannot see; they compare bodies they can fetch instead.
+      if (scope.approvedOnly) return { ...v, ...resolution };
       try {
-        const diff = await versionManager.getDiff(nodeId, v.version);
+        const diff = await versionManager.getDiff(nodeId, version.version);
         return { ...v, ...resolution, diff: diff ?? undefined };
       } catch {
         return { ...v, ...resolution };
@@ -843,10 +882,13 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
     // Verdicts on out-of-band edits. A rejection commits no content, so it has
     // no version row to hang off — it lives in the engine's chain-event log and
     // rides alongside the version list rather than inside it.
-    externalEditVerdicts: await externalEdits.listExternalEditVerdicts(
-      nestId,
-      nodeId,
-    ),
+    externalEditVerdicts: scope.approvedOnly
+      ? []
+      : (await externalEdits.listExternalEditVerdicts(nestId, nodeId)).map((v) => {
+          if (scope.identities) return v;
+          const { actor: _actor, ...rest } = v;
+          return rest;
+        }),
   });
 });
 
@@ -870,6 +912,12 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions/:version{[0-9]+}", async (c) => 
   }
 
   const { storage, versions: versionManager } = await engineCache.get(nestId);
+  // The node gate clears the document, not every version of it (PO-1465): a
+  // visibility-only reader gets only what the version list shows them. Any
+  // other version answers like one that does not exist.
+  if (!(await canReadVersionNumber(nestId, nodeId, userId, userEmail, version, storage))) {
+    return c.json({ error: "Version not found" }, 404);
+  }
   // A historical version's full body is a read of that version: record it in
   // the activity log like any other read (fire-and-forget).
   const recordVersionRead = () =>

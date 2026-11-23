@@ -2050,6 +2050,8 @@ Each version may also include `resolvedBy` + `resolutionStatus`, the steward who
 
 Gated by the same node-level read check as the document itself — `403` when the caller can't read the node, which for a public reader means any node without an approved version.
 
+**Who sees which versions.** A visibility-only reader (someone who reaches the nest only because it is public or org-visible) is listed the approved versions up to `approvedVersion` — never a draft, a pending version or one sent back — plus the live working version when it is their own draft. For them `currentVersion` is the newest version listed, and `diff`, `resolutionNote` and `externalEditVerdicts` are left out (a diff can carry a version they cannot see). Members follow the stewardship rules and get every version. `editedBy`, `editedBySystem`, `client`, `resolvedBy` and each verdict's `actor` are left out for visibility-only readers, headless keys and read-only keys. MCP `context_versions` applies the same rule (`edited_by` and `client` are left out).
+
 ```json
 {
   "currentVersion": 3,
@@ -2095,7 +2097,7 @@ One version's full body, reconstructed on demand from the nearest keyframe plus 
 
 `content` is `null` — with HTTP 200, not an error — when that version's chain can no longer be replayed (e.g. history grafted by an older import). Callers render it as "no content" rather than failing the whole panel.
 
-Same node-level read check as the list above: `403` when the caller can't read the node. A public reader can only reach versions of a node that has an approved version, so drafts of an unapproved document are never reconstructable this way.
+Same node-level read check as the list above: `403` when the caller can't read the node. A visibility-only reader can open only a version the list above shows them; any other version number answers `404` `{ "error": "Version not found" }`, as for one that does not exist. `GET .../hosted?v=N` pins a snapshot under the same rule.
 
 ```json
 { "version": 2, "content": "# Heading\n\nbody as of v2\n" }

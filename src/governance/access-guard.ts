@@ -14,7 +14,7 @@ import {
   stewardCoverageForUser,
 } from "./stewardship-service.js";
 import { isPublicReader, resolveNestPermission } from "../shared/access.js";
-import { getApprovedVersion, getApprovedVersions } from "./version-service.js";
+import { getApprovedVersion, getApprovedVersions, getVersion } from "./version-service.js";
 import {
   resolveNodeGrant,
   listUserGrants,
@@ -27,6 +27,7 @@ import { ownsWorkingDraft, ownWorkingDraftIds } from "./org-contribution.js";
 // member list that decides reads; everything else keeps its usual rule.
 import { containerReadVerdict, hiddenContainersFor, isConversationId } from "../chat/containers.js";
 import { resolveNestAccess } from "../shared/access.js";
+import { isHeadlessIdentity } from "../auth/headless.js";
 
 /**
  * Resolve the caller's email from the auth context.
@@ -126,6 +127,95 @@ export async function seesOwnDraft(
 ): Promise<boolean> {
   if ((await resolveNodeGrant(nestId, userId, nodeId)) === "write") return true;
   return !!userEmail && (await ownsWorkingDraft(nestId, nodeId, userEmail));
+}
+
+/** Version statuses that went through review (or never needed it): the only
+ *  history rows a visibility-only reader may see. Same set the views route
+ *  and the stream use. */
+const SEALED_VERSION_STATUSES = new Set(["published", "approved"]);
+
+/**
+ * What one caller may see of one document's version history (PO-1465). The
+ * node gate (`canReadNode`) answers "may they open this document at all"; this
+ * answers "which of its versions, and may they see who wrote or reviewed them".
+ *
+ * - A visibility-only reader (public or org) sees sealed versions up to the
+ *   approved one, plus the live working version when it is their own draft
+ *   (`seesOwnDraft`). Never an unreviewed, pending or sent-back version.
+ * - Everyone else follows the existing stewardship rules: every version.
+ * - Editor and reviewer identities are hidden from visibility-only readers,
+ *   headless keys and read-only keys (the #569 clamp: a read-only key reads,
+ *   whatever its owner may do).
+ */
+export interface VersionHistoryScope {
+  approvedOnly: boolean;
+  approvedVersion: number | null;
+  ownDraftVersion: number | null;
+  identities: boolean;
+}
+
+export async function versionHistoryScope(
+  nestId: string,
+  nodeId: string,
+  userId: string,
+  userEmail: string,
+  opts: { readOnlyKey?: boolean; liveVersion?: number | null } = {},
+): Promise<VersionHistoryScope> {
+  const publicReader = await isPublicReader(nestId, userId);
+  const identities = !publicReader && !opts.readOnlyKey && !(await isHeadlessIdentity(userId));
+  if (!publicReader) return { approvedOnly: false, approvedVersion: null, ownDraftVersion: null, identities };
+  const approvedVersion = await getApprovedVersion(nestId, nodeId);
+  const ownDraftVersion =
+    opts.liveVersion != null && (await seesOwnDraft(nestId, nodeId, userId, userEmail)) ? opts.liveVersion : null;
+  return { approvedOnly: true, approvedVersion, ownDraftVersion, identities };
+}
+
+/** The live working copy's version, or null when there is no live file. */
+export async function liveVersionOf(
+  storage: { readDocument(id: string): Promise<{ frontmatter: { version?: number } }> },
+  nodeId: string,
+): Promise<number | null> {
+  try {
+    return (await storage.readDocument(nodeId)).frontmatter.version ?? 1;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * May this caller read version `version` of the node by number? For the
+ * routes that serve one version's body (`/versions/:n`, `/hosted?v=N`). A
+ * member may ask for any version; a visibility-only reader only for one the
+ * version list shows them.
+ */
+export async function canReadVersionNumber(
+  nestId: string,
+  nodeId: string,
+  userId: string,
+  userEmail: string,
+  version: number,
+  storage: Parameters<typeof liveVersionOf>[0],
+): Promise<boolean> {
+  const scope = await versionHistoryScope(nestId, nodeId, userId, userEmail, {
+    liveVersion: await liveVersionOf(storage, nodeId),
+  });
+  if (!scope.approvedOnly) return true;
+  const row = await getVersion(nestId, nodeId, version);
+  return row ? versionVisible(scope, row) : version === scope.ownDraftVersion;
+}
+
+/** May a caller with `scope` see this version row? */
+export function versionVisible(
+  scope: VersionHistoryScope,
+  v: { version: number; status?: string | null },
+): boolean {
+  if (!scope.approvedOnly) return true;
+  if (scope.ownDraftVersion != null && v.version === scope.ownDraftVersion) return true;
+  return (
+    scope.approvedVersion != null &&
+    v.version <= scope.approvedVersion &&
+    SEALED_VERSION_STATUSES.has(String(v.status ?? ""))
+  );
 }
 
 /**
