@@ -2631,9 +2631,10 @@ export async function withdrawDeletionRequest(nestId: string, id: string) {
   );
 }
 
-/** Create a folder with nothing in it — no placeholder document. */
+/** Create a folder with nothing in it — no placeholder document. `created` is
+ *  false when it was already there. */
 export async function createFolder(nestId: string, folder: string) {
-  return request<{ folder: string }>(`/nests/${nestId}/folders`, {
+  return request<{ folder: string; created: boolean }>(`/nests/${nestId}/folders`, {
     method: "POST",
     body: JSON.stringify({ folder }),
   });

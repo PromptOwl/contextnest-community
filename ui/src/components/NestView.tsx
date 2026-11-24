@@ -435,7 +435,12 @@ export function NestView({
       // Folders are path-derived, so the server records the path rather than
       // seeding a starter document that would count as real content
       // (CU-wdqcpzzzut). Nesting works via "parent/child".
-      await api.createFolder(nestId, folder);
+      const { created } = await api.createFolder(nestId, folder);
+      if (!created) {
+        // The dialog stays open, so another name can be typed.
+        toast.error(`Folder "${prettyFolderPath(folder)}" already exists`);
+        return;
+      }
       setNewFolderPath("");
       setShowNewFolder(false);
       // An empty folder barely changes the tree, so say it landed

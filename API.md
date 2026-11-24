@@ -2565,9 +2565,9 @@ Query: `?folder=<path>` (that subtree only; defaults to the whole nest), `?recur
 Creates a folder with nothing in it — the directory is created in the vault carrying only its generated `INDEX.md`, so no document is added to the nest. Each segment is slugified (`GTM/Deals` → `gtm/deals`) and the depth cap applies. Creating a folder that already exists is a no-op. Write tier.
 
 ```json
-{ "folder": "gtm/deals" }
+{ "folder": "gtm/deals", "created": true }
 ```
-Returns 201 with the path actually created.
+Returns 201 with the slugified path; `created` is `false` when the folder was already there.
 
 ### GET `/nests/:nestId/census`
 One call for everything the Documents page needs to describe the *whole* nest, whatever folder is open — counts by tag, type and status, the folder tree, the author roster, and the recently-edited strip. Gated by the same `filterAccessible` pass as the listing, so the numbers describe what this caller can actually reach.
