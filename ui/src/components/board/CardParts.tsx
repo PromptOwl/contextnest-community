@@ -204,7 +204,7 @@ export function PriorityMenu({
 
 // ── Due date ────────────────────────────────────────────────────────────────
 
-const DUE_TONES = {
+export const DUE_TONES = {
   overdue: "bg-red-500/15 text-red-700 dark:text-red-300",
   today: "bg-amber-500/15 text-amber-700 dark:text-amber-300",
   soon: "bg-amber-500/10 text-amber-700 dark:text-amber-300",

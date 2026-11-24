@@ -45,6 +45,13 @@ export function inDoneFolder(id: string, doneTags: readonly string[]): boolean {
   return !!leaf && doneTags.some((t) => t.replace(/^#/, "").split(":").pop()?.toLowerCase() === leaf);
 }
 
+/** Is this task done, by the board's rule: a done tag, or a done folder? */
+export function isTaskDone(id: string | undefined, tags: readonly string[], doneTags: readonly string[]): boolean {
+  const bare = (t: string) => t.trim().replace(/^#/, "").toLowerCase();
+  const done = new Set(doneTags.map(bare));
+  return tags.some((t) => done.has(bare(t))) || (!!id && inDoneFolder(id, doneTags));
+}
+
 /** Today as YYYY-MM-DD in the viewer's local zone. */
 export function localToday(now = new Date()): string {
   const y = now.getFullYear();

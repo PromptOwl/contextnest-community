@@ -8,6 +8,7 @@ import {
   isPickedDue,
   matchesAssigneeFilter,
   matchesBlockedFilter,
+  isTaskDone,
   matchesTitleFilter,
   moveNeedsReview,
   openBlockers,
@@ -196,5 +197,14 @@ describe("inDoneFolder", () => {
     expect(inDoneFolder("nodes/projects/doing/x", ["done"])).toBe(false);
     expect(inDoneFolder("nodes/done-later/x", ["done"])).toBe(false);
     expect(inDoneFolder("nodes/done", ["done"])).toBe(false);
+  });
+});
+
+describe("po-1238: isTaskDone, so a finished task is not overdue on its page", () => {
+  it("reads done tags and done folders, as the board does", () => {
+    expect(isTaskDone("nodes/a", ["stage:done"], ["#Stage:Done"])).toBe(true);
+    expect(isTaskDone("nodes/projects/done/a", [], ["done"])).toBe(true);
+    expect(isTaskDone("nodes/a", ["#stage:backlog"], ["done"])).toBe(false);
+    expect(isTaskDone(undefined, [], ["done"])).toBe(false);
   });
 });
