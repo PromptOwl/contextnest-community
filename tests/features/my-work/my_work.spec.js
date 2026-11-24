@@ -1053,6 +1053,7 @@ test.describe('My Work', () => {
       // The caller's own submission is a hand-off, not something to decide.
       await expect(myWork.waitingHeading).toBeVisible();
       await expect(myWork.waitingCount).toHaveText(String(work.waiting.length));
+      await myWork.waitingToggle.click();
       const row = myWork.waitingRow(doc.title);
       await expect(row).toBeVisible();
       await expect(row).toContainText(
