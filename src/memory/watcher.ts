@@ -50,6 +50,7 @@ import { closeRun } from "../workflow/run-service.js";
 import { classifyRunFailure, type JudgeFailure } from "../surfaces/services/judge-failure.js";
 import { getAgent, listAgents, upsertAgent, type MetacognitionAgent } from "../metacognition/store.js";
 import { assertCanManageMetacognition, metacognitionEnabled, NOT_ENABLED, ownerCanRun } from "../metacognition/manage.js";
+import { assertNotManaged, managedAgents } from "../metacognition/managed.js";
 import { createTurn, estimateCostUsd, type Usage } from "../metacognition/model.js";
 import { TOOLS, runTool, defang, attr, proposeEditDraft, proposeNewDraft, type ToolContext } from "../metacognition/tools.js";
 import { McpPool } from "../metacognition/mcp-client.js";
@@ -215,7 +216,9 @@ export async function setChannelWatch(
   } else if (current) {
     agent = current.agent;
   } else {
-    const all = await listAgents(caller.nestId);
+    // A Slack listener never watches a channel, so it is not a candidate.
+    const managed = await managedAgents(caller.nestId);
+    const all = (await listAgents(caller.nestId)).filter((a) => !managed.has(a.node_id));
     if (all.length === 1) agent = all[0];
     else if (all.length === 0) throw new ValidationError("This nest has no metacognition agent yet. Set one up first (PUT /metacognition/:node), then add it to the channel.");
     else throw new ValidationError(`This nest has ${all.length} metacognition agents; pass \`agent\` to say which one watches #${view.name}.`);
@@ -230,6 +233,7 @@ export async function setChannelWatch(
     },
     "watch",
   );
+  if (entry.enabled) await assertNotManaged(caller.nestId, agent.node_id);
   // Its drafts go to reviewers who may not be channel members (C2).
   if (entry.enabled && view.private) throw new ValidationError(`#${view.name} is private; a watcher would copy it into drafts the whole nest's reviewers can read.`);
 
