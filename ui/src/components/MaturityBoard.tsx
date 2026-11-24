@@ -1801,6 +1801,7 @@ function MaturityBoardInner({
       {/* One dialog for every column and lane, on the board and in the list. */}
       {addingIn && (
         <CreateTaskDialog
+          nestId={nestId}
           parentTitle={
             addingIn.parent ? nodes.find((x) => x.id === addingIn.parent)?.title ?? "task" : undefined
           }

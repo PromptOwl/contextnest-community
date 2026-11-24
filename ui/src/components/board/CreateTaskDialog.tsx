@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { MarkdownEditor } from "../MarkdownEditor";
 import { AssigneeMenu, type Person } from "./CardParts";
 import { usePriorityLevels } from "../../lib/priorities";
 import { FolderSelect } from "../FolderSelect";
@@ -51,18 +51,20 @@ export function newTaskPayload(f: NewTask): NewTask | null {
  * The dialog fits its description field, which is what people drag to resize,
  * both ways (po-1205). Pinned at its top left, not centred: a centred box moves
  * away from the pointer at half its speed. The dialog itself does not scroll,
- * so its pickers are never clipped.
+ * so its pickers are never clipped, and carries no transform, so the editor's
+ * fixed menus open where the caret is.
  */
 export const RESIZABLE_DIALOG = [
-  "left-4 top-[6vh] !w-fit min-w-[min(32rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] translate-x-0 translate-y-0",
+  "left-4 top-[6vh] !w-fit min-w-[min(32rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] !transform-none",
   "sm:left-[calc(50vw-16rem)] sm:max-w-[calc(50vw+15rem)]",
   "data-[state=open]:slide-in-from-left-0 data-[state=open]:slide-in-from-top-0 data-[state=closed]:slide-out-to-left-0 data-[state=closed]:slide-out-to-top-0",
 ].join(" ");
 
 /** The description field: full width to start, then as wide and tall as it is dragged. */
-export const RESIZABLE_FIELD = "h-40 min-h-24 max-h-[55vh] resize min-w-full max-w-[calc(100vw-4rem)] sm:max-w-[calc(50vw+11.5rem)]";
+export const RESIZABLE_FIELD = "h-64 min-h-40 max-h-[55vh] resize overflow-auto rounded-md border border-input min-w-full w-0 max-w-[calc(100vw-4rem)] sm:max-w-[calc(50vw+11.5rem)]";
 
 interface Props {
+  nestId: string;
   /** Set when adding a sub-item. */
   parentTitle?: string;
   initial?: { assignee?: string; priority?: string; folder?: string };
@@ -102,7 +104,12 @@ export function CreateTaskDialog({ parentTitle, initial, onSubmit, onClose, ...r
 
   return (
     <Dialog open onOpenChange={(o) => !o && !saving && onClose()}>
-      <DialogContent className={RESIZABLE_DIALOG} data-testid="create-task-dialog">
+      <DialogContent className={RESIZABLE_DIALOG} data-testid="create-task-dialog"
+        // Escape in the description closes an editor menu, not the dialog with the text in it.
+        onEscapeKeyDown={(e) => {
+          if ((e.target as HTMLElement | null)?.closest?.("[data-task-description]")) e.preventDefault();
+        }}
+      >
         {/* w-0 min-w-full: only the description sets the dialog's width. */}
         <DialogHeader className="w-0 min-w-full">
           <DialogTitle>{parentTitle ? `New sub-item of “${parentTitle}”` : "New task"}</DialogTitle>
@@ -123,6 +130,7 @@ export function CreateTaskDialog({ parentTitle, initial, onSubmit, onClose, ...r
 }
 
 export function TaskForm({
+  nestId,
   initial,
   people,
   me,
@@ -158,7 +166,8 @@ export function TaskForm({
       className="min-w-0 space-y-3"
       onSubmit={(e) => {
         e.preventDefault();
-        submit(false);
+        // React bubbles a submit from the editor's own dialogs (link, image).
+        if (e.target === e.currentTarget) submit(false);
       }}
     >
       <Input
@@ -169,14 +178,28 @@ export function TaskForm({
         autoFocus
         disabled={saving}
       />
-      <Textarea
-        value={content}
-        onChange={(e) => setContent(e.target.value)}
-        placeholder="Description (markdown)"
+      {/* The document editor, so formatting and paste work as on the task's page. */}
+      <div
+        role="group"
         aria-label="Description"
-        disabled={saving}
         className={RESIZABLE_FIELD}
-      />
+        data-task-description
+        // Enter in the editor's find/replace fields is not "create the task".
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && (e.target as HTMLElement).tagName === "INPUT") e.preventDefault();
+        }}
+      >
+        <MarkdownEditor
+          content={content}
+          onChange={setContent}
+          editable={!saving}
+          nestId={nestId}
+          placeholder="Description"
+          autofocus={false}
+          compact
+          className="min-h-full rounded-none border-0 shadow-none"
+        />
+      </div>
       <div className="flex flex-wrap items-center gap-4 text-sm">
         <AssigneeMenu
           assignee={assignee}
