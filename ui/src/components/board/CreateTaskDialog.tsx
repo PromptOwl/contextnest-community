@@ -47,6 +47,21 @@ export function newTaskPayload(f: NewTask): NewTask | null {
   };
 }
 
+/**
+ * The dialog fits its description field, which is what people drag to resize,
+ * both ways (po-1205). Pinned at its top left, not centred: a centred box moves
+ * away from the pointer at half its speed. The dialog itself does not scroll,
+ * so its pickers are never clipped.
+ */
+export const RESIZABLE_DIALOG = [
+  "left-4 top-[6vh] !w-fit min-w-[min(32rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] translate-x-0 translate-y-0",
+  "sm:left-[calc(50vw-16rem)] sm:max-w-[calc(50vw+15rem)]",
+  "data-[state=open]:slide-in-from-left-0 data-[state=open]:slide-in-from-top-0 data-[state=closed]:slide-out-to-left-0 data-[state=closed]:slide-out-to-top-0",
+].join(" ");
+
+/** The description field: full width to start, then as wide and tall as it is dragged. */
+export const RESIZABLE_FIELD = "h-40 min-h-24 max-h-[55vh] resize min-w-full max-w-[calc(100vw-4rem)] sm:max-w-[calc(50vw+11.5rem)]";
+
 interface Props {
   /** Set when adding a sub-item. */
   parentTitle?: string;
@@ -87,8 +102,9 @@ export function CreateTaskDialog({ parentTitle, initial, onSubmit, onClose, ...r
 
   return (
     <Dialog open onOpenChange={(o) => !o && !saving && onClose()}>
-      <DialogContent className="sm:max-w-lg" data-testid="create-task-dialog">
-        <DialogHeader>
+      <DialogContent className={RESIZABLE_DIALOG} data-testid="create-task-dialog">
+        {/* w-0 min-w-full: only the description sets the dialog's width. */}
+        <DialogHeader className="w-0 min-w-full">
           <DialogTitle>{parentTitle ? `New sub-item of “${parentTitle}”` : "New task"}</DialogTitle>
         </DialogHeader>
         <TaskForm
@@ -139,7 +155,7 @@ export function TaskForm({
 
   return (
     <form
-      className="space-y-3"
+      className="min-w-0 space-y-3"
       onSubmit={(e) => {
         e.preventDefault();
         submit(false);
@@ -158,8 +174,8 @@ export function TaskForm({
         onChange={(e) => setContent(e.target.value)}
         placeholder="Description (markdown)"
         aria-label="Description"
-        rows={5}
         disabled={saving}
+        className={RESIZABLE_FIELD}
       />
       <div className="flex flex-wrap items-center gap-4 text-sm">
         <AssigneeMenu
@@ -210,7 +226,9 @@ export function TaskForm({
         />
       </div>
       {folders && (
-        <FolderSelect value={folder} onChange={onFolder} folders={folders} disabled={saving} testId="create-task-folder" />
+        <div className="w-0 min-w-full">
+          <FolderSelect value={folder} onChange={onFolder} folders={folders} disabled={saving} testId="create-task-folder" />
+        </div>
       )}
       <DialogFooter>
         <Button type="button" variant="ghost" onClick={onClose} disabled={saving}>

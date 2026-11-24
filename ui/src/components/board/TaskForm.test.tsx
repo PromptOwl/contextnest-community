@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { TaskForm } from "./CreateTaskDialog";
+import { RESIZABLE_DIALOG, TaskForm } from "./CreateTaskDialog";
 
 const noop = () => {};
 const html = (over: Partial<Parameters<typeof TaskForm>[0]> = {}) =>
@@ -15,6 +15,13 @@ describe("TaskForm", () => {
     expect(out).toContain("Create task");
     expect(out).toMatch(/<input[^>]*aria-label="Title"/);
     expect(out).toMatch(/autofocus=""/i);
+  });
+  it("po-1205: the description resizes both ways and the dialog follows its width", () => {
+    const classes = html().match(/<textarea[^>]*class="([^"]*)"/)?.[1].split(" ") ?? [];
+    expect(classes).toContain("resize");
+    expect(classes).toContain("min-w-full");
+    expect(RESIZABLE_DIALOG).toContain("w-fit");
+    expect(RESIZABLE_DIALOG).not.toContain("overflow");
   });
   it("po-1207: shows the folder picker when the folders are known, kept on the folder in hand", () => {
     expect(html({ folders: ["gtm"], folder: "gtm" })).toContain("Gtm");
