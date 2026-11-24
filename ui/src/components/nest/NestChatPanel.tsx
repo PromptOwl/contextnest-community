@@ -1,5 +1,5 @@
 /**
- * Team chat in this nest (PO-1200, AC-C3-19), in the nest's settings: the
+ * Team chat in this nest (PO-1200, AC-C3-19), on the nest's Settings tab: the
  * nest's own switch (owner or admin; the server switch stays the superadmin's
  * under Settings → Features), and the caller's default notification level
  * here. Acts on its own: each change saves at once, not through Save. Hidden
