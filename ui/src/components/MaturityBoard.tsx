@@ -89,6 +89,7 @@ import {
   matchesAssigneeFilter,
   matchesBlockedFilter,
   matchesTitleFilter,
+  sharedBoardTitle,
   moveNeedsReview,
   inDoneFolder,
   openBlockers,
@@ -2170,7 +2171,7 @@ function MaturityBoardInner({
                   title={
                     b.private
                       ? "Private — only you see this board"
-                      : `Shared with everyone on this nest${b.created_by_email ? ` · made by ${b.created_by_email}` : ""}`
+                      : sharedBoardTitle(b.created_by_email, roster?.people)
                   }
                 >
                   {b.private && <Lock className="h-3 w-3" />}

@@ -6,6 +6,7 @@
  * icons, Trello's overdue-red due chip, Jira/ClickUp's avatar quick-filter.
  */
 import { saveOutcome } from "./save-outcome";
+import { displayNameFor } from "./person-name";
 import { ticketOf } from "./ticket";
 import { folderOf, type BoardNode } from "./board-dimensions";
 
@@ -119,6 +120,16 @@ export function matchesBlockedFilter(
   hideBlocked: boolean,
 ): boolean {
   return !hideBlocked || openBlockers(node) === 0;
+}
+
+/** A shared board tab's tooltip. Names its maker by display name; a maker with
+ *  no name on this nest is left out, never shown by address. */
+export function sharedBoardTitle(
+  madeBy: string | null | undefined,
+  people: Array<{ email: string; name?: string | null }> = [],
+): string {
+  const name = madeBy ? displayNameFor(madeBy, people) : "";
+  return `Shared with everyone on this nest${name && !name.includes("@") ? ` · made by ${name}` : ""}`;
 }
 
 /** The filter box, as typed: part of a title or ticket number, any case. A leading "#" means a

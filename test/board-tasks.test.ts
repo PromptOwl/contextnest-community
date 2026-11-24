@@ -10,6 +10,7 @@ import {
   matchesBlockedFilter,
   isTaskDone,
   matchesTitleFilter,
+  sharedBoardTitle,
   moveNeedsReview,
   openBlockers,
   priorityRank,
@@ -212,5 +213,15 @@ describe("po-1238: isTaskDone, so a finished task is not overdue on its page", (
     expect(isTaskDone("nodes/projects/done/a", [], ["done"])).toBe(true);
     expect(isTaskDone("nodes/a", ["#stage:backlog"], ["done"])).toBe(false);
     expect(isTaskDone(undefined, [], ["done"])).toBe(false);
+  });
+});
+
+describe("po-1243: sharedBoardTitle", () => {
+  const people = [{ email: "Ada@acme.dev", name: "Ada L" }, { email: "bob@acme.dev", name: null }];
+  it("names the maker, and never shows an address", () => {
+    expect(sharedBoardTitle("ada@acme.dev", people)).toBe("Shared with everyone on this nest · made by Ada L");
+    for (const who of ["bob@acme.dev", "gone@acme.dev", null]) {
+      expect(sharedBoardTitle(who, people)).toBe("Shared with everyone on this nest");
+    }
   });
 });
