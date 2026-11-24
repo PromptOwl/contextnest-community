@@ -181,6 +181,8 @@ export function columnKeysOf(n: NodeResponse, c: BoardConfig): string[] {
       return [n.status || UNCATEGORIZED];
     case "assignee":
       return [n.assignee ? n.assignee.toLowerCase() : UNCATEGORIZED];
+    case "creator":
+      return [n.author ? n.author.toLowerCase() : UNCATEGORIZED];
     case "priority":
       return [n.priority || UNCATEGORIZED];
     case "field":
@@ -218,6 +220,7 @@ export function columnLabel(key: string, c: BoardConfig): string {
     return key;
   }
   if (key === UNCATEGORIZED) {
+    if (c.dimension === "creator") return "Unknown";
     return c.dimension === "assignee" ? "Unassigned" : c.dimension === "priority" ? "No priority" : "Uncategorized";
   }
   if (c.dimension === "priority") return levelsOf(c).find((p) => p.key === key)?.label ?? key;

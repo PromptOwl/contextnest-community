@@ -34,6 +34,8 @@ export interface BoardNode {
   status: string;
   /** Board fields + timestamps, from the node listing (src/nodes/task-fields.ts). */
   assignee?: string;
+  /** Who created it (email), server-resolved. */
+  author?: string | null;
   assigned_at?: string;
   due?: string;
   priority?: string;
@@ -53,7 +55,12 @@ export interface BoardNode {
   status_since?: string;
 }
 
-export type DimensionKind = "folder" | "status" | "tag" | "assignee" | "priority" | "field";
+export type DimensionKind = "folder" | "status" | "tag" | "assignee" | "priority" | "field" | "creator";
+
+/** Dimensions whose columns are people, keyed by email. */
+export function isPersonDimension(d: DimensionKind): boolean {
+  return d === "assignee" || d === "creator";
+}
 
 /** Field-valued dimensions: a column is a value of a board field, and a drag
  *  between columns sets that field (Linear's group-by-assignee/priority). */
@@ -435,6 +442,8 @@ export function cardColumnKeys(node: BoardNode, config: BoardConfig): string[] {
       return [node.status || UNCATEGORIZED];
     case "assignee":
       return [node.assignee ? node.assignee.toLowerCase() : UNCATEGORIZED];
+    case "creator":
+      return [node.author ? node.author.toLowerCase() : UNCATEGORIZED];
     case "priority":
       return [node.priority || UNCATEGORIZED];
     case "field":
@@ -498,6 +507,7 @@ function shownKeys(
 function uncategorizedLabel(d: DimensionKind, field?: FieldDefinition): string {
   if (d === "field" && field) return fieldKeyLabel(field, UNCATEGORIZED);
   if (d === "assignee") return "Unassigned";
+  if (d === "creator") return "Unknown";
   if (d === "priority") return "No priority";
   return "Uncategorized";
 }
@@ -526,9 +536,9 @@ function labelFor(key: string, config: BoardConfig): string {
  * have no such chip to match, so they keep the capitalize styling.
  */
 export function capitalizeColumnHeader(dimension: DimensionKind): boolean {
-  // Assignee columns are email addresses — capitalizing them misspells them.
+  // Person columns are email addresses — capitalizing them misspells them.
   // Field values are what the admin typed — keep their casing.
-  return dimension !== "tag" && dimension !== "assignee" && dimension !== "field";
+  return dimension !== "tag" && !isPersonDimension(dimension) && dimension !== "field";
 }
 
 function titleFor(key: string, config: BoardConfig): string {
@@ -773,6 +783,8 @@ export function planMove(
         reason:
           "Status changes go through the review workflow, not the board — open the doc and submit for review.",
       };
+    case "creator":
+      return { kind: "unsupported", reason: "Who created a document doesn't change." };
     case "field": {
       const def = config.field;
       if (!def) return { kind: "unsupported", reason: "This field no longer exists." };
@@ -831,6 +843,7 @@ export function newCardPlacement(
       return { tags: [withHash(ns ? `${ns}:${columnKey}` : columnKey)] };
     }
     case "status":
+    case "creator":
       return null;
   }
 }

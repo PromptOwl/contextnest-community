@@ -66,6 +66,7 @@ import {
   newCardPlacement,
   planMove,
   creatingCard,
+  isPersonDimension,
   isCreatingCard,
   optimisticMove,
   resolveConfig,
@@ -194,7 +195,7 @@ function loadConfig(nestId: string): BoardSettings {
   return { dimension: "folder", tagNamespace: "", layouts: {} };
 }
 
-const DIMENSION_KINDS: readonly string[] = ["folder", "status", "tag", "assignee", "priority", "field"];
+const DIMENSION_KINDS: readonly string[] = ["folder", "status", "tag", "assignee", "priority", "field", "creator"];
 const SWIMLANE_KINDS: readonly string[] = ["assignee", "priority", "parent", "field"];
 
 /** The custom-field parts of a stored board config, shape-checked. */
@@ -471,6 +472,7 @@ function MaturityBoardInner({
           tags: Array.isArray(n.tags) ? n.tags : [],
           status: n.status ?? "",
           assignee: n.assignee,
+          author: n.author,
           assigned_at: n.assigned_at,
           due: n.due,
           priority: n.priority,
@@ -973,7 +975,7 @@ function MaturityBoardInner({
         // the column and filters already put on the card.
         if (payload.folder === "") delete payload.folder; // the nest root
         if (surfaceTag) payload.tags = [...new Set([...(payload.tags ?? []), `#${surfaceTag}`])];
-        const shown = (card = creatingCard(payload));
+        const shown = (card = { ...creatingCard(payload), author: me });
         setCreating((cs) => [...cs, shown]);
         const res = await api.createNode(nestId, payload as any);
         qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
@@ -1435,7 +1437,9 @@ function MaturityBoardInner({
           ? "Unassigned"
           : effectiveConfig.dimension === "priority"
             ? "No priority"
-            : "Uncategorized"
+            : effectiveConfig.dimension === "creator"
+              ? "Unknown"
+              : "Uncategorized"
         : key),
     [columnLabels, effectiveConfig.dimension],
   );
@@ -1529,7 +1533,7 @@ function MaturityBoardInner({
         title={col.title}
       >
         <span className="flex min-w-0 items-center gap-1.5">
-          {effectiveConfig.dimension === "assignee" && col.key !== UNCATEGORIZED && (
+          {isPersonDimension(effectiveConfig.dimension) && col.key !== UNCATEGORIZED && (
             <Avatar email={col.key} size="sm" />
           )}
           {effectiveConfig.dimension === "priority" && (
@@ -1549,7 +1553,7 @@ function MaturityBoardInner({
               capitalizeColumnHeader(effectiveConfig.dimension) ? "capitalize" : ""
             } ${col.key === UNCATEGORIZED ? "text-muted-foreground" : ""}`}
           >
-            {effectiveConfig.dimension === "assignee" && col.key !== UNCATEGORIZED
+            {isPersonDimension(effectiveConfig.dimension) && col.key !== UNCATEGORIZED
               ? personLabel(col.key)
               : effectiveConfig.field?.type === "user" && col.key !== UNCATEGORIZED
                 ? personLabel(col.key)
@@ -1900,6 +1904,7 @@ function MaturityBoardInner({
             <option value="tag">Tag</option>
             <option value="assignee">Assignee</option>
             <option value="priority">Priority</option>
+            <option value="creator">Created by</option>
             {groupableFields.length > 0 && (
               <optgroup label="Fields">
                 {groupableFields.map((d) => (
@@ -2285,6 +2290,14 @@ function MaturityBoardInner({
                   ? " — drag a card across to change it. Every change is a versioned edit."
                   : "."
                 : " — this field no longer exists; pick another grouping."}
+            </li>
+            <li>Drag a card up or down to rank it; pick Lanes to split rows.</li>
+          </>
+        ) : config.dimension === "creator" ? (
+          <>
+            <li>
+              One column per person, for the documents they{" "}
+              <span className="font-medium text-foreground">created</span>. A card cannot move to another person.
             </li>
             <li>Drag a card up or down to rank it; pick Lanes to split rows.</li>
           </>

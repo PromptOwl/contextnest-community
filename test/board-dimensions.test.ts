@@ -10,6 +10,7 @@ import {
   groupByColumn,
   migrateLayout,
   planMove,
+  newCardPlacement,
   creatingCard,
   isCreatingCard,
   optimisticMove,
@@ -762,5 +763,22 @@ describe("po-1227: ticket numbers are not tag columns", () => {
   });
   it("a retag keeps the ticket number", () => {
     expect(planMove(only, "backlog", { dimension: "tag" }, UNCATEGORIZED)).toEqual({ kind: "retag", tags: ["#ticket:qa-2", "#backlog"] });
+  });
+});
+
+describe("po-1220: Created by columns", () => {
+  const config: BoardConfig = { dimension: "creator" };
+  const a = node({ id: "nodes/a", author: "Ada@acme.dev" });
+  const b = node({ id: "nodes/b" });
+  it("groups by the creator, on the board and in the server's board items", () => {
+    expect(buildColumns([a, b], config).map((c) => [c.key, c.label])).toEqual([
+      ["ada@acme.dev", "ada@acme.dev"],
+      [UNCATEGORIZED, "Unknown"],
+    ]);
+    expect(columnKeysOf(a as any, config as any)).toEqual(["ada@acme.dev"]);
+  });
+  it("a card cannot move to another creator, and a task cannot be added to one", () => {
+    expect(planMove(a, "bob@acme.dev", config, "ada@acme.dev").kind).toBe("unsupported");
+    expect(newCardPlacement("ada@acme.dev", config)).toBeNull();
   });
 });
