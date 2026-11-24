@@ -120,7 +120,7 @@ export function useSetupState(): SetupState {
   const [previews, setPreviewsNow] = useState<Record<string, GuardView | "loading">>({});
   const inflight = useRef(new Set<string>());
 
-  const install = useMemo(() => pickInstall(status?.installs ?? []), [status]);
+  const install = useMemo(() => pickInstall(status?.installs ?? [], !!status?.slack_hosted), [status]);
 
   const reload = useCallback(async () => {
     try {
@@ -130,7 +130,7 @@ export function useSetupState(): SetupState {
         listSurfacesBindings().catch(() => [] as SurfacesBinding[]),
         listNests().catch(() => ({ nests: [] as any[] })),
       ]);
-      const inst = pickInstall(st.installs);
+      const inst = pickInstall(st.installs, st.slack_hosted);
       const live = bs.filter((b) => b.install_id === inst?.id && b.status !== "removed");
       const seedChecks = await Promise.all(
         [...new Set(live.map((b) => b.nest_id))].map((n) =>
@@ -522,10 +522,15 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
         m = r.manifest;
         setManifest(m);
         await state.reload();
+      } else if (!m) {
+        // The read on page load failed or hasn't finished: read it again.
+        m = (await getSlackInstall(inst.id)).manifest;
+        setManifest(m);
       }
-      if (m) downloadJson("nest-slack-manifest.json", m);
+      if (!m) throw new Error("This install has no manifest. Reload the page and try again.");
+      downloadJson("nest-slack-manifest.json", m);
     } catch (e) {
-      toast.error(errText(e, "Couldn't start the install."));
+      toast.error(errText(e, "Couldn't download the manifest."));
     } finally {
       setBusy(false);
     }

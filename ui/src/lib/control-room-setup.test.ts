@@ -115,8 +115,19 @@ describe("AC-CR-15: progress comes from facts, so setup resumes where it was lef
 
   it("AC-CR-15: removed bindings don't count; an active install wins over a pending one", () => {
     expect(deriveProgress(facts({ install: install("active"), bindings: [{ nest_id: "n1", status: "removed", conversation_id: "C1" }] })).count).toBe(1);
-    expect(pickInstall([install("pending", "p"), install("active", "a"), { ...install("active", "t"), surface: "teams" }])?.id).toBe("a");
-    expect(pickInstall([install("disconnected", "d")])).toBeNull();
+    expect(pickInstall([install("pending", "p"), install("active", "a"), { ...install("active", "t"), surface: "teams" }], false)?.id).toBe("a");
+    expect(pickInstall([install("disconnected", "d")], false)).toBeNull();
+  });
+
+  it("a pending install counts only in the mode setup is in now, so a leftover from the other mode can't block Download manifest", () => {
+    const hosted = { ...install("pending", "h"), mode: "hosted" as const };
+    const manifest = install("pending", "m");
+    expect(pickInstall([hosted], false)).toBeNull();
+    expect(pickInstall([manifest], true)).toBeNull();
+    expect(pickInstall([hosted, manifest], false)?.id).toBe("m");
+    expect(pickInstall([manifest, hosted], true)?.id).toBe("h");
+    // A connected workspace stays connected whatever the switch says.
+    expect(pickInstall([manifest, { ...hosted, status: "active" }], false)?.id).toBe("h");
   });
 });
 
