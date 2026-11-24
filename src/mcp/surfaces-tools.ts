@@ -31,6 +31,7 @@ import {
   removeBinding,
   resumeBinding,
   updateBinding,
+  NO_REASON_MCP,
 } from "../surfaces/services/binding-service.js";
 import {
   clearAutoMatchBlock,
@@ -428,7 +429,7 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
       }
       case "context_surfaces_binding_delete": {
         const row = await bindingInNest(reqStr(args.binding_id, "binding_id"), ctx);
-        const out = await removeBinding(row.id, ctx.userId);
+        const out = await removeBinding(row.id, ctx.userId, NO_REASON_MCP);
         return { text: `Removed ${row.id}.`, data: out };
       }
       case "context_surfaces_binding_recheck": {
@@ -439,7 +440,7 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
       }
       case "context_surfaces_binding_resume": {
         const row = await bindingInNest(reqStr(args.binding_id, "binding_id"), ctx);
-        const out = await resumeBinding(row.id, ctx.userId);
+        const out = await resumeBinding(row.id, ctx.userId, NO_REASON_MCP);
         return { text: `Resumed ${row.id}.`, data: out };
       }
       case "context_surfaces_links_list": {
@@ -568,7 +569,7 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
       }
       case "context_surfaces_disconnect": {
         await requireOrgAdmin(ctx);
-        const out = await disconnectInstall(reqStr(args.install_id, "install_id"));
+        const out = await disconnectInstall(reqStr(args.install_id, "install_id"), ctx.userId);
         return { text: `Disconnected. ${out.withdrawn} pending proposal item(s) withdrawn. Approved nodes and the commit audit stay.`, data: { disconnected: true, ...out } };
       }
       case "context_surfaces_seed_apply": {

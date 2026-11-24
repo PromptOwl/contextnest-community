@@ -1,5 +1,5 @@
 /**
- * Nest Documents Test Suite — CN-DOC-001 … CN-DOC-023
+ * Nest Documents Test Suite — CN-DOC-001 … CN-DOC-024
  *
  * Page under test: the nest's Documents tab (ui/src/components/nest/DocumentsTab.tsx,
  * bulk bar in ui/src/components/nest/BulkSelectionBar.tsx) — search, the type,
@@ -210,19 +210,20 @@ test.describe('Nest documents', () => {
     const { nest, page } = await ownerNest(primary_user, commonFunction, 'doc-cards', STANDARD);
 
     await page.gotoDocuments(nest.id);
-    await expect(page.listViewButton).toHaveAttribute('aria-pressed', 'true');
+    // The switch is in the header's ⋯ menu (po-1213); in list view it offers grid.
+    expect(await page.viewMode()).toBe('list');
 
     // Cards list every document, folders included, flat.
-    await page.cardViewButton.click();
-    await expect(page.cardViewButton).toHaveAttribute('aria-pressed', 'true');
+    await page.switchView('cards');
+    expect(await page.viewMode()).toBe('cards');
     await expect.poll(async () => sorted(await page.rowIds()), WRITE).toEqual(sorted([ALPHA, BETA, CHARLIE, GAMMA, DELTA, EPSILON]));
     await expect(page.folderHeaders).toHaveCount(0);
 
     await page.gotoDocuments(nest.id);
-    await expect(page.cardViewButton).toHaveAttribute('aria-pressed', 'true');
+    expect(await page.viewMode()).toBe('cards');
 
-    await page.listViewButton.click();
-    await expect(page.listViewButton).toHaveAttribute('aria-pressed', 'true');
+    await page.switchView('list');
+    expect(await page.viewMode()).toBe('list');
     await expect(page.folderHeader('guides')).toBeVisible(WRITE);
   });
 
@@ -541,5 +542,23 @@ test.describe('Nest documents', () => {
     await expect(page.rowCheckboxes).toHaveCount(0);
     await expect.poll(() => page.rowActionTitles('nodes/root-one'), WRITE).toEqual(['Pin this document', 'History']);
     expect(await page.folderActionLabels('guides')).toEqual(['Rules for Guides']);
+  });
+
+  test('CN-DOC-024: Verify that a list row has one pin control, at desktop width and at phone width', async ({
+    primary_user,
+    commonFunction,
+  }) => {
+    const { nest, page } = await ownerNest(primary_user, commonFunction, 'doc-one-pin', ROLES);
+    await page.gotoDocuments(nest.id);
+    await expect(page.row('nodes/root-one')).toBeVisible(WRITE);
+
+    // Desktop: the hover buttons, and no ⋮ menu.
+    const desktop = await page.rowActionTitles('nodes/root-one');
+    expect(desktop.filter((t) => t === 'Pin this document')).toHaveLength(1);
+    expect(desktop).not.toContain('Actions');
+
+    // Phone: the ⋮ menu with the pin beside it, and no hover buttons.
+    await page.page.setViewportSize({ width: 390, height: 844 });
+    await expect.poll(() => page.rowActionTitles('nodes/root-one'), WRITE).toEqual(['Pin this document', 'Actions']);
   });
 });

@@ -13,6 +13,7 @@
  */
 
 import { clearDraft } from "./draft";
+import type { LastEdit } from "./version-author";
 import { streamQueryString, type StreamQuery } from "./doc-stream";
 import type { ClientAttribution } from "./client-attribution";
 import {
@@ -414,8 +415,11 @@ export interface AdminSettings {
   experimental_doc_stream_enabled: boolean;
   /** Experimental document pins (EXPERIMENTAL_DOC_PINS). */
   experimental_doc_pins: boolean;
-  /** Experimental agent team stream channels (EXPERIMENTAL_AGENT_STREAM). */
+  /** Experimental agent team stream channels (EXPERIMENTAL_AGENT_STREAM);
+   *  an alias of `team_chat_enabled` since C2 (either writes both). */
   experimental_agent_stream_enabled: boolean;
+  /** The team chat harness (TEAM_CHAT_ENABLED, PO-1197). */
+  team_chat_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
@@ -1807,6 +1811,9 @@ export async function getNest(nestId: string) {
      *  a team-share member), as opposed to someone who reaches it only through
      *  its visibility or a document share. Channels are for members (PO-1190). */
     member?: boolean;
+    /** Team chat (C2, PO-1197): the switch is on, the nest's own setting is
+     *  on, and the caller is a member. The whole chat UI gates on this. */
+    chat?: boolean;
   }>(`/nests/${nestId}`);
 }
 
@@ -1990,7 +1997,9 @@ export interface NestCensus {
   aiReady?: number;
   authors: string[];
   editedLast7d: number;
-  recent: Array<{ id: string; title: string; type: string; updated_at?: string }>;
+  /** Newest first, capped at 5: the "Recently edited" feed on Documents.
+   *  `last_edit` names the human and agent; absent for a public reader. */
+  recent: Array<{ id: string; title: string; type: string; updated_at?: string; last_edit?: LastEdit }>;
 }
 
 /**
@@ -3057,7 +3066,9 @@ export async function listAnnotations(nestId: string, nodeId: string) {
 export type PostedMention =
   | { name: string; kind: "person"; display_name: string; notified: boolean }
   | { name: string; kind: "agent"; wake: "sent" | "no_webhook" | "skipped" }
-  | { name: string; kind: "nobody" };
+  | { name: string; kind: "nobody" }
+  /** `@channel` / `@here` (C1, PO-1196): how many people it reached. */
+  | { name: "channel" | "here"; kind: "everyone"; reached: number };
 
 export async function createAnnotation(
   nestId: string,
@@ -3137,13 +3148,31 @@ export interface ChannelSummary {
   can_post: boolean;
   /** The one line to show in place of the composer when `can_post` is false. */
   post_refusal: string | null;
+  /** Members-only channel (C2). */
+  private?: boolean;
+  /** The caller is on its member list: creator, joined or invited (C2). */
+  member?: boolean;
+  /** Set when this row is a conversation read as a channel (C2): its kind
+   *  and members, for the header. */
+  conversation?: ConversationView;
 }
 
 /** One `@name` in a message body as the reader sees it (PO-1190). */
 export type ChannelMention =
   | { name: string; kind: "person"; display_name: string }
   | { name: string; kind: "agent"; wakeable: boolean }
-  | { name: string; kind: "nobody" };
+  | { name: string; kind: "nobody" }
+  | { name: "channel" | "here"; kind: "everyone" };
+
+/** One emoji on a message and who put it there (C1, PO-1196). */
+export interface MessageReaction {
+  emoji: string;
+  count: number;
+  /** The reader is among them. */
+  me: boolean;
+  /** The first ten reactors' labels. */
+  by: string[];
+}
 
 export interface ChannelMessage {
   id: string;
@@ -3159,6 +3188,18 @@ export interface ChannelMessage {
   cards?: ArtifactCard[];
   /** Every `@name` in the body, in order (not in code spans). */
   mentions?: ChannelMention[];
+  // ── C1 (PO-1196): what a person can do to one message ──
+  reactions?: MessageReaction[];
+  pinned?: boolean;
+  /** For the reader only. */
+  saved?: boolean;
+  /** The in-app permalink. */
+  url?: string;
+  edited_at?: string | null;
+  /** A tombstone: body "", no reactions, mentions or cards. */
+  deleted?: boolean;
+  deleted_at?: string | null;
+  deleted_by?: "author" | "moderator" | null;
 }
 
 /** A message from the "what is new" read: which thread it belongs to. */
@@ -3288,6 +3329,8 @@ export interface ChannelPromotion {
 
 /** A top-level post. Its `id` is the THREAD id. */
 export interface ChannelPost extends ChannelMessage {
+  /** The opening message's id: what the message routes take (C1). */
+  message_id?: string;
   status: "open" | "resolved";
   reply_count: number;
   last_reply_at: string | null;
@@ -3367,6 +3410,272 @@ export async function getChannelSince(nestId: string, name: string, since: strin
     `${channelPath(nestId, name)}?since=${encodeURIComponent(since)}`,
   );
 }
+
+// ─── Channel messages (C1, PO-1196): reactions, edit, delete, pins, saved, search ──
+
+const messagePath = (nestId: string, name: string, messageId: string) =>
+  `${channelPath(nestId, name)}/messages/${encodeURIComponent(messageId)}`;
+
+export async function reactToMessage(nestId: string, name: string, messageId: string, emoji: string) {
+  return request<{ message_id: string; reactions: MessageReaction[] }>(`${messagePath(nestId, name, messageId)}/reactions`, {
+    method: "POST",
+    body: JSON.stringify({ emoji }),
+  });
+}
+
+export async function unreactToMessage(nestId: string, name: string, messageId: string, emoji: string) {
+  return request<{ message_id: string; reactions: MessageReaction[] }>(`${messagePath(nestId, name, messageId)}/reactions/${encodeURIComponent(emoji)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function editMessage(nestId: string, name: string, messageId: string, body: string) {
+  return request<{ message: ChannelNewMessage; mentions: PostedMention[] }>(messagePath(nestId, name, messageId), {
+    method: "PATCH",
+    body: JSON.stringify({ body }),
+  });
+}
+
+export async function deleteMessage(nestId: string, name: string, messageId: string) {
+  return request<{ message: ChannelNewMessage }>(messagePath(nestId, name, messageId), { method: "DELETE" });
+}
+
+export interface MessageEdit {
+  body: string;
+  replaced_at: string;
+  by: ChannelActor;
+}
+
+export async function getMessageHistory(nestId: string, name: string, messageId: string) {
+  return request<{ message_id: string; edits: MessageEdit[] }>(`${messagePath(nestId, name, messageId)}/history`);
+}
+
+export async function setMessagePinned(nestId: string, name: string, messageId: string, pinned: boolean) {
+  return request<{ message: ChannelNewMessage }>(`${messagePath(nestId, name, messageId)}/pin`, { method: pinned ? "POST" : "DELETE" });
+}
+
+export async function setMessageSaved(nestId: string, name: string, messageId: string, saved: boolean) {
+  return request<{ message: ChannelNewMessage }>(`${messagePath(nestId, name, messageId)}/save`, { method: saved ? "POST" : "DELETE" });
+}
+
+export interface PinnedMessage {
+  message: ChannelNewMessage;
+  pinned_by: string;
+  pinned_by_name: string;
+  pinned_at: string;
+}
+
+export async function listChannelPins(nestId: string, name: string) {
+  return request<{ channel: ChannelSummary; pins: PinnedMessage[] }>(`${channelPath(nestId, name)}/pins`);
+}
+
+export interface SavedItem {
+  type: "saved";
+  nest_id: string;
+  nest_name: string;
+  channel: string;
+  thread_id: string;
+  message: ChannelNewMessage;
+  saved_at: string;
+}
+
+export async function listSavedMessages(opts: { limit?: number; offset?: number } = {}) {
+  const q = new URLSearchParams();
+  if (opts.limit != null) q.set("limit", String(opts.limit));
+  if (opts.offset != null) q.set("offset", String(opts.offset));
+  const qs = q.toString();
+  return request<{ saved: SavedItem[]; pagination: ChannelPagination }>(`/me/saved${qs ? `?${qs}` : ""}`);
+}
+
+export interface MessageSearchHit extends ChannelNewMessage {
+  nest_id: string;
+  nest_name: string;
+  channel: string;
+  message_id: string;
+  excerpt: string;
+  highlights: Array<{ start: number; end: number }>;
+}
+
+export interface MessageSearchResult {
+  results: MessageSearchHit[];
+  pagination: { limit: number; offset: number; has_more: boolean };
+  ceiling: number;
+}
+
+export async function searchChannelMessages(
+  nestId: string | null,
+  opts: { q: string; channel?: string; from?: string; before?: string; after?: string; limit?: number; offset?: number },
+) {
+  const q = new URLSearchParams({ q: opts.q });
+  if (opts.channel) q.set("channel", opts.channel);
+  if (opts.from) q.set("from", opts.from);
+  if (opts.before) q.set("before", opts.before);
+  if (opts.after) q.set("after", opts.after);
+  if (opts.limit != null) q.set("limit", String(opts.limit));
+  if (opts.offset != null) q.set("offset", String(opts.offset));
+  const path = nestId ? `/nests/${nestId}/channels/search` : "/me/chat/search";
+  return request<MessageSearchResult>(`${path}?${q.toString()}`);
+}
+
+/** A message by id alone (a permalink without its channel). */
+export async function lookupMessage(nestId: string, messageId: string) {
+  return request<{ channel: ChannelSummary; thread_id: string; reply: boolean; message: ChannelNewMessage }>(
+    `/nests/${nestId}/messages/${encodeURIComponent(messageId)}`,
+  );
+}
+
+// ─── Team chat C2 (PO-1197): conversations, membership, preferences, presence, live ──
+
+export type ChatMember =
+  | { kind: "person"; email: string; name: string; added_at: string }
+  | { kind: "agent"; handle: string; added_at: string };
+
+export interface ConversationView {
+  /** A NODE id: "nodes/conversations/<uuid>". */
+  id: string;
+  type: "conversation";
+  kind: "dm" | "group";
+  /** The OTHER members' names, for this caller. */
+  title: string;
+  members: ChatMember[];
+  created_by: string;
+  created_at: string;
+  post_count: number;
+  last_post_at: string | null;
+  last_activity_at: string | null;
+  unread: number;
+  can_post: boolean;
+  post_refusal: string | null;
+}
+
+const conversationPath = (nestId: string, uuid: string) => `/nests/${nestId}/conversations/${encodeURIComponent(uuid)}`;
+
+export async function listConversations(nestId: string) {
+  return request<{ conversations: ConversationView[] }>(`/nests/${nestId}/conversations`);
+}
+
+/** Start a conversation, or find the one with exactly these members. */
+export async function createConversation(nestId: string, members: string[]) {
+  return request<{ conversation: ConversationView; created: boolean }>(`/nests/${nestId}/conversations`, {
+    method: "POST",
+    body: JSON.stringify({ members }),
+  });
+}
+
+export async function getConversationTimeline(nestId: string, uuid: string, opts: { limit?: number; offset?: number } = {}) {
+  const q = new URLSearchParams();
+  if (opts.limit != null) q.set("limit", String(opts.limit));
+  if (opts.offset != null) q.set("offset", String(opts.offset));
+  const qs = q.toString();
+  return request<{ conversation: ConversationView; posts: ChannelPost[]; pagination: ChannelPagination; next_since?: string }>(`${conversationPath(nestId, uuid)}${qs ? `?${qs}` : ""}`);
+}
+
+export async function getConversationThread(nestId: string, uuid: string, threadId: string) {
+  return request<{ conversation: ConversationView; thread: { post: ChannelPost; replies: ChannelMessage[] } }>(`${conversationPath(nestId, uuid)}?thread=${encodeURIComponent(threadId)}`);
+}
+
+export async function getConversationSince(nestId: string, uuid: string, since: string) {
+  return request<{ conversation: ConversationView; messages: ChannelNewMessage[]; has_more: boolean; next_since: string }>(`${conversationPath(nestId, uuid)}?since=${encodeURIComponent(since)}`);
+}
+
+export async function markConversationRead(nestId: string, uuid: string) {
+  return request<{ conversation: ConversationView }>(`${conversationPath(nestId, uuid)}/read`, { method: "POST", body: "{}" });
+}
+
+export async function leaveConversation(nestId: string, uuid: string) {
+  return request<{ left: true; conversation: ConversationView }>(`${conversationPath(nestId, uuid)}/leave`, { method: "POST", body: "{}" });
+}
+
+export async function addConversationMember(nestId: string, uuid: string, member: string) {
+  return request<{ conversation: ConversationView }>(`${conversationPath(nestId, uuid)}/members`, { method: "POST", body: JSON.stringify({ member }) });
+}
+
+export interface ChannelMembers {
+  channel: ChannelSummary;
+  private: boolean;
+  members: ChatMember[];
+}
+
+export async function listChannelMembers(nestId: string, name: string) {
+  return request<ChannelMembers>(`${channelPath(nestId, name)}/members`);
+}
+
+export async function inviteChannelMember(nestId: string, name: string, member: string) {
+  return request<ChannelMembers>(`${channelPath(nestId, name)}/members`, { method: "POST", body: JSON.stringify({ member }) });
+}
+
+export async function joinChannel(nestId: string, name: string) {
+  return request<{ channel: ChannelSummary }>(`${channelPath(nestId, name)}/join`, { method: "POST", body: "{}" });
+}
+
+export async function leaveChannel(nestId: string, name: string) {
+  return request<{ left: true; channel: ChannelSummary }>(`${channelPath(nestId, name)}/leave`, { method: "POST", body: "{}" });
+}
+
+export async function setChannelPrivate(nestId: string, name: string, isPrivate: boolean) {
+  return request<{ channel: ChannelSummary }>(`${channelPath(nestId, name)}/private`, { method: "POST", body: JSON.stringify({ private: isPrivate }) });
+}
+
+export type ChatNotifyLevel = "all" | "mentions" | "none";
+
+export interface ChatPreferences {
+  default: ChatNotifyLevel;
+  nests: Array<{ nest_id: string; level: ChatNotifyLevel; conversations: Array<{ conversation: string; level: ChatNotifyLevel }> }>;
+}
+
+export async function getChatPreferences() {
+  return request<ChatPreferences>(`/me/chat/preferences`);
+}
+
+export async function setChatPreference(input: { nest_id: string; conversation?: string; level: ChatNotifyLevel }) {
+  return request<{ preference: { nest_id: string; conversation: string | null; level: ChatNotifyLevel } }>(`/me/chat/preferences`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export interface ChatPresence {
+  email: string;
+  name: string;
+  agent: string | null;
+  label: string;
+  status: string | null;
+  last_seen: string;
+}
+
+export async function heartbeatPresence(nestId: string, status?: string) {
+  return request<{ ok: true; expires_in: number }>(`/nests/${nestId}/chat/presence`, { method: "POST", body: JSON.stringify(status ? { status } : {}) });
+}
+
+export async function getPresence(nestId: string) {
+  return request<{ active: ChatPresence[]; expires_in: number }>(`/nests/${nestId}/chat/presence`);
+}
+
+export async function sendTyping(nestId: string, conversation: string) {
+  return request<{ ok: true }>(`/nests/${nestId}/chat/typing`, { method: "POST", body: JSON.stringify({ conversation }) });
+}
+
+export interface ChatUnread {
+  total: number;
+  mentions: number;
+  nests: Array<{ nest_id: string; nest_name: string; unread: number; mentions: number; channels: Array<{ id: string; name: string; unread: number }>; conversations: Array<{ id: string; unread: number }> }>;
+}
+
+export async function getChatUnread() {
+  return request<ChatUnread>(`/me/chat/unread`);
+}
+
+/** The nest's own chat switch (owner/admin). */
+export async function getChatSettings(nestId: string) {
+  return request<{ chat: boolean }>(`/nests/${nestId}/chat/settings`);
+}
+
+export async function setChatSettings(nestId: string, chat: boolean) {
+  return request<{ chat: boolean }>(`/nests/${nestId}/chat/settings`, { method: "PATCH", body: JSON.stringify({ chat }) });
+}
+
+/** The live event stream's address (cookie auth; `fetch` with text/event-stream). */
+export const chatEventsUrl = (nestId: string) => `${API_BASE}/nests/${nestId}/chat/events`;
 
 /** Mark the channel read for the caller as of now (`unread` comes back 0). */
 export async function markChannelRead(nestId: string, name: string) {
@@ -4003,6 +4312,50 @@ export async function getNestGraph(nestId: string) {
   return request<NestGraph>(`/nests/${nestId}/graph`);
 }
 
+// ─── Context pull log (po-1252) — the Graph view's replay ────────────────
+
+export interface PullStep {
+  seq: number;
+  nodeId: string;
+  title: string | null;
+  version: number | null;
+  /** Links from a match (0 = matched); null where the walk isn't recorded. */
+  hop: number | null;
+  via: string | null;
+  bytes: number | null;
+}
+
+export interface ContextPull {
+  id: string;
+  at: string;
+  tool: string | null;
+  surface: "api" | "mcp";
+  action: "read" | "retrieve";
+  /** Null when this caller may not see who pulled. */
+  actor: string | null;
+  agent: string | null;
+  documents: number;
+  bytes: number | null;
+  maxHop: number | null;
+  steps: PullStep[];
+}
+
+export interface PullPage {
+  pulls: ContextPull[];
+  hasMore: boolean;
+  nextBefore: string | null;
+  accessLogEnabled: boolean;
+  identities: boolean;
+}
+
+export async function getPulls(nestId: string, opts: { limit?: number; before?: string } = {}) {
+  const q = new URLSearchParams();
+  if (opts.limit) q.set("limit", String(opts.limit));
+  if (opts.before) q.set("before", opts.before);
+  const qs = q.toString();
+  return request<PullPage>(`/nests/${nestId}/pulls${qs ? `?${qs}` : ""}`);
+}
+
 // ─── My Work — cross-nest inbox ──────────────────────────────────────────
 
 export interface WorkItem {
@@ -4074,9 +4427,10 @@ export interface AssignedItem {
  */
 export interface MentionItem {
   type: "mention";
-  /** "channel" opens the channel timeline at the thread; "document" opens
-   *  the document with the comment thread focused. */
-  kind: "channel" | "document";
+  /** "channel" opens the channel timeline at the thread; "conversation" (C2)
+   *  opens the direct or group message (`node_id` is its id); "document"
+   *  opens the document with the comment thread focused. */
+  kind: "channel" | "conversation" | "document";
   nest_id: string;
   nest_name: string;
   node_id: string;
@@ -4128,6 +4482,14 @@ export async function getMyWork(opts?: { limit?: number; offset?: number; mentio
     /** The mentions' own paging; `total` is every open mention. */
     mentions_pagination?: WorkPagination;
   }>(`/me/work${qs ? `?${qs}` : ""}`);
+}
+
+/** Only my open mentions (the chat sidebar's section and its badge), one
+ *  cheap read: `GET /me/work?sections=mentions` (PO-1200). */
+export async function getMyMentions(opts?: { limit?: number }) {
+  const q = new URLSearchParams({ sections: "mentions" });
+  if (opts?.limit != null) q.set("limit", String(opts.limit));
+  return request<{ mentions?: MentionItem[]; mentions_pagination?: WorkPagination }>(`/me/work?${q.toString()}`);
 }
 
 /** A document you left unsubmitted (or that came back rejected). */
@@ -5208,6 +5570,14 @@ export interface SurfacesStatus {
   org_name: string | null;
   slack_hosted: boolean;
   disclosure: string;
+  /** po-1444: server admins only. What Slack setup needs from this server. */
+  readiness?: {
+    /** null when Slack can reach the public base URL. */
+    public_url: { problem: string; steps: string[] } | null;
+    redirect_url: string | null;
+    buffer_key: boolean;
+    model_key: boolean;
+  };
 }
 
 export interface SurfacesBinding {
@@ -5217,6 +5587,8 @@ export interface SurfacesBinding {
   conversation_id: string;
   conversation_name?: string | null;
   status: "active" | "paused_guard" | "paused_by_member" | "removed";
+  /** A nest admin paused it on purpose (po-1437). */
+  paused_by_admin?: boolean;
   [k: string]: unknown;
 }
 
@@ -5241,6 +5613,20 @@ export interface SurfacesBindingPreview {
   is_ext_shared: boolean | null;
   ext_capture_enabled: boolean;
   disclosure: string;
+  /** po-1432: names for the preview caller only (absent on older servers). */
+  people?: {
+    /** `not_linked` (po-1467): a channel member has their email but the link was refused; `match_reason` says why. */
+    absent_readers: Array<{
+      user_id: string | null;
+      name: string | null;
+      email: string | null;
+      reason: "not_in_channel" | "no_slack_link" | "no_account" | "not_linked";
+      match_reason?: string | null;
+    }>;
+    /** `slack_email`: the confirmed email Slack has, for a member with no account match (po-1445). */
+    members_not_readers: Array<{ surface_user_id: string; name: string | null; community_user_id: string | null; email: string | null; slack_email?: string | null }>;
+    universe_cause: "public" | "link" | "shared_deployment" | null;
+  };
 }
 
 export interface SurfacesChannel {
@@ -5249,7 +5635,7 @@ export interface SurfacesChannel {
   is_private: boolean;
   is_ext_shared: boolean;
   num_members: number | null;
-  binding: { id: string; nest_id: string; status: string } | null;
+  binding: { id: string; nest_id: string; status: string; paused_by_admin?: boolean } | null;
 }
 
 export interface SurfacesSeedRef {
@@ -5300,6 +5686,9 @@ export const putSlackCredentials = (id: string, creds: { client_id?: string; cli
     method: "PUT",
     body: JSON.stringify(creds),
   });
+/** Admin disconnect: revokes the token, drops bindings; approved nodes and the audit stay. */
+export const disconnectSurfacesInstall = (id: string) =>
+  request<{ disconnected: boolean; withdrawn: number; told?: number; kept: string[] }>(`/surfaces/installs/${encodeURIComponent(id)}`, { method: "DELETE" });
 /** Browser navigations (the server answers with a redirect to Slack). */
 export const slackOAuthStartUrl = (installId: string) => `/surfaces/slack/installs/${encodeURIComponent(installId)}/oauth/start`;
 export const slackHostedOAuthStartUrl = (homeNestId: string) => `/surfaces/slack/hosted/oauth/start?home_nest_id=${encodeURIComponent(homeNestId)}`;
@@ -5307,7 +5696,41 @@ export const listSlackChannels = (installId: string) =>
   request<{ channels: SurfacesChannel[]; truncated: boolean }>(`/surfaces/slack/installs/${encodeURIComponent(installId)}/channels`);
 export const previewSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
   request<SurfacesBindingPreview>("/surfaces/bindings/preview", surfacesJson(b));
-export const createSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
+/** po-1437: manage an existing channel → nest binding (nest owner/admin). */
+// Pause, resume and remove need a reason (3–500 characters); it goes on the binding's history.
+const bindingAction = (id: string, action: "pause" | "resume", reason: string) =>
+  request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}/${action}`, surfacesJson({ reason }));
+export const pauseSurfacesBinding = (id: string, reason: string) => bindingAction(id, "pause", reason);
+export const resumeSurfacesBinding = (id: string, reason: string) => bindingAction(id, "resume", reason);
+/** `movedToNestId`: the nest the channel is moving to; the server looks up its name for the history. */
+export const removeSurfacesBinding = (id: string, reason: string, movedToNestId?: string) =>
+  request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    body: JSON.stringify({ reason, ...(movedToNestId ? { moved_to_nest_id: movedToNestId } : {}) }),
+  });
+export interface SurfacesBindingHistoryEntry {
+  action: "started" | "paused" | "resumed" | "removed" | "moved";
+  reason: string | null;
+  at: string;
+  /** null = Nest itself (a reader check, a member's /nest leave, a disconnect). */
+  by: { user_id: string; email: string | null; name: string | null } | null;
+}
+export const getSurfacesBindingHistory = (id: string) =>
+  request<{ history: SurfacesBindingHistoryEntry[] }>(`/surfaces/bindings/${encodeURIComponent(id)}/history`).then((r) => r.history);
+/** po-1446: counts only, over `days`. `skipped` is keyed by the gate's reason (too_short, bot_or_system, …). */
+export interface SurfacesBindingActivity {
+  days: number;
+  since: string;
+  received: number;
+  buffered: number;
+  skipped: Record<string, number>;
+  waiting: number;
+  judged: { proposed: number; nothing_kept: number; failed: number };
+  cards: { posted: number; queued: number; held: number };
+}
+export const getSurfacesBindingActivity = (id: string) =>
+  request<SurfacesBindingActivity>(`/surfaces/bindings/${encodeURIComponent(id)}/activity`);
+export const createSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean; reason?: string }) =>
   request<{ binding: SurfacesBinding; notice?: "posted" | "already_posted" | "not_needed" | "failed" }>("/surfaces/bindings", surfacesJson(b));
 export const listSurfacesSeeds = (nestId: string) =>
   request<{ seeds: SurfacesSeedRef[] }>(`/surfaces/seeds?nest_id=${encodeURIComponent(nestId)}`).then((r) => r.seeds);

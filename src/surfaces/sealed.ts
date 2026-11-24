@@ -24,7 +24,21 @@ export interface SealedNest {
 const UNKNOWN: SealedNest = { ownerId: "\u0000unknown", ownerEmail: "\u0000unknown" };
 
 /** Tests only. */
-export const sealedTestHooks: { fail?: boolean } = {};
+export const sealedTestHooks: { fail?: boolean; failBound?: boolean } = {};
+
+/**
+ * Is this nest bound to a Surfaces conversation? Its outbound notifications
+ * then carry no content (po-1431). Fails CLOSED: an error says bound.
+ */
+export async function boundNest(nestId: string): Promise<boolean> {
+  try {
+    if (sealedTestHooks.failBound) throw new Error("injected bound lookup failure");
+    return !!(await getDb().get("SELECT 1 AS x FROM surface_bindings WHERE nest_id = ? AND status <> 'removed' LIMIT 1", [nestId]));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return !/no such table:\s*surface_bindings\b|relation "surface_bindings" does not exist/i.test(msg);
+  }
+}
 
 export async function sealedNest(nestId: string): Promise<SealedNest | null> {
   try {

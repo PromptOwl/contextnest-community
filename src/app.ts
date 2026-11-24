@@ -789,6 +789,10 @@ export function createApp(): Hono<AuthEnv> {
       // render. Mirrors the server-side route gate so UI and API agree:
       // flag off → the plane's routes 404 AND its UI stays hidden.
       workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+      // The Graph view's context pull replay (po-1252): GET /nests/:id/pulls
+      // and MCP context_pull_log. Presence tells the e2e suite this server
+      // ships it.
+      pull_replay: true,
       // Import teams from PromptOwl (default OFF). Off → /teams/promptowl 404s
       // and the UI hides the PromptOwl Teams panel.
       promptowl_teams_enabled: config.PROMPTOWL_TEAMS_ENABLED,
@@ -3909,7 +3913,7 @@ export function createApp(): Hono<AuthEnv> {
     if (types?.some((t) => !(ACTIVITY_TYPES as readonly string[]).includes(t))) {
       throw new ValidationError(`type must be one of: ${ACTIVITY_TYPES.join(", ")}`);
     }
-    await flushAccessLog();
+    await flushAccessLog(nestId);
     const page = await getScopedActivity({
       nestId,
       scope,

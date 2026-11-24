@@ -6,7 +6,8 @@
  *
  * Conventions
  * -----------
- * - The primary account must be a server admin or own/administer a nest.
+ * - The primary account must be a server admin: the Control room is for
+ *   superadmins only (po-1406, Misha 2026-11-18).
  * - CN-CR-008 (AC-CR-03) reads the REAL server: the tiles must equal the
  *   Surfaces read models for the same range. It skips while the server has no
  *   listener activity in the last 14 days (seed one, or run it on staging).

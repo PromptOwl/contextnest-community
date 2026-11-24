@@ -4,10 +4,10 @@ import type { PageMeta } from "../../../lib/pages";
 /**
  * Control room (po-1186): what agents are doing, how the nest fills up, and
  * the Slack setup. A top-level page, not a Settings tab, while Surfaces is on.
- * Server admins see every nest; nest owners and admins see the nests they
- * administer (decision 3, 2026-11-09; the ledger routes narrow themselves).
- * Installing stays server-admin-only (the routes enforce it; the page hides
- * the Setup tab from everyone else).
+ * Superadmins only (Misha, 2026-11-18), replacing the 2026-11-09 owners/admins
+ * rule (po-1186 decision 3): since first-run onboarding every user owns a
+ * nest, so that rule showed it to everyone. Never in open mode, where everyone
+ * is "admin". The page-only REST reads enforce the same (po-1406).
  */
 export const meta: PageMeta = {
   path: "/control-room",
@@ -16,5 +16,5 @@ export const meta: PageMeta = {
   order: 13,
   // A top-level page, so it stays in the rail with the other work pages.
   group: "work",
-  visible: ({ isAdmin, surfacesEnabled, administersNest }) => !!surfacesEnabled && (isAdmin || !!administersNest),
+  visible: ({ isSuperadmin, surfacesEnabled }) => !!surfacesEnabled && !!isSuperadmin,
 };

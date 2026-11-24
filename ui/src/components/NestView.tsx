@@ -21,7 +21,7 @@ import {
   Pencil, Trash2, Globe, Building2, FolderInput, Users,
   FileStack, FolderPlus, X, ListChecks,
   Activity, BookOpen, Archive, Eye, Palette, History,
-  KeyRound,
+  KeyRound, LayoutGrid, List as ListIcon, SlidersHorizontal,
 } from "lucide-react";
 import { RequestAccessDialog } from "./RequestAccessDialog";
 import type { AccessOffer } from "../lib/access-requests";
@@ -53,7 +53,8 @@ import {
 import { foldersCoveredBy } from "../lib/reader";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
-import { FolderDeleteDialog, type FolderDeleteTarget } from "./nest/FolderDeleteDialog";
+import { DocumentsHome, EmptyNest } from "./nest/DocumentsHome";
+import { DEFAULT_NEST_TAB, nestTabOpening, nestViewMenuItems } from "../lib/nest-tabs";
 // Each tab is its own chunk, loaded when first opened.
 const ExternalEditsTab = lazyChunk(() => import("./nest/ExternalEditsTab").then((m) => ({ default: m.ExternalEditsTab })));
 const FieldsTab = lazyChunk(() => import("./nest/FieldsTab").then((m) => ({ default: m.FieldsTab })));
@@ -64,7 +65,6 @@ const InstructionsTab = lazyChunk(() =>
 const StewardsTab = lazyChunk(() => import("./nest/StewardsTab").then((m) => ({ default: m.StewardsTab })));
 const CollaboratorsTab = lazyChunk(() => import("./nest/CollaboratorsTab").then((m) => ({ default: m.CollaboratorsTab })));
 const ReviewTab = lazyChunk(() => import("./nest/ReviewTab").then((m) => ({ default: m.ReviewTab })));
-const OverviewTab = lazyChunk(() => import("./nest/OverviewTab").then((m) => ({ default: m.OverviewTab })));
 const DocumentsTab = lazyChunk(() => import("./nest/DocumentsTab").then((m) => ({ default: m.DocumentsTab })));
 import { useFeedComments } from "./nest/feed-query";
 import { Button } from "@/components/ui/button";
@@ -463,23 +463,49 @@ export function NestView({
   const [folderFilter, setFolderFilter] = useState<string | null>(
     initialFolder ?? null,
   );
-  // A folder breadcrumb or tag chip click arrives pre-scoped, and both filtered
-  // lists live on Documents — Overview would hide the scope entirely.
-  const [activeTab, setActiveTabState] = useState(
-    initialTab ??
-    (initialFolder || initialTags?.length ? "documents" : "overview"),
-  );
-  // Wrapper so every tab change — the tab strip, and the Overview folder
-  // clicks that jump to Documents — mirrors into ?tab= via App.
+  // Documents is the nest's one home (po-1213): Overview merged into it, and
+  // Fields moved to the header's ⋯ menu, where it opens as a dialog over
+  // Documents — so an old ?tab=fields link opens that dialog.
+  const [activeTab, setActiveTabState] = useState(() => nestTabOpening(initialTab).tab);
+  const [fieldsOpen, setFieldsOpen] = useState(() => nestTabOpening(initialTab).fieldsOpen);
+  // Wrapper so every tab change mirrors into ?tab= via App.
   const setActiveTab = (tab: string) => {
+    if (tab === "fields") {
+      setFieldsOpen(true);
+      return;
+    }
     setActiveTabState(tab);
     if (tab !== "review" && openReviewId) setOpenReviewId(null);
     onTabChange?.(tab);
   };
   // Follow tab changes made outside the tab strip (sidebar, breadcrumb, back/forward).
   useEffect(() => {
-    if (initialTab) setActiveTabState(initialTab);
+    if (!initialTab) return;
+    const opening = nestTabOpening(initialTab);
+    setActiveTabState(opening.tab);
+    if (opening.fieldsOpen) {
+      // Open the dialog over Documents, and put the URL and breadcrumb back
+      // on Documents so closing it leaves no stale ?tab=fields.
+      setFieldsOpen(true);
+      onTabChange?.(opening.tab);
+    }
   }, [initialTab]);
+  // List or grid for Documents, persisted per browser (a reading preference,
+  // not a nest setting). The switch is in the ⋯ menu.
+  const [viewMode, setViewMode] = useState<"list" | "cards">(() => {
+    try {
+      return localStorage.getItem("nest:viewMode") === "cards" ? "cards" : "list";
+    } catch {
+      return "list";
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("nest:viewMode", viewMode);
+    } catch {
+      /* storage blocked — the choice just doesn't persist */
+    }
+  }, [viewMode]);
   // A change opened from elsewhere while this nest is already on screen.
   useEffect(() => {
     if (initialReview) setOpenReviewId(initialReview);
@@ -578,12 +604,6 @@ export function NestView({
     ]);
   }, [fetchLevel, fetchCensus]);
 
-
-  const openFolderInDocuments = (folder: string) => {
-    // "Root" is the loose top-level bucket — its "View all" is the unscoped list.
-    setFolderFilter(folder && folder !== "Root" ? folder : null);
-    setActiveTab("documents");
-  };
 
   // Open a folder (and load its level) without toggling — drag-over uses it.
   const expandFolder = (path: string) => {
@@ -734,16 +754,17 @@ export function NestView({
   );
 
 
-  // Human-readable chips for every active filter, each with its own clear.
-  // Quick-access strip; shown on the Overview tab as recently-edited rows.
-  // Nest-wide on purpose — the Overview tab has no document filter of its
-  // own, so this reflects the whole nest, unlike documentsRecentlyEdited above.
+  // The "Recently edited" feed on Documents: nest-wide, newest first, each
+  // item with its last editor (census, capped server-side).
   const recentlyEdited = census?.recent ?? [];
 
-  // Genuine, non-capped metric for the Overview stat tile: how many documents
-  // were edited in the last 7 days across the whole nest. The recentlyEdited
-  // strip above is sliced to 3 for display, so its length is not a real count.
+  // Genuine, non-capped count for the summary line: documents edited in the
+  // last 7 days across the whole nest. The feed is capped, so its length is
+  // not a real count.
   const recentlyEditedCount = census?.editedLast7d ?? 0;
+  // Roster for display names on the Recently edited feed — the same cached
+  // read DocumentsTab makes for its rows, so no second request.
+  const { data: roster } = useQuery({ ...reads.mentionable(nestId), enabled: !!currentEmail });
 
   // myStewards (caller's own scoped rows) comes from GET /nests/:id, so
   // non-admin reviewers/editors keep per-node affordances without reading the
@@ -899,9 +920,8 @@ export function NestView({
   // A shared ?tab= link can name a tab this viewer doesn't get (Stewards on a
   // nest they only read, Review Queue while read-only). Radix would render an
   // empty content area against a value with no trigger, so fall back to
-  // overview once the permission flags have resolved.
+  // Documents once the permission flags have resolved.
   const tabVisible: Record<string, boolean> = {
-    overview: true,
     documents: true,
     instructions: !grantOnly,
     review: showReviewTab && !isReadOnly,
@@ -914,7 +934,7 @@ export function NestView({
     stream: docStreamEnabled && !isReaderView,
   };
   useEffect(() => {
-    if (!initialLoad && !tabVisible[activeTab]) setActiveTab("overview");
+    if (!initialLoad && !tabVisible[activeTab]) setActiveTab(DEFAULT_NEST_TAB);
   }, [initialLoad, activeTab, tabVisible[activeTab]]);
   // Deep link from a document: open settings only after the first load, so the
   // dialog never seeds itself from the pre-load defaults (stewardship "off").
@@ -924,22 +944,6 @@ export function NestView({
     settingsOpenedRef.current = true;
     if (!isReadOnly && canManageGovernance) setShowSettings(true);
   }, [initialSettings, initialLoad, isReadOnly, canManageGovernance]);
-  // The governance stat cards open the queue they count (CU-wdqcq04wnu).
-  const reviewCardProps = tabVisible.review
-    ? {
-      role: "button",
-      tabIndex: 0,
-      title: "Open the review queue",
-      onClick: () => setActiveTab("review"),
-      onKeyDown: (e: React.KeyboardEvent) => {
-        if (e.key !== "Enter" && e.key !== " ") return;
-        e.preventDefault();
-        setActiveTab("review");
-      },
-      className:
-        "cursor-pointer transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-    }
-    : {};
 
   // Computed here so the Review Queue card binds to reviewableQueue.length
   // (what the user can actually act on) instead of reviewQueue.length
@@ -962,17 +966,11 @@ export function NestView({
     ownBlocked: myPendingSubmissions.filter((r) => !reviewableQueue.includes(r)).length,
   });
 
-  // Overview/index landing (CU-wdqcpztgwp): a grouped table-of-contents +
-  // recently-edited, so opening a nest presents an index rather than only the
-  // flat node list. Grouped by the node id's top-level folder.
-  // NOTE: the engine also generates a canonical INDEX.md via regenerateIndex()
-  // (excluded from the node list as a meta-file); surfacing that engine-built
-  // index is a deeper follow-up — this is the lightweight UI overview.
-  // Grouping logic lives in lib/nest-overview (tested there).
-  // Memoised: the Overview index and FolderTree memoise on this reference.
+  // Documents grouped by folder, for Reader Mode's nav (lib/nest-overview,
+  // tested there). Memoised: FolderTree memoises on this reference.
   const tocGroups = useMemo(() => groupNodesByFolder(nodes), [nodes]);
 
-  // Overview stat tile: Root is a synthetic tocGroups entry for docs with no
+  // Summary line: Root is a synthetic tocGroups entry for docs with no
   // folder, not a user-created folder, so it's excluded from the count.
   const folderCount = census?.folders.length ?? 0;
 
@@ -1195,7 +1193,7 @@ export function NestView({
     if (newDocRequest) setImportMenuOpen(true);
   }, [newDocRequest]);
   // Folder picked for deletion from the Overview index.
-  const [overviewDeleteFolder, setOverviewDeleteFolder] = useState<FolderDeleteTarget | null>(null);
+
   // Phone width: Share folds into the ⋮ menu so the header actions keep one row.
   const isPhone = useMediaQuery("(max-width: 639px)");
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
@@ -1470,6 +1468,22 @@ export function NestView({
                 </Badge>
               )
             )}
+            {/* Reader mode's switch lives in Settings and the ⋯ menu. While it
+              is on, a quiet badge says so — public readers then get the
+              docs view, which the owner should not have to open a menu to
+              learn. */}
+            {canManageReaderMode && !nestArchived && !initialLoad && readerModeEnabled && (
+              <button
+                type="button"
+                onClick={() => setReaderDialogOpen(true)}
+                data-testid="nest-reader-badge"
+                title="Public Docs Reader Mode is on — public readers get the clean docs view. Click to change."
+                className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 text-xs font-medium text-emerald-700 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {readerModeSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : <BookOpen className="h-3 w-3" />}
+                Reader on
+              </button>
+            )}
             {isImported && (
               <Badge
                 variant="outline"
@@ -1643,6 +1657,32 @@ export function NestView({
             />
           </>
         )}
+        {/* How this page shows (po-1213; which items, and when, is
+            lib/nest-tabs, tested there): the list/grid switch on Documents —
+            a reading preference; Fields, whose dialog's own controls appear
+            only for those who manage them (server-decided); and Public Docs
+            Reader Mode. Managing the nest lives in the action row and the
+            Settings tab. */}
+        {(() => {
+          const viewActions = {
+            grid: { icon: LayoutGrid, onSelect: () => setViewMode("cards") },
+            list: { icon: ListIcon, onSelect: () => setViewMode("list") },
+            fields: { icon: SlidersHorizontal, onSelect: () => setFieldsOpen(true) },
+            reader: { icon: BookOpen, onSelect: () => setReaderDialogOpen(true) },
+          } as const;
+          const actions: OverflowAction[] = nestViewMenuItems({
+            activeTab,
+            viewMode,
+            grantOnly,
+            canManageReaderMode,
+            nestArchived,
+            initialLoad,
+            readerModeEnabled,
+          }).map((item) => ({ label: item.label, testId: item.testId, ...viewActions[item.key] }));
+          return actions.length > 0 ? (
+            <OverflowMenu actions={actions} variant="outline" className="h-8 w-8" />
+          ) : null;
+        })()}
       </NestPageHeader>
       {relationText && (
         <div
@@ -1684,7 +1724,6 @@ export function NestView({
             rule. */}
         <div className="flex flex-wrap items-end gap-x-2 gap-y-3 mb-5 min-w-0 border-b">
           <TabsList className="h-auto min-h-0 max-w-full justify-start gap-5 overflow-x-auto rounded-none bg-transparent p-0">
-            <TabsTrigger value="overview" className={NEST_TAB}>Overview</TabsTrigger>
             <TabsTrigger value="documents" className={NEST_TAB}>Documents</TabsTrigger>
             {/* The nest's CONTEXT.md — what every agent reads first. */}
             {!grantOnly && (
@@ -1717,9 +1756,9 @@ export function NestView({
             {(canManage || collabCanWrite) && (
               <TabsTrigger value="collaborators" className={NEST_TAB}>Collaborators</TabsTrigger>
             )}
-            {/* Custom fields — readable by everyone on the nest (they explain
-              the values on its documents); the tab's own controls appear only
-              for admins and nest-wide reviewers (server-decided can_manage). */}
+            {/* Settings: fields (readable by everyone on the nest — they explain
+              the values on its documents; their controls appear only for
+              admins and nest-wide reviewers), review settings, reader mode. */}
             {!grantOnly && (
               <TabsTrigger value="settings" className={NEST_TAB} data-testid="nest-settings-tab">Settings</TabsTrigger>
             )}
@@ -1751,179 +1790,40 @@ export function NestView({
           )}
         </div>
 
-        {/* Stats Cards — only governance-related stats when stewardship is on.
-          In ungoverned mode every doc is auto-approved so the pending/review
-          columns are always zero and just add noise. Not on Overview: it
-          carries the same numbers as its own summary line (CU-wdqcq02qb1). Not on
-          Stream either: a feed starts with its posts (po-1214). Documents only. */}
-        {activeTab === "documents" && (
-          <div
-            className={`grid grid-cols-1 gap-4 mb-4 ${stewardshipEnabled
-              ? "md:grid-cols-4"
-              : "md:grid-cols-1 max-w-sm"
-              }`}
-          >
-            <Card>
-              <CardHeader className="pb-2">
-                <CardDescription>Total Documents</CardDescription>
-                {/* initialLoad, not `loading`: a background refetch keeps the real
-                numbers on screen, and only a cold load — where every stat is
-                still 0 — shows the placeholder. */}
-                <CardTitle className="text-3xl">
-                  {initialLoad ? <CountSkeleton className="h-8 w-12" /> : stats.total}
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <FileText className="h-4 w-4" />
-                  {/* An empty nest has nothing to be approved or AI-ready, so the
-                  readiness line would be a promise about content that isn't
-                  there — say what's true instead (CU-wdqcq00x8y). */}
-                  <span>
-                    {/* Gated on the same cold-load flag as the count above: every
-                    stat is 0 until the first read lands, and claiming an empty
-                    nest before then is wrong on a slow connection. */}
-                    {initialLoad
-                      ? "Loading…"
-                      : stats.total === 0
-                        ? "No documents yet"
-                        : stewardshipEnabled
-                          ? "In your context"
-                          : "Auto-approved, AI-ready"}
-                  </span>
-                </div>
-              </CardContent>
-            </Card>
-            {stewardshipEnabled && (
-              <>
-                <Card {...reviewCardProps} data-testid="nest-stat-pending">
-                  <CardHeader className="pb-2">
-                    <CardDescription>Pending Approvals</CardDescription>
-                    <CardTitle className="text-3xl text-amber-600">
-                      {initialLoad ? (
-                        <CountSkeleton className="h-8 w-12" />
-                      ) : (
-                        stats.pending
-                      )}
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Clock className="h-4 w-4" />
-                      <span>Awaiting approval</span>
-                    </div>
-                  </CardContent>
-                </Card>
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardDescription>AI Ready</CardDescription>
-                    <CardTitle className="text-3xl text-green-600">
-                      {initialLoad ? (
-                        <CountSkeleton className="h-8 w-12" />
-                      ) : (
-                        stats.approved
-                      )}
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <CheckCircle2 className="h-4 w-4" />
-                      <span>
-                        {initialLoad
-                          ? "Loading…"
-                          : stats.total === 0
-                            ? "Nothing to evaluate yet"
-                            : "Approved for AI"}
-                      </span>
-                    </div>
-                  </CardContent>
-                </Card>
-                <Card {...reviewCardProps} data-testid="nest-stat-review">
-                  <CardHeader className="pb-2">
-                    <CardDescription>Your Review Queue</CardDescription>
-                    <CardTitle className="text-3xl text-blue-600">
-                      {initialLoad ? (
-                        <CountSkeleton className="h-8 w-12" />
-                      ) : (
-                        stats.reviewable
-                      )}
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Shield className="h-4 w-4" />
-                      <span>
-                        Need your review
-                        {queueNote && (
-                          <span className="ml-1 text-xs" data-testid="nest-stat-review-note">
-                            ({queueNote})
-                          </span>
-                        )}
-                      </span>
-                    </div>
-                  </CardContent>
-                </Card>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* Overview — the nest's index/landing: stat tiles, recently-edited
-            rows, and a grouped table-of-contents grid so opening a nest
-            presents an index rather than just the flat node list. */}
-        <TabsContent value="overview" className="space-y-4">
+        <TabsContent value="documents" className="space-y-4">
           {/* An org contributor's way in (CU-wdqcq05rz6); renders nothing for
               anyone else. */}
           <OrgContributorPanel nestId={nestId} />
-          <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
-            <OverviewTab
-              initialLoad={!shellReady || !censusSettled}
-              stats={stats}
-              recentlyEdited={recentlyEdited}
-              recentlyEditedCount={recentlyEditedCount}
-              folderCount={folderCount}
-              tocGroups={tocGroups}
-              knownFolders={knownFolders}
-              isReadOnly={isReadOnly}
-              canEditDocs={canEditDocs}
-              onOpenDocument={onOpenDocument}
-              onOpenFolder={openFolderInDocuments}
-              nestName={editableName}
-              loadingFolders={loadingFolders}
-              onExpandFolder={fetchLevel}
+          {/* What Overview carried: the lede, the summary line and the
+              Recently edited feed, each item naming its editor (po-1213). */}
+          {shellReady && censusSettled && (
+            <DocumentsHome
               description={nestDescription}
+              stats={stats}
+              folderCount={folderCount}
+              editedThisWeek={recentlyEditedCount}
               governance={stewardshipEnabled ? stats : undefined}
               onOpenReview={showReviewTab && !isReadOnly ? () => setActiveTab("review") : undefined}
-              onImport={canEditDocs && !isReadOnly ? () => setImportMenuOpen(true) : undefined}
-              // Same gate as the header's Add with AI button.
-              onAddWithAI={!isReadOnly ? () => setShowGenerate(true) : undefined}
-              // Same gate as the Documents tree's folder trash icon.
-              onDeleteFolder={!isReadOnly && (canManage || canEditDocs) ? setOverviewDeleteFolder : undefined}
-            />
-          </Suspense>
-          {overviewDeleteFolder && (
-            <FolderDeleteDialog
-              nestId={nestId}
-              folder={overviewDeleteFolder}
-              canManage={canManage}
-              onClose={() => setOverviewDeleteFolder(null)}
-              onDone={() => {
-                // Don't leave Documents filtered to a folder that's gone.
-                const gone = overviewDeleteFolder.path;
-                if (canManage && folderFilter && (folderFilter === gone || folderFilter.startsWith(gone + "/")))
-                  setFolderFilter(null);
-                fetchData();
-              }}
+              recent={recentlyEdited}
+              people={roster?.people}
+              onOpenDocument={(id) => onOpenDocument(id)}
             />
           )}
-        </TabsContent>
-
-        <TabsContent value="documents" className="space-y-4">
           {/* Experimental document pins — renders nothing while the switch is
               off or the nest has no pins the caller can read. */}
           <PinnedStrip nestId={nestId} onOpenDocument={(id) => onOpenDocument(id)} />
+          {shellReady && censusSettled && stats.total === 0 && knownFolders.length === 0 ? (
+            <EmptyNest
+              canWrite={!isReadOnly && canEditDocs}
+              onNewDocument={() => onOpenDocument("new")}
+              onImport={canEditDocs && !isReadOnly ? () => setImportMenuOpen(true) : undefined}
+              // Same gate as the header's Add with AI button.
+              onAddWithAI={!isReadOnly ? () => setShowGenerate(true) : undefined}
+            />
+          ) : (
           <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
             <DocumentsTab
+              viewMode={viewMode}
               nestId={nestId}
               onOpenStructure={isReaderView ? undefined : onOpenStructure}
               initialSearch={initialSearch}
@@ -1970,6 +1870,7 @@ export function NestView({
               importInputRef={importInputRef}
             />
           </Suspense>
+          )}
         </TabsContent>
 
         {showReviewTab && (
@@ -2416,6 +2317,24 @@ export function NestView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Fields — opened from the ⋯ menu (po-1213); same component and
+          permissions the Fields tab had. */}
+      {!grantOnly && (
+        <Dialog open={fieldsOpen} onOpenChange={setFieldsOpen}>
+          <DialogContent className="max-h-[85vh] w-[calc(100vw-2rem)] max-w-3xl overflow-y-auto" data-testid="nest-fields-dialog">
+            <DialogHeader>
+              <DialogTitle>Fields</DialogTitle>
+              <DialogDescription>Custom fields on this nest's documents.</DialogDescription>
+            </DialogHeader>
+            {fieldsOpen && (
+              <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
+                <FieldsTab nestId={nestId} />
+              </Suspense>
+            )}
+          </DialogContent>
+        </Dialog>
+      )}
 
       {/* Reader mode settings — the switch and the landing document in one
           place, so changing the home document never means turning the mode off

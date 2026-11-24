@@ -32,6 +32,7 @@ import {
   cloudServer,
   connectGuides,
   detectedTools,
+  filterGuides,
   initCommand,
   loginCommand,
   loopbackCallback,
@@ -100,6 +101,8 @@ export function SetupPage() {
     () => (cloud ? cloudGuides(c.server, c.alias) : connectGuides(c.alias)),
     [cloud, c.server, c.alias]
   );
+  const [query, setQuery] = useState("");
+  const shown = filterGuides(guides, query);
   // Unknown (null) until /health answers; the sign-in box waits for it.
   const [authMode, setAuthMode] = useState<string | null>(null);
   useEffect(() => {
@@ -412,11 +415,24 @@ export function SetupPage() {
           <p className="text-sm text-muted-foreground">
             Or open the tool you use. Each one has its own steps.
           </p>
-          {guides.map((g) => (
+          <Input
+            type="search"
+            aria-label="Search setup guides"
+            placeholder="Search tools and steps, for example zed or mcp"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          {shown.length === 0 && (
+            <p className="text-sm text-muted-foreground">
+              No guide matches &ldquo;{query}&rdquo;.
+            </p>
+          )}
+          {shown.map((g) => (
             <details
-              key={g.id}
+              // Remount when the search changes, so `open` applies again.
+              key={`${g.id}:${query !== ""}`}
               className="group rounded-lg border bg-card"
-              open={done && g === guides[0]}
+              open={query !== "" || (done && g === guides[0])}
             >
               <summary className="flex cursor-pointer list-none items-center gap-2 p-4 font-medium">
                 <ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90" />
