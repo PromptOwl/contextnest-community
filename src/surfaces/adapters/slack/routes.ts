@@ -339,6 +339,27 @@ slackAdminRoutes.get("/installs/:id/oauth/start", async (c) => {
   return startOAuth(c, i, await getSecret(i.id, "client_id"), "manifest");
 });
 
+/**
+ * An abandoned attempt leaves a pending install for this person and nest:
+ * start again on it, so retries never pile up `pending:*` rows.
+ */
+async function pendingHostedInstall(nestId: string, userId: string): Promise<InstallRow> {
+  const pending = (await getDb().get(
+    "SELECT * FROM surface_installs WHERE surface = 'slack' AND mode = 'hosted' AND status = 'pending' AND home_nest_id = ? AND installed_by_user_id = ? AND tenant_key LIKE 'pending:%' ORDER BY created_at DESC LIMIT 1",
+    [nestId, userId],
+  )) as InstallRow | undefined;
+  return (
+    pending ??
+    createInstall({
+      surface: "slack",
+      mode: "hosted",
+      tenantKey: `pending:${randomBytes(8).toString("hex")}`,
+      homeNestId: nestId,
+      installedByUserId: userId,
+    })
+  );
+}
+
 slackAdminRoutes.get("/hosted/oauth/start", async (c) => {
   if (!hostedEnabled()) return c.json({ error: "Not found" }, 404);
   const denied = await assertAdmin(c);
@@ -347,13 +368,7 @@ slackAdminRoutes.get("/hosted/oauth/start", async (c) => {
   if (!nestId || !(await getDb().get("SELECT 1 AS x FROM nests WHERE id = ?", [nestId]))) return c.json({ error: "home_nest_id must name a nest" }, 422);
   const refused = urlRefusal(c);
   if (refused) return refused;
-  const install = await createInstall({
-    surface: "slack",
-    mode: "hosted",
-    tenantKey: `pending:${randomBytes(8).toString("hex")}`,
-    homeNestId: nestId,
-    installedByUserId: c.get("userId"),
-  });
+  const install = await pendingHostedInstall(nestId, c.get("userId"));
   return startOAuth(c, install, hostedCreds().clientId, "hosted");
 });
 
@@ -388,21 +403,7 @@ slackAdminRoutes.get("/hosted/oauth/self-serve", async (c) => {
   if (refused) return refused;
   if (!sessionBinding(c)) return c.json({ error: "Open this link from a signed-in browser session." }, 403);
   if (!tryConsume(`slack-self-serve:${userId}`, SELF_SERVE_LIMIT)) return c.json({ error: "Too many Slack connect attempts. Try again in an hour." }, 429);
-  // An abandoned attempt left a pending install for this person and nest:
-  // start again on it, so retries never pile up `pending:*` rows.
-  const pending = (await getDb().get(
-    "SELECT id FROM surface_installs WHERE surface = 'slack' AND mode = 'hosted' AND status = 'pending' AND home_nest_id = ? AND installed_by_user_id = ? AND tenant_key LIKE 'pending:%' ORDER BY created_at DESC LIMIT 1",
-    [nestId, userId],
-  )) as { id: string } | undefined;
-  const install =
-    (pending && (await getInstall(pending.id))) ||
-    (await createInstall({
-      surface: "slack",
-      mode: "hosted",
-      tenantKey: `pending:${randomBytes(8).toString("hex")}`,
-      homeNestId: nestId,
-      installedByUserId: userId,
-    }));
+  const install = await pendingHostedInstall(nestId, userId);
   return startOAuth(c, install, creds.clientId, "hosted", SELF_SERVE_RETURN);
 });
 

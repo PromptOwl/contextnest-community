@@ -177,3 +177,31 @@ describe("/surfaces/status readiness", () => {
     expect(r.data.readiness).toBeUndefined();
   });
 });
+
+describe("hosted OAuth start by a server admin", () => {
+  const HOSTED = {
+    FEATURE_SURFACES_SLACK_HOSTED: "true",
+    SURFACES_SLACK_HOSTED_CLIENT_ID: "hosted-cid",
+    SURFACES_SLACK_HOSTED_CLIENT_SECRET: "hosted-cs",
+    SURFACES_SLACK_HOSTED_SIGNING_SECRET: "hosted-sig",
+  };
+  it("reuses the admin's abandoned attempt for the same nest, and starts a new one for another nest", async () => {
+    Object.assign(process.env, HOSTED);
+    try {
+      const { getDb } = await import("../src/db/client.js");
+      const rows = async () =>
+        Number(((await getDb().get("SELECT COUNT(*) AS n FROM surface_installs WHERE mode = 'hosted' AND status = 'pending'")) as { n: number }).n);
+      const nest = async (name: string) => (await jsonRequest(app, "POST", "/nests", { name }, root.apiKey)).data.nest.id;
+      const [a, b] = [await nest("Hosted A"), await nest("Hosted B")];
+      const start = (n: string) => app.request(`/surfaces/slack/hosted/oauth/start?home_nest_id=${n}`, { headers: { Cookie: cookie } });
+      const before = await rows();
+      expect((await start(a)).status).toBe(302);
+      expect((await start(a)).status).toBe(302);
+      expect(await rows()).toBe(before + 1);
+      expect((await start(b)).status).toBe(302);
+      expect(await rows()).toBe(before + 2);
+    } finally {
+      for (const k of Object.keys(HOSTED)) delete process.env[k];
+    }
+  });
+});

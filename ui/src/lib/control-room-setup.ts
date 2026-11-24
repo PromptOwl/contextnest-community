@@ -89,10 +89,13 @@ export interface SetupProgress {
   targetNestIds: string[];
 }
 
-/** The Slack install setup is about: an active one first, else a pending one. */
-export function pickInstall(installs: readonly SurfacesInstallRef[]): SurfacesInstallRef | null {
+/**
+ * The Slack install setup is about: an active one first, else a pending one
+ * of the mode setup is in now. A pending hosted install has no manifest.
+ */
+export function pickInstall(installs: readonly SurfacesInstallRef[], hosted: boolean): SurfacesInstallRef | null {
   const slack = installs.filter((i) => i.surface === "slack");
-  return slack.find((i) => i.status === "active") ?? slack.find((i) => i.status === "pending") ?? null;
+  return slack.find((i) => i.status === "active") ?? slack.find((i) => i.status === "pending" && (i.mode === "hosted") === hosted) ?? null;
 }
 
 export function deriveProgress(f: SetupFacts): SetupProgress {
