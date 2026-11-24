@@ -1172,7 +1172,7 @@ Sharing a team whose members carry a governance role (`viewer`/`editor`) turns `
 
 Auth is the shared session/key auth. Management is gated by the caller's role on the team (the server/license admin may manage any team): **add people** = editor/admin members + owner (escalation-capped — can't grant above your own role); **rename / change-role / remove** = admin members + owner; **delete** = owner only. Unregistered member emails mint a placeholder user (`is_invited = 1`), same as collaborator/steward invites.
 
-- **POST `/teams`** — `{ "name": "Platform" }` → `201 { team }`. Any user may create a team (they become its owner).
+- **POST `/teams`** — `{ "name": "Platform" }` → `201 { team }`. Any user may create a team (they become its owner). A name that another team has (any case) → `409`; on a shared deployment only the owner's own teams count. `PATCH /teams/:teamId` applies the same rule. An import keeps its upstream name.
 - **GET `/teams`** — the teams the caller can see → `{ teams: [...] }`. On a shared deployment (`SHARED_DEPLOYMENT` on) that is the teams the caller owns **or is a member of**; on a single-organization server it is **every team on the server**, and any signed-in user may also read `GET /teams/:teamId`. Seeing a team never grants managing it. Each member is enriched with `registered` (real account vs invited placeholder) and the team with `owner_email`.
 - **GET `/teams/:teamId`** — owner, a member, or the server admin may view → `{ team: { id, name, owner_id, owner_email, members: [{ userId, email, role, registered }], ... } }`.
 - **PATCH `/teams/:teamId`** — `{ "name": "..." }` rename (admin/owner). Also refreshes the cached `teamName` in every nest that shares this team.
