@@ -1791,43 +1791,44 @@ function MaturityBoardInner({
             {draggable ? "Drop here" : "Empty"}
           </div>
         )}
-        {addingIn?.cell === cell && (
-          <CreateTaskDialog
-            parentTitle={
-              addingIn.parent ? nodes.find((x) => x.id === addingIn.parent)?.title ?? "task" : undefined
-            }
-            initial={{
-              assignee:
-                newCardPlacement(col.key, effectiveConfig)?.assignee ??
-                (assigneeFilter.size === 1 && !assigneeFilter.has(UNASSIGNED)
-                  ? [...assigneeFilter][0]
-                  : undefined),
-              priority: newCardPlacement(col.key, effectiveConfig)?.priority,
-              folder: newCardPlacement(col.key, effectiveConfig)?.folder,
-            }}
-            folders={allFolders}
-            people={members}
-            me={me}
-            surfaces={surfaceChoices}
-            defaultSurface={defaultSurfaceTag}
-            onSubmit={async (task) => {
-              const id = await createCard(col.key, task, addingIn.parent, addingIn.lane);
-              setAddingIn(null);
-              // Stay on the Board (PO-1246); the card lands in its column.
-              if (id)
-                toast.success(`Task "${task.title}" created`, {
-                  action: { label: "Open", onClick: () => onOpenDocument(id) },
-                });
-            }}
-            onClose={() => setAddingIn(null)}
-          />
-        )}
       </div>
     );
   };
 
   return (
     <div className="space-y-4">
+      {/* One dialog for every column and lane, on the board and in the list. */}
+      {addingIn && (
+        <CreateTaskDialog
+          parentTitle={
+            addingIn.parent ? nodes.find((x) => x.id === addingIn.parent)?.title ?? "task" : undefined
+          }
+          initial={{
+            assignee:
+              newCardPlacement(addingIn.col, effectiveConfig)?.assignee ??
+              (assigneeFilter.size === 1 && !assigneeFilter.has(UNASSIGNED)
+                ? [...assigneeFilter][0]
+                : undefined),
+            priority: newCardPlacement(addingIn.col, effectiveConfig)?.priority,
+            folder: newCardPlacement(addingIn.col, effectiveConfig)?.folder,
+          }}
+          folders={allFolders}
+          people={members}
+          me={me}
+          surfaces={surfaceChoices}
+          defaultSurface={defaultSurfaceTag}
+          onSubmit={async (task) => {
+            const id = await createCard(addingIn.col, task, addingIn.parent, addingIn.lane);
+            setAddingIn(null);
+            // Stay on the Board (PO-1246); the card lands in its column.
+            if (id)
+              toast.success(`Task "${task.title}" created`, {
+                action: { label: "Open", onClick: () => onOpenDocument(id) },
+              });
+          }}
+          onClose={() => setAddingIn(null)}
+        />
+      )}
       <NestPageHeader nestName={nestName} onBack={onBack}>
         <div className="flex flex-wrap items-center gap-2">
           {/* Two capsules — what the columns are, and how the rows split — so
@@ -2548,6 +2549,8 @@ function MaturityBoardInner({
           me={me}
           personLabel={personLabel}
           canEdit={canEditDocs}
+          canAddTo={(key) => canEditDocs && !!newCardPlacement(key, effectiveConfig)}
+          onAddTask={(key) => setAddingIn({ cell: key, col: key })}
           governance={governance}
           doneTags={doneTags}
           tagSuggestions={allTagValues}
