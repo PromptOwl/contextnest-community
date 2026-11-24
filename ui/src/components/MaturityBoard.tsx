@@ -759,8 +759,8 @@ function MaturityBoardInner({
     [census.data],
   );
   const { columns, byColumn } = useMemo(
-    () => groupByColumn(visibleNodes, effectiveConfig, emptyFolders, nodes),
-    [visibleNodes, effectiveConfig, emptyFolders, nodes],
+    () => groupByColumn(visibleNodes, effectiveConfig, emptyFolders, [...nodes, ...creating]),
+    [visibleNodes, effectiveConfig, emptyFolders, nodes, creating],
   );
 
   // Each column in the active board's saved order (Linear/Jira stack rank).
@@ -1200,6 +1200,7 @@ function MaturityBoardInner({
   const [colDrag, setColDrag] = useState<string | null>(null);
   const [colDropTarget, setColDropTarget] = useState<string | null>(null);
   const [newColumn, setNewColumn] = useState("");
+  const newColumnInput = useRef<HTMLInputElement>(null);
   // The tag board's add-column box stays a "+ Column" button until needed.
   const [addingColumn, setAddingColumn] = useState(false);
   // The how-to lines stay out of the way until asked for (the "?" button).
@@ -2034,6 +2035,7 @@ function MaturityBoardInner({
                 </p>
               )}
               <Input
+                ref={newColumnInput}
                 value={newColumn}
                 onChange={(e) => setNewColumn(e.target.value)}
                 placeholder={
@@ -2565,11 +2567,35 @@ function MaturityBoardInner({
       ) : columns.length === 0 ? (
         // The tag board starts with no columns by design, so "no documents"
         // would be a lie — the documents are there, the columns aren't yet.
+        effectiveConfig.dimension === "folder" && canEditDocs ? (
+          <div
+            className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-12 text-center text-sm text-muted-foreground"
+            data-testid="board-first-run"
+          >
+            <p>
+              <span className="font-medium text-foreground">Add a column to get started.</span> A column is a folder; its
+              tasks show as cards.
+            </p>
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button size="sm" onClick={() => newColumnInput.current?.focus()}>
+                Add a column
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setAddingIn({ cell: UNCATEGORIZED, col: UNCATEGORIZED })}
+              >
+                Add your first task
+              </Button>
+            </div>
+          </div>
+        ) : (
         <div className="text-sm text-muted-foreground py-8">
           {effectiveConfig.dimension === "tag"
             ? "No tag columns yet — add one above to start sorting documents into it, or a pattern like status* for every matching tag."
             : "No documents to show."}
         </div>
+        )
       ) : viewMode === "list" ? (
         <BoardListView
           nestId={nestId}
