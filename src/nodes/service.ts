@@ -31,6 +31,7 @@ import { join } from "node:path";
 import { serializeNodeSafe } from "../governance/safe-publish.js";
 import { assertNoViewCollision, batchViewCollisions } from "../views/collision.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
+import { enqueueSeal } from "./seal-queue.js";
 import { timed, withIoStats, withWriteStats } from "./io-stats.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import {
@@ -3936,10 +3937,14 @@ async function moveNodeInner(
     // index, and derived files are regenerated from that truth. Failing the
     // whole move because a generated file could not be rewritten would be the
     // worse outcome; the next mutation, or a reindex, restores them.
+    //
+    // Queued like every other write's index update, so the person moving a
+    // task does not wait for it (po-1247): on a network mount it was about
+    // half of the move's file operations.
     try {
-      await storage.regenerateIndex({ changedIds: [nodeId, newId, oldDerived, newDerived] });
+      for (const id of [nodeId, newId, oldDerived, newDerived]) await enqueueSeal(nestId, id, false);
     } catch (err) {
-      console.error("[move] regenerateIndex failed", nestId, nodeId, newId, err);
+      console.error("[move] could not queue the index update", nestId, nodeId, newId, err);
     }
 
     await trackEvent("node.move", { nestId, nodeId, newId });

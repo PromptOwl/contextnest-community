@@ -49,6 +49,7 @@ describe("index built from the database manifest", () => {
   it("writes the same context.yaml and INDEX.md as a full crawl, without crawling", async () => {
     const log = vi.spyOn(console, "log");
     let moveLine = "";
+    const crawl = vi.spyOn(NestStorage.prototype, "discoverDocuments");
     try {
       const a = await create("Alpha", "nodes/one", "links to [[Beta]]");
       const b = await create("Beta", "nodes/one", "plain");
@@ -62,9 +63,12 @@ describe("index built from the database manifest", () => {
     } finally {
       log.mockRestore();
     }
-    // The move's index update read the database, not the folders.
-    expect(moveLine).toContain("regenerateIndex");
+    // The move only queues its index update (po-1247).
+    expect(moveLine).toContain("moveHistory");
+    expect(moveLine).not.toContain("regenerateIndex");
     expect(moveLine).not.toContain("discoverDocuments");
+    // Every queued update read the database, not the folders.
+    expect(crawl).not.toHaveBeenCalled();
 
     const rows = (await getDb().all(
       "SELECT node_id FROM node_index WHERE nest_id = ? AND manifest_json IS NULL",
@@ -78,6 +82,8 @@ describe("index built from the database manifest", () => {
     expect(fromDb[2]).toMatch(/beta/i);
     expect(fromDb[0]).toMatch(/gamma/i);
     await new NestStorage(root, { agentConfigs: false }).regenerateIndex();
+    expect(crawl).toHaveBeenCalled(); // the spy does see a crawl
+    crawl.mockRestore();
     expect(fromDb).toEqual(await snapshot(root, folders));
   });
 
