@@ -1247,7 +1247,7 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
       ) : channels.length === 0 && !err ? (
         <div className="rounded-lg border border-dashed px-5 py-8 text-center text-sm">
           <p className="mx-auto max-w-md text-muted-foreground">
-            Nest isn't in any channel yet. In Slack, open a channel, type <code className="rounded bg-muted px-1">/invite</code> and pick Nest. It can only listen where it was added.
+            Nest isn't in any channel yet. In Slack, open a channel, type <code className="rounded bg-muted px-1">/invite</code> and pick your Slack app. It can only listen where it was added.
           </p>
           <Button variant="outline" className="mt-3" onClick={load} disabled={loading}>
             <RefreshCw className="mr-1.5 h-4 w-4" aria-hidden />

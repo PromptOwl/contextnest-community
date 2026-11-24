@@ -684,6 +684,12 @@ describe("gate", () => {
     expect(await counter("drop_opted_out", bindingC1)).toBeGreaterThanOrEqual(1);
   });
 
+  it("the app's own mention saying 'skip me' (its notice) never opts the app out", async () => {
+    await send({ type: "app_mention", channel: "C1", user: "UBOT", text: 'Mention <@UBOT> and say "skip me"', ts: nextTs() });
+    const { getDb } = await import("../src/db/client.js");
+    expect(await getDb().get("SELECT 1 AS x FROM surface_optouts WHERE surface_user_id = 'UBOT'")).toBeFalsy();
+  });
+
   it("AC-GAT-07: message_deleted removes the buffered row before judging", async () => {
     const ts = await say("C1", "U_ALICE", "this one will be deleted shortly");
     expect((await bufferRows(bindingC1)).some((r) => r.surface_message_id === ts)).toBe(true);

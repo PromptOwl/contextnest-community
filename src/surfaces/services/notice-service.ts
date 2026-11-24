@@ -19,6 +19,9 @@ import { getSettings } from "./settings-service.js";
 export const NOTICE_NEST_MAX = 80;
 const capName = (s: string) => (s.length > NOTICE_NEST_MAX ? `${s.slice(0, NOTICE_NEST_MAX - 1)}…` : s);
 
+/** A mention by Slack id, so any app name (or a later rename) reads right. */
+const botMention = (botUserId: string | null) => (botUserId && /^[A-Z0-9]+$/.test(botUserId) ? `<@${botUserId}>` : null);
+
 /**
  * po-1186 CR3: the notice ends with a link to the public member explainer
  * (GET /about/surfaces) when this server has a public base URL to link to.
@@ -26,10 +29,10 @@ const capName = (s: string) => (s.length > NOTICE_NEST_MAX ? `${s.slice(0, NOTIC
  * number that page shows. Every argument is required, so no caller can state
  * a default retention by leaving one out.
  */
-export const enableNotice = (nest: string, aboutUrl: string | null, ttlHours: number) =>
-  `Nest is now listening here for ${escapeMrkdwn(capName(nest))}. It stays quiet unless something looks worth keeping, and then proposes it for a named person to approve. ` +
+export const enableNotice = (nest: string, aboutUrl: string | null, ttlHours: number, botUserId: string | null) =>
+  `${botMention(botUserId) ?? "This app"} is now listening here for ${escapeMrkdwn(capName(nest))}. It stays quiet unless something looks worth keeping, and then proposes it for a named person to approve. ` +
   `What it keeps: only summaries a named person approves; messages are cleared within ${ttlHours} hours. ` +
-  `React 🧠 to a message to ask Nest to keep it. Say \`@Nest skip me\` and it won't use your messages. ${SERVER_ADMIN_DISCLOSURE}` +
+  `React 🧠 to a message to ask Nest to keep it. Mention ${botMention(botUserId) ?? "this app"} and say "skip me" and it won't use your messages. ${SERVER_ADMIN_DISCLOSURE}` +
   (aboutUrl ? ` <${aboutUrl}|How Nest handles your messages>` : "");
 
 /**
@@ -56,7 +59,7 @@ export async function postEnableNotice(bindingId: string): Promise<NoticeOutcome
     // nothing now (the claim is released below, as when Slack refuses) rather
     // than state a default that may not hold here.
     const ttl = (await getSettings()).buffer_ttl_hours;
-    await c.postNotice(bindingRef(b), enableNotice(await nestName(b.nest_id), aboutSurfacesUrl(), ttl));
+    await c.postNotice(bindingRef(b), enableNotice(await nestName(b.nest_id), aboutSurfacesUrl(), ttl, install!.bot_user_id));
     return "posted";
   } catch (err) {
     // No message text or names: the binding id and the error's message only.

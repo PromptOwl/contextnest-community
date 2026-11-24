@@ -141,7 +141,7 @@ test.describe('Control room: setup', () => {
 
     // Step 5: the notice, then turn on.
     await expect(page.getByTestId('setup-notice')).toContainText('Notice posted to #acme-renewal, #revops');
-    await expect(page.getByTestId('setup-notice')).toContainText('@Nest skip me');
+    await expect(page.getByTestId('setup-notice')).toContainText('Mention the app and say "skip me"');
     expect(fake.calls.filter((c) => c.method === 'POST' && c.path === '/surfaces/bindings')).toHaveLength(0);
     await page.getByTestId('setup-turn-on').click();
     await expect(page.getByTestId('setup-listening')).toContainText('Listening in 2 channels');
@@ -291,14 +291,14 @@ test.describe('Control room: superadmins only', () => {
 });
 
 test.describe('Control room: member page', () => {
-  test('CN-CR-007 / AC-CR-16: /about/surfaces opens without signing in, with the never list and "@Nest skip me", and no nest, channel or user names', async ({ browser }) => {
+  test('CN-CR-007 / AC-CR-16: /about/surfaces opens without signing in, with the never list and how to skip, and no nest, channel or user names', async ({ browser }) => {
     const ctx = await browser.newContext();
     const page = await ctx.newPage();
     test.skip(!surfacesOn, 'Surfaces is off on this server, so /about/surfaces 404s.');
     const res = await page.goto('/about/surfaces');
     expect(res?.status()).toBe(200);
     await expect(page.getByRole('heading', { name: 'How Nest handles your messages' })).toBeVisible();
-    await expect(page.locator('body')).toContainText('@Nest skip me');
+    await expect(page.locator('body')).toContainText('mention the app and say skip me');
     for (const t of ["Read DMs between people, or channels it isn't in", 'Import channel history', 'Post recaps or summaries in the channel', 'Propose pay, health, performance or personal matters']) {
       await expect(page.locator('ul')).toContainText(t);
     }
