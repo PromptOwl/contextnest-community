@@ -741,7 +741,13 @@ describe("annotations: per-nest comment counts (document-list sorting)", () => {
     await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Quiet", content: "# Quiet" }, alice.apiKey);
 
     for (const body of ["first note", "second note"]) {
-      await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${popular.data.node.id}/annotations`, { body }, alice.apiKey);
+      const made = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${popular.data.node.id}/annotations`, { body }, alice.apiKey);
+      // po-1215: the second thread gets a reply and is resolved.
+      if (body === "second note") {
+        const at = `/nests/${nestId}/nodes/${popular.data.node.id}/annotations/${made.data.thread.id}`;
+        await jsonRequest(app, "POST", `${at}/comments`, { body: "a reply" }, alice.apiKey);
+        await jsonRequest(app, "POST", `${at}/resolve`, {}, alice.apiKey);
+      }
     }
   });
 
@@ -751,6 +757,7 @@ describe("annotations: per-nest comment counts (document-list sorting)", () => {
     const res = await jsonRequest(app, "GET", `/nests/${nestId}/comment-counts`, undefined, alice.apiKey);
     expect(res.status).toBe(200);
     expect(res.data.counts["nodes/popular"].count).toBe(2);
+    expect(res.data.counts["nodes/popular"]).toMatchObject({ open: 1, comments: 3 });
     expect(res.data.counts["nodes/popular"].lastAt).toBeTruthy();
     // A node with no comments simply isn't in the map.
     expect(res.data.counts["nodes/quiet"]).toBeUndefined();

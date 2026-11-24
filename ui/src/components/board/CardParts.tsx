@@ -20,6 +20,7 @@ import {
   Ban,
   CalendarDays,
   ListTree,
+  MessageSquare,
   UserRound,
   X,
 } from "lucide-react";
@@ -449,6 +450,28 @@ export function BlockedBadge({ count, className = "" }: { count: number; classNa
     >
       <Ban className="h-3 w-3" />
       Blocked{count > 1 ? ` · ${count}` : ""}
+    </span>
+  );
+}
+
+/** How many comments a card has; amber while a thread is unresolved. */
+export function CommentBadge({ counts }: { counts?: { open: number; comments: number } }) {
+  if (!counts || counts.comments <= 0) return null;
+  const label =
+    `${counts.comments} comment${counts.comments === 1 ? "" : "s"}` +
+    (counts.open > 0 ? `, ${counts.open} unresolved thread${counts.open === 1 ? "" : "s"}` : ", all resolved");
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center gap-1 rounded px-1 py-0.5 text-[10px] font-medium tabular-nums ${
+        counts.open > 0 ? "bg-amber-500/15 text-amber-700 dark:text-amber-300" : "text-muted-foreground"
+      }`}
+      title={label}
+      aria-label={label}
+      role="img"
+      data-testid="comment-badge"
+    >
+      <MessageSquare className="h-3 w-3" aria-hidden />
+      {counts.comments}
     </span>
   );
 }

@@ -104,6 +104,7 @@ import {
   TagPill,
   Avatar,
   BlockedBadge,
+  CommentBadge,
   DueChip,
   DeleteBoardDialog,
   GovernedMoveDialog,
@@ -316,6 +317,7 @@ function MaturityBoardInner({
   const { isAdmin, adminStatus, typeTaskEnabled } = useAuth();
   const me = adminStatus?.me?.email?.toLowerCase();
   const qc = useQueryClient();
+  const commentCounts = useQuery(reads.commentCounts(nestId)).data?.counts;
   const nestSettings = useNestSettings(nestId);
   const priorityLevels = usePriorityLevels();
   // The nest's workflow order for its stage group, so a Stage board opens as
@@ -1747,6 +1749,7 @@ function MaturityBoardInner({
                         </span>
                       )}
                       <BlockedBadge count={openBlockers(n)} />
+                      <CommentBadge counts={commentCounts?.[n.id]} />
                       {n.due && dueCtl}
                       <SubItemChip
                         items={kids}

@@ -2066,7 +2066,8 @@ export async function getNestCensus(nestId: string) {
 /** Per-node comment (annotation thread) counts for sorting the document list. */
 export async function getCommentCounts(nestId: string) {
   return request<{
-    counts: Record<string, { count: number; lastAt: string | null }>;
+    /** Threads, unresolved threads and messages per document. */
+    counts: Record<string, { count: number; open: number; comments: number; lastAt: string | null }>;
   }>(`/nests/${nestId}/comment-counts`);
 }
 
