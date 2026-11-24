@@ -17,4 +17,8 @@ describe("no empty space is kept for hidden editing controls", () => {
     expect(before("./MarkdownEditor.tsx", "markdown-editor-toolbar")).not.toMatch(HIDDEN_BUT_TAKING_SPACE);
     expect(src("./MarkdownEditor.tsx")).not.toContain("toolbarHidden");
   });
+  it("po-1208: the type selector is never hidden behind a click on blank space", () => {
+    expect(before("../DocumentEditor.tsx", "document-editor-type")).not.toMatch(HIDDEN_BUT_TAKING_SPACE);
+    expect(src("../DocumentEditor.tsx")).not.toContain("toolbarHidden");
+  });
 });
