@@ -47,17 +47,7 @@ export function newTaskPayload(f: NewTask): NewTask | null {
   };
 }
 
-export function CreateTaskDialog({
-  parentTitle,
-  initial,
-  people,
-  me,
-  surfaces = [],
-  defaultSurface,
-  folders,
-  onSubmit,
-  onClose,
-}: {
+interface Props {
   /** Set when adding a sub-item. */
   parentTitle?: string;
   initial?: { assignee?: string; priority?: string; folder?: string };
@@ -69,25 +59,27 @@ export function CreateTaskDialog({
   defaultSurface?: string;
   /** Every folder of the nest. Not set: no folder picker. */
   folders?: readonly string[];
-  onSubmit: (task: NewTask) => Promise<void>;
+  /** Creates the task. `another`: the dialog stays open for the next one. */
+  onSubmit: (task: NewTask, another: boolean) => Promise<void>;
   onClose: () => void;
-}) {
-  const [title, setTitle] = useState("");
-  const [content, setContent] = useState("");
-  const [assignee, setAssignee] = useState(initial?.assignee);
-  const levels = usePriorityLevels();
-  const [priority, setPriority] = useState(initial?.priority ?? "");
-  const [due, setDue] = useState("");
-  const [surfaceTag, setSurfaceTag] = useState(defaultSurface ?? "");
-  const [folder, setFolder] = useState(initial?.folder ?? "");
-  const [saving, setSaving] = useState(false);
+}
 
-  const submit = async () => {
-    const task = newTaskPayload({ title, content, assignee, priority, due, surfaceTag, ...(folders ? { folder } : {}) });
-    if (!task || saving) return;
+export function CreateTaskDialog({ parentTitle, initial, onSubmit, onClose, ...rest }: Props) {
+  const [saving, setSaving] = useState(false);
+  // "Create and add another" remounts the form: every field starts over and
+  // the title takes the focus. Only the folder carries on, like the column.
+  const [round, setRound] = useState(0);
+  const [folder, setFolder] = useState(initial?.folder ?? "");
+
+  const submit = async (task: NewTask, another: boolean) => {
+    if (saving) return;
     setSaving(true);
     try {
-      await onSubmit(task);
+      await onSubmit(task, another);
+      if (another) {
+        setRound((n) => n + 1);
+        setSaving(false);
+      }
     } catch {
       setSaving(false); // the caller toasts; keep the dialog and what was typed
     }
@@ -99,90 +91,144 @@ export function CreateTaskDialog({
         <DialogHeader>
           <DialogTitle>{parentTitle ? `New sub-item of “${parentTitle}”` : "New task"}</DialogTitle>
         </DialogHeader>
-        <form
-          className="space-y-3"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void submit();
-          }}
-        >
-          <Input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="Task title"
-            aria-label="Title"
-            autoFocus
-            disabled={saving}
-          />
-          <Textarea
-            value={content}
-            onChange={(e) => setContent(e.target.value)}
-            placeholder="Description (markdown)"
-            aria-label="Description"
-            rows={5}
-            disabled={saving}
-          />
-          <div className="flex flex-wrap items-center gap-4 text-sm">
-            <AssigneeMenu
-              assignee={assignee}
-              people={people}
-              me={me}
-              editable={!saving}
-              onChange={(email) => setAssignee(email ?? undefined)}
-              showName
-            />
-            <select
-              value={priority}
-              onChange={(e) => setPriority(e.target.value)}
-              aria-label="Priority"
-              disabled={saving}
-              className="h-8 rounded-md border border-input bg-background px-2 text-sm"
-            >
-              <option value="">No priority</option>
-              {levels.map((p) => (
-                <option key={p.key} value={p.key}>
-                  {p.label}
-                </option>
-              ))}
-            </select>
-            {surfaces.length > 0 && (
-              <select
-                value={surfaceTag}
-                onChange={(e) => setSurfaceTag(e.target.value)}
-                aria-label="Surface"
-                disabled={saving}
-                className="h-8 rounded-md border border-input bg-background px-2 text-sm"
-              >
-                <option value="">No surface</option>
-                {surfaces.map((sf) => (
-                  <option key={sf.tag} value={sf.tag}>
-                    {sf.name}
-                  </option>
-                ))}
-              </select>
-            )}
-            <Input
-              type="date"
-              value={due}
-              onChange={(e) => setDue(e.target.value)}
-              aria-label="Due date"
-              disabled={saving}
-              className="h-8 w-auto"
-            />
-          </div>
-          {folders && (
-            <FolderSelect value={folder} onChange={setFolder} folders={folders} disabled={saving} testId="create-task-folder" />
-          )}
-          <DialogFooter>
-            <Button type="button" variant="ghost" onClick={onClose} disabled={saving}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={!title.trim() || saving}>
-              {saving ? "Creating…" : "Create task"}
-            </Button>
-          </DialogFooter>
-        </form>
+        <TaskForm
+          key={round}
+          {...rest}
+          initial={initial}
+          folder={folder}
+          onFolder={setFolder}
+          saving={saving}
+          onSubmit={(task, another) => void submit(task, another)}
+          onClose={onClose}
+        />
       </DialogContent>
     </Dialog>
+  );
+}
+
+export function TaskForm({
+  initial,
+  people,
+  me,
+  surfaces = [],
+  defaultSurface,
+  folders,
+  folder,
+  onFolder,
+  saving,
+  onSubmit,
+  onClose,
+}: Omit<Props, "onSubmit" | "parentTitle"> & {
+  folder: string;
+  onFolder: (folder: string) => void;
+  saving: boolean;
+  onSubmit: (task: NewTask, another: boolean) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [content, setContent] = useState("");
+  const [assignee, setAssignee] = useState(initial?.assignee);
+  const levels = usePriorityLevels();
+  const [priority, setPriority] = useState(initial?.priority ?? "");
+  const [due, setDue] = useState("");
+  const [surfaceTag, setSurfaceTag] = useState(defaultSurface ?? "");
+
+  const submit = (another: boolean) => {
+    const task = newTaskPayload({ title, content, assignee, priority, due, surfaceTag, ...(folders ? { folder } : {}) });
+    if (task) onSubmit(task, another);
+  };
+
+  return (
+    <form
+      className="space-y-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        submit(false);
+      }}
+    >
+      <Input
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        placeholder="Task title"
+        aria-label="Title"
+        autoFocus
+        disabled={saving}
+      />
+      <Textarea
+        value={content}
+        onChange={(e) => setContent(e.target.value)}
+        placeholder="Description (markdown)"
+        aria-label="Description"
+        rows={5}
+        disabled={saving}
+      />
+      <div className="flex flex-wrap items-center gap-4 text-sm">
+        <AssigneeMenu
+          assignee={assignee}
+          people={people}
+          me={me}
+          editable={!saving}
+          onChange={(email) => setAssignee(email ?? undefined)}
+          showName
+        />
+        <select
+          value={priority}
+          onChange={(e) => setPriority(e.target.value)}
+          aria-label="Priority"
+          disabled={saving}
+          className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+        >
+          <option value="">No priority</option>
+          {levels.map((p) => (
+            <option key={p.key} value={p.key}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+        {surfaces.length > 0 && (
+          <select
+            value={surfaceTag}
+            onChange={(e) => setSurfaceTag(e.target.value)}
+            aria-label="Surface"
+            disabled={saving}
+            className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+          >
+            <option value="">No surface</option>
+            {surfaces.map((sf) => (
+              <option key={sf.tag} value={sf.tag}>
+                {sf.name}
+              </option>
+            ))}
+          </select>
+        )}
+        <Input
+          type="date"
+          value={due}
+          onChange={(e) => setDue(e.target.value)}
+          aria-label="Due date"
+          disabled={saving}
+          className="h-8 w-auto"
+        />
+      </div>
+      {folders && (
+        <FolderSelect value={folder} onChange={onFolder} folders={folders} disabled={saving} testId="create-task-folder" />
+      )}
+      <DialogFooter>
+        <Button type="button" variant="ghost" onClick={onClose} disabled={saving}>
+          Cancel
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => submit(true)}
+          disabled={!title.trim() || saving}
+          data-testid="create-task-another"
+        >
+          Create and add another
+        </Button>
+        <Button type="submit" disabled={!title.trim() || saving}>
+          {saving ? "Creating…" : "Create task"}
+        </Button>
+      </DialogFooter>
+    </form>
   );
 }

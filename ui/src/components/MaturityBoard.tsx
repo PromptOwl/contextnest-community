@@ -1818,9 +1818,9 @@ function MaturityBoardInner({
           me={me}
           surfaces={surfaceChoices}
           defaultSurface={defaultSurfaceTag}
-          onSubmit={async (task) => {
+          onSubmit={async (task, another) => {
             const id = await createCard(addingIn.col, task, addingIn.parent, addingIn.lane);
-            setAddingIn(null);
+            if (!another) setAddingIn(null);
             // Stay on the Board (PO-1246); the card lands in its column.
             if (id)
               toast.success(`Task "${task.title}" created`, {
