@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { SearchableSelect } from "@/components/SearchableSelect";
 import { Checkbox } from "@/components/ui/checkbox";
 import { CopyButton } from "@/components/ui/copy-button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -339,25 +340,20 @@ function WillNever({ settings }: { settings: SurfacesSettingsView | null }) {
   );
 }
 
-function NestSelect({ id, value, nests, onChange, label, className }: { id?: string; value: string; nests: NestRef[]; onChange: (v: string) => void; label: string; className?: string }) {
+export function NestSelect({ id, value, nests, onChange, label, className }: { id?: string; value: string; nests: NestRef[]; onChange: (v: string) => void; label: string; className?: string }) {
   return (
-    <select
+    <SearchableSelect
       id={id}
-      aria-label={label}
+      ariaLabel={label}
       value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className={cn(
-        "h-10 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-        className,
-      )}
-    >
-      {!nests.some((n) => n.id === value) && <option value={value}>{value ? "Choose a nest" : "Choose a nest"}</option>}
-      {nests.map((n) => (
-        <option key={n.id} value={n.id}>
-          {n.name}
-        </option>
-      ))}
-    </select>
+      onChange={onChange}
+      options={nests.map((n) => ({ value: n.id, label: n.name }))}
+      searchValues={false}
+      placeholder="Choose a nest"
+      searchPlaceholder="Search nests…"
+      emptyText="No nests match."
+      className={className ?? "w-56 max-w-full"}
+    />
   );
 }
 
