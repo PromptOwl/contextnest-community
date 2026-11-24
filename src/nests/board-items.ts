@@ -191,7 +191,8 @@ export function columnKeysOf(n: NodeResponse, c: BoardConfig): string[] {
       const tags = (n.tags ?? []).map(stripHash);
       const values = ns
         ? tags.filter((t) => t.startsWith(`${ns}:`)).map((t) => t.slice(ns.length + 1)).filter(Boolean)
-        : tags.filter(Boolean);
+        : // A ticket number is one card's ID, not a group.
+          tags.filter((t) => t && !ticketFromTag(t));
       return values.length > 0 ? [...new Set(values)] : [UNCATEGORIZED];
     }
   }

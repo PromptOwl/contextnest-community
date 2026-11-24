@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { columnKeysOf } from "../src/nests/board-items";
 import {
   folderOf,
   folderColumnLabel,
@@ -741,5 +742,25 @@ describe("po-1520: the card shown while a task is created", () => {
   });
   it("two at once keep separate ids", () => {
     expect(creatingCard({ title: "A" }).id).not.toBe(creatingCard({ title: "A" }).id);
+  });
+});
+
+describe("po-1227: ticket numbers are not tag columns", () => {
+  const n = node({ id: "nodes/a", tags: ["#ticket:qa-1", "#backlog"] });
+  const only = node({ id: "nodes/b", tags: ["#ticket:qa-2"] });
+  it("groups by the other tags; a card with only a number is uncategorized", () => {
+    const config: BoardConfig = { dimension: "tag" };
+    expect(buildColumns([n, only], config).map((c) => c.key)).toEqual(["backlog", UNCATEGORIZED]);
+  });
+  it("drops ticket columns a saved board still lists, and patterns do not add them", () => {
+    const config: BoardConfig = { dimension: "tag", explicitColumns: true, columnOrder: ["ticket:qa-1", "backlog", "*"] };
+    expect(buildColumns([n, only], config).map((c) => c.key)).toEqual(["backlog"]);
+  });
+  it("the server's board items agree", () => {
+    const keys = (x: BoardNode) => columnKeysOf(x as any, { dimension: "tag" } as any);
+    expect([keys(n), keys(only)]).toEqual([["backlog"], [UNCATEGORIZED]]);
+  });
+  it("a retag keeps the ticket number", () => {
+    expect(planMove(only, "backlog", { dimension: "tag" }, UNCATEGORIZED)).toEqual({ kind: "retag", tags: ["#ticket:qa-2", "#backlog"] });
   });
 });

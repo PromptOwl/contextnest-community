@@ -19,6 +19,7 @@ import {
   fieldValueForMove,
   type FieldDefinition,
 } from "./custom-fields";
+import { isTicketTag } from "./ticket";
 import { prettyFolder } from "../components/FolderTree";
 
 /** The bucket for nodes that don't carry a value for the active dimension. */
@@ -450,10 +451,16 @@ export function cardColumnKeys(node: BoardNode, config: BoardConfig): string[] {
             .filter((t) => t.startsWith(`${ns}:`))
             .map((t) => t.slice(ns.length + 1))
             .filter(Boolean)
-        : tags.filter(Boolean);
+        : // A ticket number is one card's ID, not a group.
+          tags.filter((t) => t && !isTicketTag(t));
       return values.length > 0 ? [...new Set(values)] : [UNCATEGORIZED];
     }
   }
+}
+
+/** A board saved before ticket numbers left the tag columns may still list some. */
+function isTicketColumn(key: string, config: BoardConfig): boolean {
+  return config.dimension === "tag" && !namespaceOf(config) && isTicketTag(key);
 }
 
 /**
@@ -547,7 +554,7 @@ export function buildColumns(
   // Explicit-column board: the columns ARE columnOrder (minus hidden), in that
   // order — nothing auto-appears, nothing trails. An empty order = empty board.
   if (config.explicitColumns) {
-    const order = config.columnOrder ?? [];
+    const order = (config.columnOrder ?? []).filter((k) => !isTicketColumn(k, config));
     const listed = new Set(order.filter((k) => !isColumnPattern(k)));
     // Tag values on the board's cards, for patterns to expand against.
     const tagged = new Set<string>();
@@ -595,7 +602,7 @@ export function buildColumns(
   const ordered: string[] = [];
   const seen = new Set<string>();
   for (const key of config.columnOrder ?? []) {
-    if (hidden.has(key) || key === UNCATEGORIZED || seen.has(key)) continue;
+    if (hidden.has(key) || key === UNCATEGORIZED || seen.has(key) || isTicketColumn(key, config)) continue;
     seen.add(key);
     ordered.push(key);
     present.delete(key);
