@@ -49,6 +49,7 @@ import {
   updateCommunitySite as updateCommunitySiteApi,
   removeCommunitySite,
 } from "../../../lib/api";
+import { bypassNavGuard, setNavGuard } from "../../../lib/nav-guard";
 import { reads } from "../../../lib/queries";
 import { CopyButton } from "@/components/ui/copy-button";
 import { getAdminModels, getAdminSettings, updateAdminSettings } from "../../../lib/api";
@@ -803,6 +804,21 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
     });
   }, [draft, settings]);
   const isDirty = dirtyKeys.length > 0;
+  // Leaving with unsaved settings asks first, as on the Structure rules page.
+  const [leave, setLeave] = useState<(() => void) | null>(null);
+  useEffect(() => {
+    if (!isDirty) return;
+    setNavGuard((proceed) => {
+      setLeave(() => proceed);
+      return true;
+    });
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => {
+      setNavGuard(null);
+      window.removeEventListener("beforeunload", warn);
+    };
+  }, [isDirty]);
   const dirtyInTab = (keys: (keyof AdminSettings)[]) =>
     keys.some((k) => dirtyKeys.includes(k));
 
@@ -935,6 +951,28 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={discard} data-testid="settings-discard-confirm">
               Discard
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={leave !== null} onOpenChange={(o) => !o && setLeave(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Leave without saving?</AlertDialogTitle>
+            <AlertDialogDescription>Your changes to the server settings haven't been saved and will be lost.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Stay</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const go = leave;
+                setLeave(null);
+                if (go) bypassNavGuard(go);
+              }}
+              data-testid="settings-leave-confirm"
+            >
+              Leave
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
