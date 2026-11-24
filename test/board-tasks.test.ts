@@ -171,11 +171,17 @@ describe("blocked badge (task relations)", () => {
   });
 
   it("title filter matches part of a title, ignoring case; '#…' is a tag, not a title", () => {
-    expect(matchesTitleFilter({ title: "Task Beta" }, "beta")).toBe(true);
-    expect(matchesTitleFilter({ title: "Task Beta" }, " Task B ")).toBe(true);
-    expect(matchesTitleFilter({ title: "Task Alpha" }, "Beta")).toBe(false);
-    expect(matchesTitleFilter({ title: "Task Alpha" }, "")).toBe(true);
-    expect(matchesTitleFilter({ title: "Task Alpha" }, "#prime")).toBe(true);
+    expect(matchesTitleFilter({ title: "Task Beta", tags: [] }, "beta")).toBe(true);
+    expect(matchesTitleFilter({ title: "Task Beta", tags: [] }, " Task B ")).toBe(true);
+    expect(matchesTitleFilter({ title: "Task Alpha", tags: [] }, "Beta")).toBe(false);
+    expect(matchesTitleFilter({ title: "Task Alpha", tags: [] }, "")).toBe(true);
+    expect(matchesTitleFilter({ title: "Task Alpha", tags: [] }, "#prime")).toBe(true);
+  });
+  it("po-1261: finds a card by its ticket number, any case", () => {
+    const card = { title: "Migrate user table", tags: ["#stage:backlog", "#ticket:dpb-5"] };
+    for (const q of ["DPB-5", "dpb-5", "dpb"]) expect(matchesTitleFilter(card, q)).toBe(true);
+    expect(matchesTitleFilter(card, "DPB-6")).toBe(false);
+    expect(matchesTitleFilter(card, "backlog")).toBe(false);
   });
 });
 

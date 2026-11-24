@@ -6,6 +6,7 @@
  * icons, Trello's overdue-red due chip, Jira/ClickUp's avatar quick-filter.
  */
 import { saveOutcome } from "./save-outcome";
+import { ticketOf } from "./ticket";
 import { folderOf, type BoardNode } from "./board-dimensions";
 
 export const PRIORITIES = ["urgent", "high", "medium", "low"] as const;
@@ -113,11 +114,16 @@ export function matchesBlockedFilter(
   return !hideBlocked || openBlockers(node) === 0;
 }
 
-/** The filter box, as typed: part of a title, any case. A leading "#" means a
+/** The filter box, as typed: part of a title or ticket number, any case. A leading "#" means a
  *  tag still being typed (Enter adds it as a tag chip), so it filters nothing. */
-export function matchesTitleFilter(node: Pick<BoardNode, "title">, text: string): boolean {
+export function matchesTitleFilter(node: Pick<BoardNode, "title" | "tags">, text: string): boolean {
   const q = text.trim().toLowerCase();
-  return !q || q.startsWith("#") || node.title.toLowerCase().includes(q);
+  return (
+    !q ||
+    q.startsWith("#") ||
+    node.title.toLowerCase().includes(q) ||
+    !!ticketOf(node.tags)?.toLowerCase().includes(q)
+  );
 }
 
 /** Parent id → its sub-items, for the card's sub-item chip. */

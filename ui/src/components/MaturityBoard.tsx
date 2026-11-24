@@ -2432,7 +2432,7 @@ function MaturityBoardInner({
               }
               setFilterDraft("");
             }}
-            placeholder="Filter by title or #tag"
+            placeholder="Filter by title, ticket or #tag"
             title="Type to filter by title. Enter adds the text as a tag filter."
             className="h-7 w-44 bg-transparent px-1 text-sm outline-none placeholder:text-muted-foreground"
           />
