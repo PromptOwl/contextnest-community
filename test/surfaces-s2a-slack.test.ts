@@ -608,6 +608,48 @@ describe("binding and listener", () => {
     await db().run("DELETE FROM metacognition_agents WHERE node_id = 'nodes/agents/forged'");
   });
 
+  it("a live listener is read-only to the generic agent routes and tools, and stays tied; other agents are not affected", async () => {
+    const node = (await one("SELECT listener_agent_node_id AS n FROM surface_bindings WHERE id = ?", [bindingC1])).n as string;
+    const list = await jsonRequest(app, "GET", `/nests/${N}/metacognition`, undefined, alice.apiKey);
+    expect(list.data.agents.find((a: any) => a.node_id === node).managed_by).toMatchObject({ kind: "slack", channel: "c1", status: "active" });
+    const body = { persona: { name: "Renamed" }, enabled: true };
+    const put = await jsonRequest(app, "PUT", `/nests/${N}/metacognition/${node}`, body, alice.apiKey);
+    expect(put.status).toBe(409);
+    expect(put.data.error).toMatch(/managed by Slack setup/);
+    expect((await jsonRequest(app, "DELETE", `/nests/${N}/metacognition/${node}`, undefined, alice.apiKey)).status).toBe(409);
+    for (const [name, args] of [
+      ["context_metacognition_configure", { agent: node, ...body }],
+      ["context_metacognition_preview", { agent: node, ...body }],
+      ["context_metacognition_remove", { agent: node }],
+    ] as const) {
+      const r = await mcp(`/nests/${N}/mcp`, "tools/call", { name, arguments: args }, alice.apiKey);
+      expect(JSON.stringify(r), name).toMatch(/managed by Slack setup/);
+    }
+    // Nothing changed: the judge still finds its listener.
+    expect((await S.listener.listenerFor(bindingC1))?.node_id).toBe(node);
+    // An ordinary agent beside it still saves and is removed.
+    const made = await jsonRequest(app, "POST", `/nests/${N}/nodes`, { title: "Plain agent", content: "Read and suggest.", type: "agent" }, alice.apiKey);
+    const plain = made.data.node.id as string;
+    const saved = await jsonRequest(app, "PUT", `/nests/${N}/metacognition/${plain}`, { persona: { name: "Plain" }, enabled: false }, alice.apiKey);
+    expect(saved.status).toBe(200);
+    expect(saved.data.agent.managed_by).toBeNull();
+    expect((await jsonRequest(app, "DELETE", `/nests/${N}/metacognition/${plain}`, undefined, alice.apiKey)).status).toBe(200);
+    await jsonRequest(app, "DELETE", `/nests/${N}/nodes/${plain}`, undefined, alice.apiKey);
+  });
+
+  it("an unmanaged leftover can be deleted: the block ends when the binding is removed", async () => {
+    const { assertNotManaged } = await import("../src/metacognition/managed.js");
+    setChannel("C_TMP", ["U_ALICE", "U_BOB", "UBOT"]);
+    const r = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C_TMP", nest_id: N }, alice.apiKey);
+    expect(r.status).toBe(201);
+    const node = r.data.binding.listener_agent_node_id as string;
+    await expect(assertNotManaged(N, node)).rejects.toThrow(/managed by Slack/);
+    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${r.data.binding.id}`, { reason: "test remove" }, alice.apiKey)).status).toBe(200);
+    await expect(assertNotManaged(N, node)).resolves.toBeUndefined();
+    // Removing the channel still cleans its listener up.
+    expect(await one("SELECT 1 AS x FROM metacognition_agents WHERE nest_id = ? AND node_id = ?", [N, node])).toBeFalsy();
+  });
+
   it("CF-2: a second channel can bind to the same nest (sibling listeners are server-tied, not outside readers)", async () => {
     setChannel("C2", ["U_ALICE", "U_BOB", "UBOT"]);
     const r = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C2", nest_id: N }, alice.apiKey);
@@ -682,6 +724,12 @@ describe("gate", () => {
     await say("C1", "U_DAN", "Dan says something else entirely now");
     expect((await bufferRows(bindingC1)).some((r) => r.author_surface_user_id === "U_DAN")).toBe(false);
     expect(await counter("drop_opted_out", bindingC1)).toBeGreaterThanOrEqual(1);
+  });
+
+  it("the app's own mention saying 'skip me' (its notice) never opts the app out", async () => {
+    await send({ type: "app_mention", channel: "C1", user: "UBOT", text: 'Mention <@UBOT> and say "skip me"', ts: nextTs() });
+    const { getDb } = await import("../src/db/client.js");
+    expect(await getDb().get("SELECT 1 AS x FROM surface_optouts WHERE surface_user_id = 'UBOT'")).toBeFalsy();
   });
 
   it("AC-GAT-07: message_deleted removes the buffered row before judging", async () => {

@@ -5430,6 +5430,8 @@ export interface MetacognitionNotifyConfig {
 }
 
 export interface MetacognitionAgent extends Omit<MetacognitionAgentConfig, "persona"> {
+  /** Set on a Slack listener: changed in Control room → Setup, read-only here. */
+  managed_by?: { kind: "slack"; channel: string | null; status: string; folders: string[] } | null;
   node_id: string;
   enabled: boolean;
   persona: { name: string; avatar: string | null; email: string };

@@ -169,9 +169,10 @@ async function ingestDelete(install: InstallRow, m: SurfaceMessage): Promise<voi
   await recordPurge("delete", n, { bindingId: binding.id });
 }
 
-/** `@Nest skip me`: record the opt-out and delete every row of theirs in the install. */
+/** A mention saying "skip me": record the opt-out and delete every row of theirs in the install. */
 async function ingestOptout(install: InstallRow, m: SurfaceMessage): Promise<void> {
-  if (!m.author.id) return;
+  // The enable notice mentions the app and says "skip me": never opt the app itself out.
+  if (!m.author.id || m.author.id === install.bot_user_id) return;
   await getDb().run("INSERT INTO surface_optouts (install_id, surface_user_id, created_at) VALUES (?, ?, ?) ON CONFLICT (install_id, surface_user_id) DO NOTHING", [
     install.id,
     m.author.id,
