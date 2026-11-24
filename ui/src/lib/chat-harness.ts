@@ -87,6 +87,15 @@ export function memberRows(members: readonly ChatMember[], online: ReadonlySet<s
   return rows.sort((a, b) => rank(a) - rank(b) || a.label.localeCompare(b.label));
 }
 
+/** The panel's count line: the joined, and the full reach when it is wider. */
+export function membersSummary(joined: readonly MemberRow[], others: readonly MemberRow[]): string {
+  const around = [...joined, ...others].filter((r) => r.online).length;
+  const count = others.length
+    ? `${joined.length + others.length} with access · ${joined.length} joined`
+    : `${joined.length} ${joined.length === 1 ? "member" : "members"}`;
+  return around ? `${count} · ${around} around now` : count;
+}
+
 // ─── The channel menu ────────────────────────────────────────────────────
 
 export type ChannelMenuItem = "notifications" | "members" | "make-private" | "make-public" | "join" | "leave" | "archive" | "restore";

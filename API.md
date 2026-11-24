@@ -3333,7 +3333,7 @@ A conversation node is listed to its members by `GET /nodes`, `ctx` and `context
 
 #### Private channels — on `/nests/:nestId/channels`
 - **POST** `/channels` `{ "name", "purpose"?, "private": true }` (write) → the creator is the only member. The channel list and every channel read carry `private` and `member` (this caller is on the list; a creator joins their channel, public or not).
-- **GET** `/channels/:name/members` → `{ "channel", "private", "members": [{ "kind": "person", "email", "name", "added_at" } | { "kind": "agent", "handle", "added_at" }] }`.
+- **GET** `/channels/:name/members` → `{ "channel", "private", "members": [{ "kind": "person", "email", "name", "added_at" } | { "kind": "agent", "handle", "added_at" }], "audience": [{ "email", "name" }] }`. `members` is who joined; `audience` is everyone else on the nest who can read and post in a public channel (always empty for a private one).
 - **POST** `/channels/:name/members` `{ "member": "rita" | "@grok" }` → the member list (a writer, or a member of the channel; `403` otherwise; `400` not on the nest).
 - **POST** `/channels/:name/join` → `{ "channel" }` (a public channel; a private one is `404` to a non-member).
 - **POST** `/channels/:name/leave` → `{ "left": true, "channel" }`. The last member of a private channel can't leave (`409`: invite someone, or archive it).
