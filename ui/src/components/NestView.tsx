@@ -1793,7 +1793,6 @@ export function NestView({
               <Button
                 variant="outline"
                 size="sm"
-                className="text-muted-foreground"
                 onClick={() => setShowNewFolder(true)}
                 title="Create a folder (nest with parent/child)"
                 aria-label="New Folder"
