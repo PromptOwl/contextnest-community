@@ -2973,6 +2973,8 @@ export interface AnnotationComment {
   createdAt: string;
   /** Set when an agent run posted it: links to its trace. */
   runId?: string;
+  /** When its author last edited it. */
+  editedAt?: string;
 }
 
 export interface AnnotationThread {
@@ -3083,6 +3085,28 @@ export async function createAnnotation(
   return request<{ thread: AnnotationThread; comment_id?: string; mentions?: PostedMention[] }>(
     `/nests/${nestId}/nodes/${nodeId}/annotations`,
     { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+/** Change one's own comment. */
+export async function editAnnotationComment(
+  nestId: string,
+  nodeId: string,
+  threadId: string,
+  commentId: string,
+  body: string,
+) {
+  return request<{ thread: AnnotationThread | null }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/comments/${commentId}/edit`,
+    { method: "POST", body: JSON.stringify({ body }) },
+  );
+}
+
+/** Remove one's own comment; `thread` is null when nothing is left in it. */
+export async function deleteAnnotationComment(nestId: string, nodeId: string, threadId: string, commentId: string) {
+  return request<{ thread: AnnotationThread | null }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/comments/${commentId}/delete`,
+    { method: "POST", body: JSON.stringify({}) },
   );
 }
 

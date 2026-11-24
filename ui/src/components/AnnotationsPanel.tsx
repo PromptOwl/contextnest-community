@@ -33,6 +33,8 @@ import { ArtifactCards, useCommentCards } from "./ArtifactCards";
 import type { MentionMember } from "./MarkdownEditor/picker-match";
 import { formatServerDate } from "../lib/dates";
 import { splitThreads } from "../lib/comment-threads";
+import { useAuth } from "../auth/AuthContext";
+import { ReasonDialog } from "./governance";
 import { displayNameFor } from "../lib/person-name";
 
 interface Props {
@@ -93,6 +95,10 @@ export function AnnotationsPanel({
   const [replyFor, setReplyFor] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
   const [busy, setBusy] = useState(false);
+  // One's own comment being edited, or asked about before its delete.
+  const me = useAuth().adminStatus?.me?.email?.toLowerCase();
+  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
+  const [deleting, setDeleting] = useState<{ threadId: string; id: string } | null>(null);
   // Resolved threads fold under "Resolved (n)", closed by default.
   const [showResolved, setShowResolved] = useState(false);
   const qc = useQueryClient();
@@ -188,6 +194,20 @@ export function AnnotationsPanel({
     }
   };
 
+  const saveEdit = async (threadId: string) => {
+    if (!editing?.text.trim()) return;
+    setBusy(true);
+    try {
+      await api.editAnnotationComment(nestId, nodeId, threadId, editing.id, editing.text.trim());
+      setEditing(null);
+      await load(true);
+    } catch (e: any) {
+      toast.error(e?.message || "Failed to edit the comment");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const toggleStatus = async (t: api.AnnotationThread) => {
     setBusy(true);
     try {
@@ -238,6 +258,60 @@ export function AnnotationsPanel({
       setShowResolved(true);
     }
   }, [activeThreadId, resolvedThreads]);
+
+  /** A comment's text, with Edit and Delete under one's own; or its edit box. */
+  const renderBody = (t: api.AnnotationThread, c: api.AnnotationComment) =>
+    editing?.id === c.id ? (
+      <div className="mt-1" data-testid="annotations-edit">
+        <MentionTextarea
+          formatting
+          members={members}
+          value={editing.text}
+          onValueChange={(text) => setEditing({ id: c.id, text })}
+          rows={2}
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-y"
+          aria-label="Edit comment"
+          autoFocus
+        />
+        <div className="mt-1 flex justify-end gap-2">
+          <Button variant="ghost" size="sm" onClick={() => setEditing(null)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button size="sm" onClick={() => saveEdit(t.id)} disabled={busy || !editing.text.trim()}>
+            Save
+          </Button>
+        </div>
+      </div>
+    ) : (
+      <>
+        <CommentBody body={c.body} members={members} />
+        <ArtifactCards cards={cardsByComment.get(c.id)} />
+        {!readOnly && !!me && c.author.toLowerCase() === me && (
+          <div className="mt-0.5 flex gap-2 text-xs text-muted-foreground">
+            <button
+              type="button"
+              className="hover:text-foreground hover:underline"
+              disabled={busy}
+              onClick={() => setEditing({ id: c.id, text: c.body })}
+              data-testid="annotations-edit-comment"
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              className="hover:text-destructive hover:underline"
+              disabled={busy}
+              onClick={() => setDeleting({ threadId: t.id, id: c.id })}
+              data-testid="annotations-delete-comment"
+            >
+              Delete
+            </button>
+          </div>
+        )}
+      </>
+    );
+  const editedMark = (c: api.AnnotationComment) =>
+    c.editedAt ? <span title={`Edited ${when(c.editedAt)}`}> · Edited</span> : null;
 
   const renderThread = (t: api.AnnotationThread) => (
     <li
@@ -298,6 +372,7 @@ export function AnnotationsPanel({
               {displayNameFor(t.comments[0].author, members)}
             </span>{" "}
             · {when(t.comments[0].createdAt)}
+            {editedMark(t.comments[0])}
             {t.comments[0].runId && (
               <>
                 {" · "}
@@ -305,8 +380,7 @@ export function AnnotationsPanel({
               </>
             )}
           </div>
-          <CommentBody body={t.comments[0].body} members={members} />
-          <ArtifactCards cards={cardsByComment.get(t.comments[0].id)} />
+          {renderBody(t, t.comments[0])}
         </div>
       )}
       {t.comments.length > 1 && (
@@ -318,6 +392,7 @@ export function AnnotationsPanel({
                   {displayNameFor(c.author, members)}
                 </span>{" "}
                 replied · {when(c.createdAt)}
+                {editedMark(c)}
                 {c.runId && (
                   <>
                     {" · "}
@@ -325,8 +400,7 @@ export function AnnotationsPanel({
                   </>
                 )}
               </div>
-              <CommentBody body={c.body} members={members} />
-              <ArtifactCards cards={cardsByComment.get(c.id)} />
+              {renderBody(t, c)}
             </li>
           ))}
         </ul>
@@ -583,6 +657,21 @@ export function AnnotationsPanel({
           </>
         )}
       </div>
+
+      {deleting && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setDeleting(null)}
+          title="Delete this comment?"
+          description="This cannot be undone."
+          confirmLabel="Delete"
+          destructive
+          onConfirm={async () => {
+            await api.deleteAnnotationComment(nestId, nodeId, deleting.threadId, deleting.id);
+            await load(true);
+          }}
+        />
+      )}
     </section>
   );
 }
