@@ -62,6 +62,7 @@ import {
 } from "./access-guard.js";
 import { handleAnnotationReply } from "../annotations/routes.js";
 import { notifyComment } from "./mention-notify.js";
+import { isArchivedForCaller } from "../nodes/service.js";
 import { readableDeletionRequests } from "./access-guard.js";
 
 const CHANNEL_USES_THREADS =
@@ -770,6 +771,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
       403,
     );
   }
+  if (await isArchivedForCaller(nestId, nodeId, userEmail)) throw new NotFoundError("Node not found");
 
   const allVersions = await versions.getVersions(nestId, nodeId);
   const approved = await versions.getApprovedVersion(nestId, nodeId);
@@ -868,6 +870,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions/:version{[0-9]+}", async (c) => 
       403,
     );
   }
+  if (await isArchivedForCaller(nestId, nodeId, userEmail)) throw new NotFoundError("Node not found");
 
   const { storage, versions: versionManager } = await engineCache.get(nestId);
   // A historical version's full body is a read of that version: record it in
@@ -935,6 +938,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/comments", async (c) => {
   if (!(await callerCanReadNode(nestId, nodeId, userId))) {
     return c.json({ comments: [] });
   }
+  if (await isArchivedForCaller(nestId, nodeId, await resolveCallerEmail(userId))) throw new NotFoundError("Node not found");
   const list = await comments.listComments(nestId, nodeId, {
     status: status === "open" || status === "resolved" ? status : undefined,
   });

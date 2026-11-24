@@ -71,6 +71,7 @@ import {
   archiveNode,
   unarchiveNode,
   canArchiveNode,
+  isArchivedForCaller,
   nestCensus,
   getNodeForCaller,
   resolveAuthorship,
@@ -614,6 +615,7 @@ nodeRoutes.get("/:nodeId{.+}/relations", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
   const caller = { nestId, userId, userEmail: await resolveCallerEmail(userId) };
+  if (await isArchivedForCaller(nestId, c.req.param("nodeId")!, caller.userEmail)) throw new NotFoundError("Node not found");
   return c.json(await listRelations(caller, c.req.param("nodeId")!));
 });
 

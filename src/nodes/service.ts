@@ -4122,6 +4122,17 @@ export async function canArchiveNode(nestId: string, nodeId: string, userEmail: 
   return canApproveWith(await resolveUserRoles(nestId, userEmail, { nodeId }));
 }
 
+/** Archived, and not this caller's to restore: reads by id answer as a miss. */
+export async function isArchivedForCaller(nestId: string, nodeId: string, userEmail: string): Promise<boolean> {
+  let node: ContextNode;
+  try {
+    node = await (await engineCache.get(nestId)).storage.readDocument(nodeId);
+  } catch {
+    return false; // no document: each read answers that its own way
+  }
+  return isArchived(node) && !(await canArchiveNode(nestId, nodeId, userEmail));
+}
+
 /**
  * Take a node out of lists and retrieval, recoverably (spec §1.13). History,
  * review records and the approved pin all stay; only the file's status changes.

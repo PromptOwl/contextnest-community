@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
-import { ValidationError } from "../shared/errors.js";
+import { NotFoundError, ValidationError } from "../shared/errors.js";
 import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
 import { injectArtifactBridge } from "../shared/artifact-bridge.js";
 import { resolveCallerEmail, canReadNode } from "../governance/access-guard.js";
@@ -15,6 +15,7 @@ import {
 } from "./service.js";
 import { deleteComment, editComment } from "./comment-edits.js";
 import { ARTIFACT_NODE_TYPE, type AnnotationAnchor } from "./types.js";
+import { isArchivedForCaller } from "../nodes/service.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { attributeRequest } from "../shared/client-metadata.js";
 import { channelPostRefusal } from "../channels/channel-service.js";
@@ -57,6 +58,7 @@ annotationRoutes.get("/:nodeId{.+}/annotations", async (c) => {
   if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
+  if (await isArchivedForCaller(nestId, nodeId, userEmail)) throw new NotFoundError("Node not found");
   return c.json({ threads: await listThreads(nestId, nodeId) });
 });
 
