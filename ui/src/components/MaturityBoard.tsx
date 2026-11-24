@@ -732,12 +732,15 @@ function MaturityBoardInner({
     [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.filterFields, fieldDefs, config.hideDoneAfterDays, assigneeFilter, hideBlocked, filterDraft],
   );
 
+  const [addingIn, setAddingIn] = useState<{ cell: string; col: string; lane?: string; parent?: string } | null>(null);
   // Folders with nothing in them — the sidebar's census read (shared cache), so
   // the folder board lists the same folders the tree does.
   const census = useQuery({
     ...reads.census(nestId),
-    enabled: effectiveConfig.dimension === "folder",
+    // The New task dialog's folder picker needs them on any board.
+    enabled: effectiveConfig.dimension === "folder" || addingIn !== null,
   });
+  const allFolders = useMemo(() => (census.data?.census.folders ?? []).map((f) => f.path), [census.data]);
   const emptyFolders = useMemo(
     () => (census.data?.census.folders ?? []).filter((f) => !f.total).map((f) => f.path),
     [census.data],
@@ -899,7 +902,6 @@ function MaturityBoardInner({
   );
 
   // ── "+ Add task" ──
-  const [addingIn, setAddingIn] = useState<{ cell: string; col: string; lane?: string; parent?: string } | null>(null);
   const createCard = useCallback(
     async (colKey: string, task: NewTask, parent?: string, laneKey?: string) => {
       const placement = newCardPlacement(colKey, effectiveConfig);
@@ -955,6 +957,7 @@ function MaturityBoardInner({
         };
         // The surface picked in the dialog is an ordinary tag, added to whatever
         // the column and filters already put on the card.
+        if (payload.folder === "") delete payload.folder; // the nest root
         if (surfaceTag) payload.tags = [...new Set([...(payload.tags ?? []), `#${surfaceTag}`])];
         const res = await api.createNode(nestId, payload as any);
         qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
@@ -1800,7 +1803,9 @@ function MaturityBoardInner({
                   ? [...assigneeFilter][0]
                   : undefined),
               priority: newCardPlacement(col.key, effectiveConfig)?.priority,
+              folder: newCardPlacement(col.key, effectiveConfig)?.folder,
             }}
+            folders={allFolders}
             people={members}
             me={me}
             surfaces={surfaceChoices}

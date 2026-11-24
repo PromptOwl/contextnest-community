@@ -1,6 +1,6 @@
 /** Open a dedicated dialog when creating a task via Board. */
 import { describe, it, expect } from "vitest";
-import { newTaskPayload } from "./CreateTaskDialog";
+import { folderChoices, newTaskPayload } from "./CreateTaskDialog";
 
 describe("newTaskPayload", () => {
   it("sends every field the dialog set, with the title trimmed", () => {
@@ -31,7 +31,22 @@ describe("newTaskPayload", () => {
     expect(newTaskPayload({ title: "A", content: "", surfaceTag: "" })).toEqual({ title: "A", content: "" });
   });
 
+  it("po-1207: carries the folder picked, the nest root included; left out it stays the column's", () => {
+    expect(newTaskPayload({ title: "A", content: "", folder: "gtm/deals" })).toMatchObject({ folder: "gtm/deals" });
+    expect(newTaskPayload({ title: "A", content: "", folder: "" })).toMatchObject({ folder: "" });
+    expect(newTaskPayload({ title: "A", content: "" })).not.toHaveProperty("folder");
+  });
+
   it("refuses a blank title", () => {
     expect(newTaskPayload({ title: "   ", content: "notes" })).toBeNull();
+  });
+});
+
+describe("po-1207: folderChoices", () => {
+  it("lists the nest root first, then each folder once", () => {
+    expect(folderChoices(["second", "Root", "gtm/deals", "second"]).map((o) => o.label)).toEqual(["Nest root", "Gtm / Deals", "Second"]);
+  });
+  it("keeps the column's folder while the list is still loading", () => {
+    expect(folderChoices([], "gtm").map((o) => o.value)).toContain("gtm");
   });
 });

@@ -17,6 +17,8 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { AssigneeMenu, type Person } from "./CardParts";
 import { usePriorityLevels } from "../../lib/priorities";
+import { prettyFolderPath } from "../FolderTree";
+import { SearchableSelect, type SearchableOption } from "../SearchableSelect";
 
 export interface NewTask {
   title: string;
@@ -26,6 +28,8 @@ export interface NewTask {
   due?: string;
   /** Tag (no `#`) of the surface picked; the caller adds it to the task. */
   surfaceTag?: string;
+  /** The folder picked; "" is the nest root. Left out: the column's own. */
+  folder?: string;
 }
 
 /** What the dialog sends: trimmed title, blank optional fields left out (so the
@@ -40,7 +44,17 @@ export function newTaskPayload(f: NewTask): NewTask | null {
     ...(f.priority ? { priority: f.priority } : {}),
     ...(f.due ? { due: f.due } : {}),
     ...(f.surfaceTag ? { surfaceTag: f.surfaceTag } : {}),
+    ...(f.folder !== undefined ? { folder: f.folder } : {}),
   };
+}
+
+/** The picker's row for the nest root: a list item needs a non-empty value. */
+const ROOT = "/";
+
+/** Nest root first, then every folder once, by name. */
+export function folderChoices(folders: readonly string[], current?: string): SearchableOption[] {
+  const paths = [...new Set([...folders, current ?? ""])].filter((f) => f && f !== "Root").sort();
+  return [{ value: ROOT, label: "Nest root" }, ...paths.map((f) => ({ value: f, label: prettyFolderPath(f) }))];
 }
 
 export function CreateTaskDialog({
@@ -50,18 +64,21 @@ export function CreateTaskDialog({
   me,
   surfaces = [],
   defaultSurface,
+  folders,
   onSubmit,
   onClose,
 }: {
   /** Set when adding a sub-item. */
   parentTitle?: string;
-  initial?: { assignee?: string; priority?: string };
+  initial?: { assignee?: string; priority?: string; folder?: string };
   people: Person[];
   me?: string;
   /** The nest's surfaces, each with the tag it adds. Empty: no picker. */
   surfaces?: { name: string; tag: string }[];
   /** Tag preselected in the picker. */
   defaultSurface?: string;
+  /** Every folder of the nest. Not set: no folder picker. */
+  folders?: readonly string[];
   onSubmit: (task: NewTask) => Promise<void>;
   onClose: () => void;
 }) {
@@ -72,10 +89,11 @@ export function CreateTaskDialog({
   const [priority, setPriority] = useState(initial?.priority ?? "");
   const [due, setDue] = useState("");
   const [surfaceTag, setSurfaceTag] = useState(defaultSurface ?? "");
+  const [folder, setFolder] = useState(initial?.folder ?? "");
   const [saving, setSaving] = useState(false);
 
   const submit = async () => {
-    const task = newTaskPayload({ title, content, assignee, priority, due, surfaceTag });
+    const task = newTaskPayload({ title, content, assignee, priority, due, surfaceTag, ...(folders ? { folder } : {}) });
     if (!task || saving) return;
     setSaving(true);
     try {
@@ -162,6 +180,18 @@ export function CreateTaskDialog({
               className="h-8 w-auto"
             />
           </div>
+          {folders && (
+            <SearchableSelect
+              ariaLabel="Folder"
+              value={folder || ROOT}
+              onChange={(v) => setFolder(v === ROOT ? "" : v)}
+              options={folderChoices(folders, initial?.folder)}
+              searchPlaceholder="Search folders…"
+              emptyText="No folders match."
+              disabled={saving}
+              testId="create-task-folder"
+            />
+          )}
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={onClose} disabled={saving}>
               Cancel
