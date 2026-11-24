@@ -587,6 +587,9 @@ export function AnnotationsPanel({
                 : (e) => {
                     e.preventDefault();
                     onSetCommentMode?.(true);
+                    // preventDefault stops the click's own focus; the first
+                    // keystroke belongs in the box.
+                    e.currentTarget.focus();
                   }
             }
             onFocus={commenting ? undefined : () => onSetCommentMode?.(true)}
