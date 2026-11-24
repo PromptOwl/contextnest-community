@@ -48,6 +48,7 @@ import { useAuth } from "../auth/AuthContext";
 import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { slugifyFolderPath } from "../lib/folder-target";
+import { folderNamePreview } from "../lib/folder-path";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -1990,8 +1991,17 @@ function MaturityBoardInner({
                 e.preventDefault();
                 void addColumn(newColumn);
               }}
-              className="flex items-center gap-1"
+              className="relative flex items-center gap-1"
             >
+              {effectiveConfig.dimension === "folder" && folderNamePreview(newColumn) && (
+                <p
+                  role="status"
+                  className="absolute left-0 top-full z-20 mt-1 w-max max-w-xs rounded-md border bg-popover px-2 py-1 text-xs text-muted-foreground shadow-md"
+                  data-testid="board-new-folder-preview"
+                >
+                  Will be created as <span className="font-medium text-foreground">{folderNamePreview(newColumn)}</span>
+                </p>
+              )}
               <Input
                 value={newColumn}
                 onChange={(e) => setNewColumn(e.target.value)}
