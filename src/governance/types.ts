@@ -149,6 +149,8 @@ export type ActivityType =
   | "edit_proposed" // a pending external-edit suggestion ("proposed an edit")
   | "review_requested"
   | "review_resolved"
+  | "moved" // the document changed folder
+  | "tags_changed"
   | "task_activity"; // an interaction logged on a task (context_task_log)
 
 export interface ActivityEntry {

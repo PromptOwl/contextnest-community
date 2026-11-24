@@ -1818,7 +1818,7 @@ Query: `?node=<nodeId>` **or** `?folder=<path>` (neither = the whole nest), `&ty
 
 The **admin activity log** for one document, one folder, or the nest: who changed, reviewed, commented on, deleted, read, retrieved or exported it, newest first. Owner, nest admin, or server admin only (the same rule as `/trace`); everyone else gets `403`. `400` for `node` and `folder` together, a traversal id or folder, or an unknown `type`.
 
-It merges what the server records: versions (`created`, `edited`, `restored`, with the agent from the write's `client`), reviews (`review_requested`, `approved`, `rejected`, `review_cancelled`), comments (`commented`, `comment_resolved`), deletions (`deleted`), and document access, which leaves no version (`read`, `retrieved`, `exported`).
+It merges what the server records: versions (`created`, `edited`, `restored`, with the agent from the write's `client`), reviews (`review_requested`, `approved`, `rejected`, `review_cancelled`), comments (`commented`, `comment_resolved`), deletions (`deleted`), moves and tag changes (`moved`, `tags_changed`: `detail` is `"todo → doing"`, `"stage:backlog → stage:done"`), and document access, which leaves no version (`read`, `retrieved`, `exported`).
 
 Access is recorded when a document is opened (`GET …/nodes/:id`, a historical version via `GET …/nodes/:id/versions/:version`, MCP `context_get`), returned by a search, query, table query or context call (`/search`, `/query`, `/table-query`, `/context` incl. Hootie — attributed to agent `hootie` — MCP `context_query` / `context_search` / `context_table_query` / `context_resolve`), or exported. Read and retrieval rows carry `version` — **the version the caller was served** — wherever the surface returns one known version: under stewardship an agent is served (and the row records) the approved version, not a newer draft; otherwise the current version. With the versioned history (`GET …/versions/:version`) that is enough to rebuild exactly what an agent saw. Exports and REST `/search` / `/query` / `/context` rows carry no version. Recording is on by default and can be turned off per nest (`access_log_enabled`, owner only); only document ids and versions are stored, never content. A whole-nest export is one row with `nodeId: null` and appears in the nest's and folders' logs, and in the log of every document that existed at the time (not documents created afterwards). `detail` names how a document was accessed (`search`, `context`, `context_get`, `markdown export (12 documents)`); **what the caller searched for or asked is never stored**. Access rows are **sampled, not exhaustive**: throttled to one per person, document, action, surface, agent and version per 10 minutes (a new version is a new row), capped at 50 documents per retrieval, and pruned on the activity-trace retention window (`TRACE_RETENTION_DAYS`). The throttle is per server process, so a multi-instance deployment records up to one row per instance per window. Deleting a document purges its version and access history (the `deleted` tombstone stays).
 
@@ -2148,7 +2148,9 @@ over comments + committed edits (`node_versions`) + pending external-edit
 suggestions ("proposed an edit", read from nest storage) + reviews
 (`review_requests`); newest first, `?limit=` (default 100). Each entry:
 `{ type, nodeId, actor, at, detail?, refId? }` where `type` ∈
-`comment | comment_resolved | edit | edit_proposed | review_requested | review_resolved | task_activity`.
+`comment | comment_resolved | edit | edit_proposed | review_requested | review_resolved | moved | tags_changed | task_activity`.
+A `moved` entry's `detail` names the previous and new folder; a `tags_changed` entry's names the tags
+that were swapped, added or removed.
 A `task_activity` entry (see below) also carries `status?`, `agent?` (the caller's
 `client.agent`), `key?` (`{ label?, prefix?, scoped }`) and `summary` — the
 one-line description the task's timeline shows.

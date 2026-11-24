@@ -2795,6 +2795,8 @@ export type ActivityLogType =
   | "commented"
   | "comment_resolved"
   | "deleted"
+  | "moved"
+  | "tags_changed"
   | "read"
   | "retrieved"
   | "exported";
@@ -3751,6 +3753,8 @@ export type ActivityType =
   | "edit_proposed"
   | "review_requested"
   | "review_resolved"
+  | "moved"
+  | "tags_changed"
   | "task_activity";
 
 export interface ActivityEntry {
