@@ -896,7 +896,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
         icon={Shield}
         title="Server settings"
         description="Server-wide options. Changes apply on Save and persist across restarts."
-        className="mb-6"
+        // Under the 4rem app header: Save and "Unsaved changes" stay in reach.
+        className="sticky top-16 z-20 mb-3 border-b bg-background py-3"
         actions={
           settings && (
             <>
