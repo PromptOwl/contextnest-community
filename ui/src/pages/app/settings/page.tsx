@@ -955,7 +955,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
         </div>
       ) : (
         <Tabs value={currentTab} onValueChange={setActiveTab}>
-          <TabsList>
+          {/* Wraps: the tabs are wider than the page beside the sidebar. */}
+          <TabsList className="h-auto flex-wrap justify-start">
             {visibleTabs.map((t) => (
               <TabsTrigger key={t.id} value={t.id} className="gap-1.5">
                 {t.label}
