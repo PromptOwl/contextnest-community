@@ -18,6 +18,7 @@ import {
   type GovernanceContext,
 } from "../ui/src/lib/board-tasks";
 import { newCardPlacement, resolveConfig, type BoardNode } from "../ui/src/lib/board-dimensions";
+import { filterForBoard } from "../src/nests/board-items";
 import { saveOutcome } from "../ui/src/lib/save-outcome";
 
 const node = (over: Partial<BoardNode> & { id: string }): BoardNode => ({
@@ -183,6 +184,11 @@ describe("blocked badge (task relations)", () => {
     for (const q of ["DPB-5", "dpb-5", "dpb"]) expect(matchesTitleFilter(card, q)).toBe(true);
     expect(matchesTitleFilter(card, "DPB-6")).toBe(false);
     expect(matchesTitleFilter(card, "backlog")).toBe(false);
+    // The board items agents read filter the same way.
+    const rows = [{ id: "nodes/a", type: "task", ...card }] as any;
+    const board = { dimension: "tag" } as any;
+    expect(filterForBoard(rows, board, { q: "Dpb-5" })).toHaveLength(1);
+    expect(filterForBoard(rows, board, { q: "DPB-6" })).toHaveLength(0);
   });
 });
 

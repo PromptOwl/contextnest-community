@@ -229,7 +229,7 @@ export function columnLabel(key: string, c: BoardConfig): string {
 export interface BoardListFilters {
   /** Lower-cased emails, plus "unassigned"; empty = everyone. */
   assignees?: string[];
-  /** Case-insensitive title substring. */
+  /** Case-insensitive substring of the title or the ticket number. */
   q?: string;
   now?: number;
 }
@@ -263,7 +263,10 @@ export function filterForBoard(
       if (!def) continue;
       if (!appliesTo(def, n.type) || !matchesFieldFilter(def, n.fields?.[key], wanted)) return false;
     }
-    if (q && !String(n.title ?? "").toLowerCase().includes(q)) return false;
+    if (q) {
+      const ticket = ticketFromTag(ticketTagOf(n.tags ?? []) ?? "") ?? "";
+      if (![String(n.title ?? ""), ticket].some((s) => s.toLowerCase().includes(q))) return false;
+    }
     return true;
   });
 }
