@@ -1672,7 +1672,7 @@ export default function App() {
           style={readerHeaderStyle}
           data-reader-brand-header={readerHeaderStyle ? "" : undefined}
         >
-        <div className={`${shellWidth} h-16 px-4 flex items-center justify-between gap-2`}>
+        <div className={`${shellWidth} [container:topbar/inline-size] h-16 px-4 flex items-center justify-between gap-2`}>
           {/* min-w-0 so the breadcrumb truncates on a phone instead of
               pushing the account row past the window edge. */}
           <div className="flex min-w-0 flex-1 items-center gap-1">
@@ -1767,15 +1767,15 @@ export default function App() {
                   ? "Search nests and documents (⌘K)"
                   : "Search this nest (⌘K)"
               }
-              className={`flex shrink-0 items-center gap-2 h-9 w-9 justify-center sm:w-44 lg:w-52 2xl:w-64 sm:justify-start sm:pl-3 sm:pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors`}
+              className={`flex shrink-0 items-center gap-2 h-9 w-9 justify-center ${withSidebar ? "bar-sm:w-44 bar-2xl:w-64 bar-sm:justify-start bar-sm:pl-3 bar-sm:pr-2" : "sm:w-44 lg:w-52 2xl:w-64 sm:justify-start sm:pl-3 sm:pr-2"} rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors`}
               aria-label="Search"
               data-testid="global-search-trigger"
             >
               <Search className="h-4 w-4 shrink-0" />
-              <span className="hidden sm:inline flex-1 text-left truncate">
+              <span className={`hidden ${withSidebar ? "bar-sm:inline" : "sm:inline"} flex-1 text-left truncate`}>
                 {view.page === "dashboard" ? "Search nests and documents…" : "Search this nest…"}
               </span>
-              <kbd className="hidden sm:inline text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
+              <kbd className={`hidden ${withSidebar ? "bar-sm:inline" : "sm:inline"} text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border`}>
                 ⌘K
               </kbd>
             </button>

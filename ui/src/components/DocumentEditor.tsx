@@ -4597,10 +4597,12 @@ export function DocumentEditor({
                           className="h-8 text-muted-foreground"
                           disabled={discarding}
                           onClick={() => setConfirmDiscard(true)}
+                          aria-label="Discard draft"
+                          title="Discard draft"
                           data-testid="document-editor-discard"
                         >
                           <Undo2 className="h-4 w-4 sm:mr-1.5" />
-                          <span className="hidden sm:inline">{discarding ? "Discarding…" : "Discard draft"}</span>
+                          <span className="hidden sm:inline bar-max-xl:hidden">{discarding ? "Discarding…" : "Discard draft"}</span>
                         </Button>
                       )}
                     {showSubmit && (
@@ -4609,11 +4611,12 @@ export function DocumentEditor({
                         size="sm"
                         className="h-8"
                         onClick={() => setShowSubmitModal(true)}
+                        aria-label="Submit for review"
                         data-testid="document-editor-submit"
                         title="Saves your changes and sends them to a steward for approval."
                       >
                         <Send className="h-4 w-4 sm:mr-1.5" />
-                        <span className="hidden sm:inline">Submit for review</span>
+                        <span className="hidden sm:inline bar-max-xl:hidden">Submit for review</span>
                       </Button>
                     )}
                     {/* Own pending submission auto-saves — a status line, not a Save button. */}
