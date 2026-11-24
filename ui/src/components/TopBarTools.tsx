@@ -145,7 +145,7 @@ export function TopBarTools({
           data-testid="top-bar-chat"
         >
           <MessagesSquare className="h-4 w-4 shrink-0" aria-hidden />
-          <span className="hidden whitespace-nowrap lg:inline">Chat</span>
+          <span className="hidden whitespace-nowrap bar-md:inline">Chat</span>
           <ChatCount counts={nestChat(chatSummary.data, nestId)} />
         </Button>
       )}
@@ -162,7 +162,7 @@ export function TopBarTools({
             data-testid="top-bar-views"
           >
             <LayoutGrid className="h-4 w-4 shrink-0" aria-hidden />
-            <span className="hidden whitespace-nowrap lg:inline">{activeLabel ?? "Views"}</span>
+            <span className="hidden whitespace-nowrap bar-md:inline">{activeLabel ?? "Views"}</span>
             <ChevronDown className="h-3.5 w-3.5 opacity-60" aria-hidden />
           </Button>
         </DropdownMenuTrigger>
@@ -259,7 +259,7 @@ export function TopBarTools({
       >
         <Plug className="h-4 w-4 shrink-0" aria-hidden />
         {/* Inside a nest Chat takes the room; Connect keeps its icon and title. */}
-        <span className={cn("hidden", nestId && chatView ? "2xl:inline" : "xl:inline")}>Connect</span>
+        <span className={cn("hidden", nestId && chatView ? "bar-2xl:inline" : "bar-xl:inline")}>Connect</span>
       </Button>
       {/* Same button on every screen. With no nest open it acts on the one you
           last had open. Hidden only where the open nest is read-only. */}
@@ -274,7 +274,7 @@ export function TopBarTools({
           data-testid="top-bar-new-document"
         >
           <Plus className="h-4 w-4 shrink-0" aria-hidden />
-          <span className="hidden xl:inline">New document</span>
+          <span className="hidden whitespace-nowrap bar-lg:inline">New document</span>
         </Button>
       )}
       {/* The open document's edit actions (Publish, Save draft, Submit) land

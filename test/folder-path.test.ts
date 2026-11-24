@@ -4,7 +4,7 @@
  * Mirrors folderToSegments in src/nodes/service.ts.
  */
 import { describe, it, expect } from "vitest";
-import { checkFolderPath } from "../ui/src/lib/folder-path";
+import { checkFolderPath, folderNamePreview } from "../ui/src/lib/folder-path";
 import { MAX_FOLDER_DEPTH } from "../ui/src/lib/constants";
 
 describe("checkFolderPath", () => {
@@ -61,5 +61,16 @@ describe("checkFolderPath", () => {
   it("rejects a segment that slugifies away, and one that is too long", () => {
     expect(checkFolderPath("!!!").error).toContain("a-z and 0-9");
     expect(checkFolderPath("a".repeat(101)).error).toContain("100 characters");
+  });
+});
+
+describe("folderNamePreview (po-1221)", () => {
+  it("says the shown name when the typed one changes, case alone included", () => {
+    expect(folderNamePreview("blocked waiting on external review")).toBe("Blocked Waiting On External Review");
+    expect(folderNamePreview("QA Team")).toBe("Qa Team");
+    expect(folderNamePreview("gtm/deals")).toBe("Gtm / Deals");
+  });
+  it("says nothing for a name kept as typed, an empty one or a refused one", () => {
+    for (const raw of ["In Progress", "", "..", "!!!"]) expect(folderNamePreview(raw)).toBeNull();
   });
 });

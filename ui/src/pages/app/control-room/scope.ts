@@ -11,6 +11,14 @@ export interface NestRef {
   name: string;
 }
 
+/** The picker's "All nests" row: a command item needs a non-empty value. */
+export const ALL_NESTS = "*";
+
+export const nestOptions = (nests: readonly NestRef[]) => [
+  { value: ALL_NESTS, label: "All nests" },
+  ...nests.map((n) => ({ value: n.id, label: n.name })),
+];
+
 export interface ControlRoomScope {
   /** null = all the nests the reader administers. */
   nestId: string | null;

@@ -78,6 +78,8 @@ class MyWorkPage {
     this.waitingHeading = page.getByRole('heading', { name: 'Waiting on others' });
     // The count pill sits beside the heading.
     this.waitingCount = this.waitingHeading.locator('xpath=following-sibling::span[1]');
+    // The list starts folded.
+    this.waitingToggle = page.getByTestId('my-work-waiting-toggle');
     this.waitingRows = this.root
       .locator('div.group')
       .filter({ hasNot: page.locator('span.uppercase') });

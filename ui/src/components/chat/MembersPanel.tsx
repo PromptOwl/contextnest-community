@@ -2,7 +2,7 @@
  * The members panel (PO-1200, AC-C3-16): who is in this channel or
  * conversation, who of them is around now, and "Add people" for those who
  * may invite. A public channel is open to everyone on the nest; its list is
- * who joined. Opens as a sheet from the right at every width.
+ * who joined, then who else can read it. Opens as a sheet from the right at every width.
  */
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -10,12 +10,31 @@ import { Loader2, Lock, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import * as api from "../../lib/api";
-import { memberRows, memberSpec } from "../../lib/chat-harness";
+import { memberRows, memberSpec, membersSummary, type MemberRow } from "../../lib/chat-harness";
 import { reads } from "../../lib/queries";
 import type { MentionMember } from "../MarkdownEditor/picker-match";
 import { ChatSheet, SheetClose } from "./ChatSheet";
 import { MemberAvatar, PeoplePicker, pickKey, type Candidate } from "./Presence";
 import { ErrorState } from "./States";
+
+function MemberList({ rows, testId }: { rows: MemberRow[]; testId: string }) {
+  return (
+    <ul data-testid={testId}>
+      {rows.map((r) => (
+        <li key={r.key} className="flex h-11 items-center gap-2.5 rounded-md px-2" data-testid="member-row">
+          <MemberAvatar kind={r.kind} label={r.label} email={r.email} online={r.online} />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-sm">
+              {r.label}
+              {r.you && <span className="ml-1.5 text-xs text-muted-foreground">(you)</span>}
+            </span>
+            <span className="block truncate text-xs text-muted-foreground">{r.kind === "agent" ? "Agent" : r.online ? "Around now" : r.email}</span>
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 export function MembersPanel({
   open,
@@ -41,17 +60,20 @@ export function MembersPanel({
 }) {
   const conv = channel.conversation;
   const members = useQuery({
-    ...reads.containerMembers(nestId, channel.name, async () => (conv ? conv.members : (await api.listChannelMembers(nestId, channel.name)).members)),
+    ...reads.containerMembers(nestId, channel.name, async () => (conv ? { members: conv.members } : api.listChannelMembers(nestId, channel.name))),
     enabled: open,
   });
-  const rows = useMemo(() => memberRows(members.data ?? [], online, me), [members.data, online, me]);
+  const rows = useMemo(() => memberRows(members.data?.members ?? [], online, me), [members.data, online, me]);
+  const others = useMemo(
+    () => memberRows((members.data?.audience ?? []).map((p) => ({ kind: "person", ...p, added_at: "" })), online, me),
+    [members.data, online, me],
+  );
   const [adding, setAdding] = useState(false);
   const [picked, setPicked] = useState<Candidate[]>([]);
   const [busy, setBusy] = useState(false);
   const inList = useMemo(() => new Set(rows.map((r) => r.key)), [rows]);
   // A dm is two people by definition; the server refuses to grow one.
   const canAdd = !channel.archived && channel.can_post && conv?.kind !== "dm";
-  const around = rows.filter((r) => r.online).length;
 
   const add = async () => {
     if (!picked.length) return;
@@ -85,7 +107,7 @@ export function MembersPanel({
                 <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden /> Private: only the people below can find and read it.
               </>
             ) : (
-              <>Everyone added to this nest can read and post here. These are the people who joined.</>
+              <>Everyone added to this nest can read and post here, whether or not they joined.</>
             )}
           </p>
         )}
@@ -103,23 +125,15 @@ export function MembersPanel({
         ) : (
           <>
             <p className="px-2 pb-1 text-xs font-semibold text-muted-foreground">
-              {rows.length} {rows.length === 1 ? "member" : "members"}
-              {around > 0 && ` · ${around} around now`}
+              {membersSummary(rows, others)}
             </p>
-            <ul data-testid="member-list">
-              {rows.map((r) => (
-                <li key={r.key} className="flex h-11 items-center gap-2.5 rounded-md px-2" data-testid="member-row">
-                  <MemberAvatar kind={r.kind} label={r.label} email={r.email} online={r.online} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm">
-                      {r.label}
-                      {r.you && <span className="ml-1.5 text-xs text-muted-foreground">(you)</span>}
-                    </span>
-                    <span className="block truncate text-xs text-muted-foreground">{r.kind === "agent" ? "Agent" : r.online ? "Around now" : r.email}</span>
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <MemberList rows={rows} testId="member-list" />
+            {others.length > 0 && (
+              <>
+                <p className="px-2 pb-1 pt-3 text-xs font-semibold text-muted-foreground">Also have access ({others.length})</p>
+                <MemberList rows={others} testId="member-audience" />
+              </>
+            )}
           </>
         )}
 

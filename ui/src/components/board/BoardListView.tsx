@@ -18,6 +18,7 @@ import {
   ChevronDown,
   Columns3,
   Loader2,
+  Plus,
   Tag,
   UserRound,
   X,
@@ -108,6 +109,9 @@ interface Props {
   me?: string;
   personLabel: (email: string) => string;
   canEdit: boolean;
+  /** May a task be added straight into this section? */
+  canAddTo: (key: string) => boolean;
+  onAddTask: (key: string) => void;
   governance: GovernanceContext;
   doneTags: string[];
   tagSuggestions: string[];
@@ -168,6 +172,8 @@ export function BoardListView({
   me,
   personLabel,
   canEdit,
+  canAddTo,
+  onAddTask,
   governance,
   doneTags,
   tagSuggestions,
@@ -470,7 +476,7 @@ export function BoardListView({
                   <div
                     key={`s:${r.key}`}
                     className="absolute inset-x-0 grid items-center border-b border-border bg-muted/30"
-                    style={{ top, height: SECTION_HEIGHT, gridTemplateColumns: `36px 1fr` }}
+                    style={{ top, height: SECTION_HEIGHT, gridTemplateColumns: `36px minmax(0,1fr) auto` }}
                   >
                     <span className="flex justify-center">
                       {canEdit && (
@@ -504,6 +510,17 @@ export function BoardListView({
                       </span>
                       <span className="text-xs font-normal text-muted-foreground tabular-nums">{r.count}</span>
                     </button>
+                    {canAddTo(r.key) && (
+                      <button
+                        type="button"
+                        onClick={() => onAddTask(r.key)}
+                        className="flex h-full items-center gap-1.5 px-3 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                        aria-label={`Add task to ${dimension === "assignee" && r.key !== UNCATEGORIZED ? personLabel(r.key) : r.label}`}
+                        data-testid={`list-add-task-${r.key}`}
+                      >
+                        <Plus className="h-3.5 w-3.5" /> Add task
+                      </button>
+                    )}
                   </div>
                 );
               }

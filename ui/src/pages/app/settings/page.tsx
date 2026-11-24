@@ -896,7 +896,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
         icon={Shield}
         title="Server settings"
         description="Server-wide options. Changes apply on Save and persist across restarts."
-        className="mb-6"
+        // Under the 4rem app header: Save and "Unsaved changes" stay in reach.
+        className="sticky top-16 z-20 mb-3 border-b bg-background py-3"
         actions={
           settings && (
             <>
@@ -955,7 +956,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
         </div>
       ) : (
         <Tabs value={currentTab} onValueChange={setActiveTab}>
-          <TabsList>
+          {/* Wraps: the tabs are wider than the page beside the sidebar. */}
+          <TabsList className="h-auto flex-wrap justify-start">
             {visibleTabs.map((t) => (
               <TabsTrigger key={t.id} value={t.id} className="gap-1.5">
                 {t.label}

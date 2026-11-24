@@ -3594,7 +3594,11 @@ export interface ChannelMembers {
   channel: ChannelSummary;
   private: boolean;
   members: ChatMember[];
+  /** Public channel: who can read and post without having joined. Absent on an older server. */
+  audience?: { email: string; name: string }[];
 }
+
+export type ContainerMembers = Pick<ChannelMembers, "members" | "audience">;
 
 export async function listChannelMembers(nestId: string, name: string) {
   return request<ChannelMembers>(`${channelPath(nestId, name)}/members`);

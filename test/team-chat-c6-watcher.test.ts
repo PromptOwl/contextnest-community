@@ -402,12 +402,12 @@ describe("AC-C6-10: a quiet-window run proposes through the persona's draft + re
     await vi.waitFor(
       async () => {
         const w = await getWatch(owner);
-        expect(w.data.watch.last_run?.trigger).toBe("quiet");
+        // On a slow machine the window can fire before the reply: that batch is
+        // too short and stays silent, and the reply starts a new window.
+        expect(w.data.watch.last_run).toMatchObject({ trigger: "quiet", ran: true, verdict: "no_op", proposals: 0 });
       },
       { timeout: 4000, interval: 25 },
     );
-    const w = await getWatch(owner);
-    expect(w.data.watch.last_run).toMatchObject({ trigger: "quiet", ran: true, verdict: "no_op", proposals: 0 });
     expect(requests).toHaveLength(1);
   });
 
