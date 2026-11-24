@@ -1,6 +1,6 @@
 /** Open a dedicated dialog when creating a task via Board. */
 import { describe, it, expect } from "vitest";
-import { folderChoices, newTaskPayload } from "./CreateTaskDialog";
+import { newTaskPayload } from "./CreateTaskDialog";
 
 describe("newTaskPayload", () => {
   it("sends every field the dialog set, with the title trimmed", () => {
@@ -39,14 +39,5 @@ describe("newTaskPayload", () => {
 
   it("refuses a blank title", () => {
     expect(newTaskPayload({ title: "   ", content: "notes" })).toBeNull();
-  });
-});
-
-describe("po-1207: folderChoices", () => {
-  it("lists the nest root first, then each folder once", () => {
-    expect(folderChoices(["second", "Root", "gtm/deals", "second"]).map((o) => o.label)).toEqual(["Nest root", "Gtm / Deals", "Second"]);
-  });
-  it("keeps the column's folder while the list is still loading", () => {
-    expect(folderChoices([], "gtm").map((o) => o.value)).toContain("gtm");
   });
 });

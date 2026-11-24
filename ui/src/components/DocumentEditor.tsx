@@ -113,7 +113,8 @@ import { tableDiffSides } from "../lib/csv-table";
 import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { CodeHighlight } from "./CodeHighlight";
-import { prettyFolder, prettyFolderPath } from "./FolderTree";
+import { prettyFolder } from "./FolderTree";
+import { FolderSelect } from "./FolderSelect";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { PublishDialog } from "./PublishDialog";
 import { shareDocumentLink } from "../lib/share-link";
@@ -2411,22 +2412,7 @@ export function DocumentEditor({
             Move <strong>{title || nodeId}</strong> to another folder. Version
             history, review state, and [[wiki links]] follow the document.
           </p>
-          <Select
-            value={moveTo === "" ? "__root__" : (moveTo ?? "__root__")}
-            onValueChange={(v) => setMoveTo(v === "__root__" ? "" : v)}
-          >
-            <SelectTrigger data-testid="document-editor-move-select">
-              <SelectValue placeholder="Choose a folder" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__root__">Nest root</SelectItem>
-              {folderOptions.map((f) => (
-                <SelectItem key={f} value={f}>
-                  {prettyFolderPath(f)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <FolderSelect value={moveTo ?? ""} onChange={setMoveTo} folders={folderOptions} testId="document-editor-move-select" />
           <DialogFooter>
             <Button variant="ghost" disabled={moving} onClick={() => setMoveTo(null)}>
               Cancel

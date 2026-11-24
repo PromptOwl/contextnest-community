@@ -17,8 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { AssigneeMenu, type Person } from "./CardParts";
 import { usePriorityLevels } from "../../lib/priorities";
-import { prettyFolderPath } from "../FolderTree";
-import { SearchableSelect, type SearchableOption } from "../SearchableSelect";
+import { FolderSelect } from "../FolderSelect";
 
 export interface NewTask {
   title: string;
@@ -46,15 +45,6 @@ export function newTaskPayload(f: NewTask): NewTask | null {
     ...(f.surfaceTag ? { surfaceTag: f.surfaceTag } : {}),
     ...(f.folder !== undefined ? { folder: f.folder } : {}),
   };
-}
-
-/** The picker's row for the nest root: a list item needs a non-empty value. */
-const ROOT = "/";
-
-/** Nest root first, then every folder once, by name. */
-export function folderChoices(folders: readonly string[], current?: string): SearchableOption[] {
-  const paths = [...new Set([...folders, current ?? ""])].filter((f) => f && f !== "Root").sort();
-  return [{ value: ROOT, label: "Nest root" }, ...paths.map((f) => ({ value: f, label: prettyFolderPath(f) }))];
 }
 
 export function CreateTaskDialog({
@@ -181,16 +171,7 @@ export function CreateTaskDialog({
             />
           </div>
           {folders && (
-            <SearchableSelect
-              ariaLabel="Folder"
-              value={folder || ROOT}
-              onChange={(v) => setFolder(v === ROOT ? "" : v)}
-              options={folderChoices(folders, initial?.folder)}
-              searchPlaceholder="Search folders…"
-              emptyText="No folders match."
-              disabled={saving}
-              testId="create-task-folder"
-            />
+            <FolderSelect value={folder} onChange={setFolder} folders={folders} disabled={saving} testId="create-task-folder" />
           )}
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={onClose} disabled={saving}>
