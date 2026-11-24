@@ -67,7 +67,7 @@ interface Props {
   nestId: string;
   /** Set when adding a sub-item. */
   parentTitle?: string;
-  initial?: { assignee?: string; priority?: string; folder?: string };
+  initial?: Partial<NewTask>;
   people: Person[];
   me?: string;
   /** The nest's surfaces, each with the tag it adds. Empty: no picker. */
@@ -85,6 +85,7 @@ export function CreateTaskDialog({ parentTitle, initial, onSubmit, onClose, ...r
   const [saving, setSaving] = useState(false);
   // "Create and add another" remounts the form: every field starts over and
   // the title takes the focus. Only the folder carries on, like the column.
+  // A refused task's text comes back as `initial`; the next one starts blank.
   const [round, setRound] = useState(0);
   const [folder, setFolder] = useState(initial?.folder ?? "");
 
@@ -117,7 +118,7 @@ export function CreateTaskDialog({ parentTitle, initial, onSubmit, onClose, ...r
         <TaskForm
           key={round}
           {...rest}
-          initial={initial}
+          initial={round === 0 ? initial : { assignee: initial?.assignee, priority: initial?.priority }}
           folder={folder}
           onFolder={setFolder}
           saving={saving}
@@ -148,13 +149,13 @@ export function TaskForm({
   saving: boolean;
   onSubmit: (task: NewTask, another: boolean) => void;
 }) {
-  const [title, setTitle] = useState("");
-  const [content, setContent] = useState("");
+  const [title, setTitle] = useState(initial?.title ?? "");
+  const [content, setContent] = useState(initial?.content ?? "");
   const [assignee, setAssignee] = useState(initial?.assignee);
   const levels = usePriorityLevels();
   const [priority, setPriority] = useState(initial?.priority ?? "");
-  const [due, setDue] = useState("");
-  const [surfaceTag, setSurfaceTag] = useState(defaultSurface ?? "");
+  const [due, setDue] = useState(initial?.due ?? "");
+  const [surfaceTag, setSurfaceTag] = useState(initial?.surfaceTag ?? defaultSurface ?? "");
 
   const submit = (another: boolean) => {
     const task = newTaskPayload({ title, content, assignee, priority, due, surfaceTag, ...(folders ? { folder } : {}) });

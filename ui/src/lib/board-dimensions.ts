@@ -898,3 +898,33 @@ export function laneFields(
   const v = laneKey === UNCATEGORIZED ? null : laneKey;
   return { [lane]: v };
 }
+
+const CREATING = "creating:";
+let creatingSeq = 0;
+
+/** Is this the stand-in for a task the server is still creating? It has no
+ *  document yet, so it cannot be opened, dragged or edited. */
+export function isCreatingCard(id: string): boolean {
+  return id.includes(CREATING);
+}
+
+/** The card to show at once for a create request, in the column, lane and
+ *  folder the request puts it in. */
+export function creatingCard(payload: Record<string, any>): BoardNode {
+  const leaf = `${CREATING}${++creatingSeq}`;
+  const now = new Date().toISOString();
+  return {
+    id: payload.folder ? `nodes/${payload.folder}/${leaf}` : `nodes/${leaf}`,
+    title: payload.title,
+    type: payload.type,
+    tags: payload.tags ?? [],
+    status: "",
+    assignee: payload.assignee ?? undefined,
+    priority: payload.priority ?? undefined,
+    due: payload.due ?? undefined,
+    parent: payload.parent ?? undefined,
+    fields: payload.fields,
+    created_at: now,
+    updated_at: now,
+  };
+}

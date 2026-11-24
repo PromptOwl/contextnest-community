@@ -9,6 +9,8 @@ import {
   groupByColumn,
   migrateLayout,
   planMove,
+  creatingCard,
+  isCreatingCard,
   optimisticMove,
   resolveConfig,
   STATUS_ORDER,
@@ -726,5 +728,18 @@ describe("optimisticMove", () => {
     expect(out.fields).toEqual({ stage: "b" });
     expect(out.assignee).toBe("bob@acme.dev");
     expect(n.fields).toEqual({ stage: "a", size: "s" }); // input untouched
+  });
+});
+
+describe("po-1520: the card shown while a task is created", () => {
+  it("sits where the request puts it and is recognised as not created yet", () => {
+    const card = creatingCard({ title: "Fix login", type: "task", folder: "gtm/deals", tags: ["#stage:backlog"], assignee: "ada@acme.dev" });
+    expect(card).toMatchObject({ title: "Fix login", type: "task", tags: ["#stage:backlog"], assignee: "ada@acme.dev" });
+    expect(folderOf(card.id)).toBe("gtm/deals");
+    expect(isCreatingCard(card.id)).toBe(true);
+    expect(isCreatingCard("nodes/gtm/deals/fix-login")).toBe(false);
+  });
+  it("two at once keep separate ids", () => {
+    expect(creatingCard({ title: "A" }).id).not.toBe(creatingCard({ title: "A" }).id);
   });
 });

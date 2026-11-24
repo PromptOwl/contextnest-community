@@ -65,6 +65,8 @@ import {
   withoutPattern,
   newCardPlacement,
   planMove,
+  creatingCard,
+  isCreatingCard,
   optimisticMove,
   resolveConfig,
   buildLanes,
@@ -349,6 +351,9 @@ function MaturityBoardInner({
     return () => clearInterval(t);
   }, [fieldDefs]);
   const [nodes, setNodes] = useState<BoardNode[]>([]);
+  // Cards whose create request is still running. Kept out of `nodes`, so every
+  // edit, drag and bulk action treats them as not there yet.
+  const [creating, setCreating] = useState<BoardNode[]>([]);
   // Numbering is off and the board holds tasks: admins get a pointer to the
   // switch instead of cards that silently lack a number.
   // Numbering is on (the default) but some tasks predate it: admins can number
@@ -709,7 +714,7 @@ function MaturityBoardInner({
 
   const visibleNodes = useMemo(
     () =>
-      nodes.filter(
+      [...nodes, ...creating].filter(
         (n) =>
           // Without the engine's task type "+ Add task" makes documents, so
           // Tasks only would hide every card added here.
@@ -730,10 +735,17 @@ function MaturityBoardInner({
           ) &&
           matchesFieldFilters(n, config.filterFields, fieldDefs),
       ),
-    [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.filterFields, fieldDefs, config.hideDoneAfterDays, assigneeFilter, hideBlocked, filterDraft],
+    [nodes, creating, config.tasksOnly, typeTaskEnabled, config.filterTags, config.filterFields, fieldDefs, config.hideDoneAfterDays, assigneeFilter, hideBlocked, filterDraft],
   );
 
-  const [addingIn, setAddingIn] = useState<{ cell: string; col: string; lane?: string; parent?: string } | null>(null);
+  const [addingIn, setAddingIn] = useState<{
+    cell: string;
+    col: string;
+    lane?: string;
+    parent?: string;
+    /** A task the server refused, back in the dialog to fix. */
+    draft?: NewTask;
+  } | null>(null);
   // Folders with nothing in them — the sidebar's census read (shared cache), so
   // the folder board lists the same folders the tree does.
   const census = useQuery({
@@ -908,6 +920,7 @@ function MaturityBoardInner({
       const placement = newCardPlacement(colKey, effectiveConfig);
       if (!placement) return;
       const { content, surfaceTag, ...details } = task;
+      let card: BoardNode | undefined;
       try {
         const payload: Record<string, any> = {
           // The create route requires a body; a task's notes may start empty.
@@ -960,13 +973,15 @@ function MaturityBoardInner({
         // the column and filters already put on the card.
         if (payload.folder === "") delete payload.folder; // the nest root
         if (surfaceTag) payload.tags = [...new Set([...(payload.tags ?? []), `#${surfaceTag}`])];
+        const shown = (card = creatingCard(payload));
+        setCreating((cs) => [...cs, shown]);
         const res = await api.createNode(nestId, payload as any);
         qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
-        // Refresh the board so the new card shows — don't wait.
-        void load({ silent: true });
+        // The real card replaces the stand-in.
+        void load({ silent: true }).then(() => setCreating((cs) => cs.filter((c) => c !== shown)));
         return res?.node?.id as string | undefined;
       } catch (e: any) {
-        toast.error(e?.message || "Couldn't add the task");
+        setCreating((cs) => cs.filter((c) => c !== card));
         throw e;
       }
     },
@@ -1628,7 +1643,8 @@ function MaturityBoardInner({
                     p?.cell === cell && p.before === before ? p : { cell, before },
                   );
                 }}
-                draggable={draggable}
+                draggable={draggable && !isCreatingCard(n.id)}
+                aria-busy={isCreatingCard(n.id) || undefined}
                 onDragStart={(e) => {
                   setDragId(n.id);
                   setDragFromCol(col.key);
@@ -1644,7 +1660,7 @@ function MaturityBoardInner({
                 onClick={() => onOpenDocument(n.id)}
                 className={`group rounded-lg border border-border bg-card px-3 py-2.5 text-sm cursor-pointer shadow-sm hover:border-primary/50 hover:shadow-md transition ${
                   dragId === n.id ? "opacity-50" : ""
-                } ${busy ? "pointer-events-none" : ""}`}
+                } ${busy ? "pointer-events-none" : ""} ${isCreatingCard(n.id) ? "pointer-events-none opacity-60" : ""}`}
               >
                 {/* A sub-item names its parent, as ClickUp does. Redundant
                     inside its parent's own swimlane, so hidden there. */}
@@ -1801,6 +1817,7 @@ function MaturityBoardInner({
       {/* One dialog for every column and lane, on the board and in the list. */}
       {addingIn && (
         <CreateTaskDialog
+          key={addingIn.draft ? "retry" : "new"}
           nestId={nestId}
           parentTitle={
             addingIn.parent ? nodes.find((x) => x.id === addingIn.parent)?.title ?? "task" : undefined
@@ -1813,6 +1830,7 @@ function MaturityBoardInner({
                 : undefined),
             priority: newCardPlacement(addingIn.col, effectiveConfig)?.priority,
             folder: newCardPlacement(addingIn.col, effectiveConfig)?.folder,
+            ...addingIn.draft,
           }}
           folders={allFolders}
           people={members}
@@ -1820,13 +1838,25 @@ function MaturityBoardInner({
           surfaces={surfaceChoices}
           defaultSurface={defaultSurfaceTag}
           onSubmit={async (task, another) => {
-            const id = await createCard(addingIn.col, task, addingIn.parent, addingIn.lane);
-            if (!another) setAddingIn(null);
+            // The card shows at once and the dialog does not wait (po-1520).
             // Stay on the Board (PO-1246); the card lands in its column.
-            if (id)
-              toast.success(`Task "${task.title}" created`, {
-                action: { label: "Open", onClick: () => onOpenDocument(id) },
-              });
+            const at = addingIn;
+            if (!another) setAddingIn(null);
+            createCard(at.col, task, at.parent, at.lane).then(
+              (id) => {
+                if (id)
+                  toast.success(`Task "${task.title}" created`, {
+                    action: { label: "Open", onClick: () => onOpenDocument(id) },
+                  });
+              },
+              // Nothing typed is lost: the toast stays and brings it back.
+              (e: any) =>
+                toast.error(`Task "${task.title}" was not created`, {
+                  description: e?.message,
+                  duration: Infinity,
+                  action: { label: "Edit and retry", onClick: () => setAddingIn({ ...at, draft: task }) },
+                }),
+            );
           }}
           onClose={() => setAddingIn(null)}
         />
@@ -2565,7 +2595,7 @@ function MaturityBoardInner({
           governance={governance}
           doneTags={doneTags}
           tagSuggestions={allTagValues}
-          onOpen={onOpenDocument}
+          onOpen={(id) => !isCreatingCard(id) && onOpenDocument(id)}
           onChanged={async () => {
             await qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
             await load({ silent: true });
