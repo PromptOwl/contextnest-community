@@ -2221,7 +2221,8 @@ function MaturityBoardInner({
               Review status (draft, pending, published) is{" "}
               <span className="font-medium text-foreground">read-only</span>{" "}
               here — move a doc through review in the document view. To group tasks by
-              stage, pick the stage option instead.
+              stage, pick <span className="font-medium text-foreground">Tag</span> under Columns, then{" "}
+              <span className="font-medium text-foreground">stage:</span> in the list beside it.
             </li>
             <li>
               Switch to{" "}
