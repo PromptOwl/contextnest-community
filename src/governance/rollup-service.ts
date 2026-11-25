@@ -7,6 +7,7 @@
  * sum to the range total (AC-CR-10). No cache: research §5 defers one until
  * the read is measured slow, and then only as a rebuildable derivative.
  */
+import { managedAgents } from "../metacognition/managed.js";
 import { getDb } from "../db/client.js";
 import { dbTimeMs } from "../shared/db-time.js";
 import { PRIVATE_CONVERSATION, PRIVATE_TITLE, n1Redacts, personalOwners } from "../surfaces/n1.js";
@@ -103,7 +104,9 @@ export async function rollups(
       const row = (await db.get("SELECT title FROM node_index WHERE nest_id = ? AND node_id = ?", [g.nestId, g.key])) as
         | { title: string }
         | undefined;
-      label = row?.title || g.key.split("/").pop() || g.key;
+      // A listener has no document: its channel (or the name an admin gave it) names it, never in a private nest.
+      const named = !row?.title && !n1 && g.key.startsWith("nodes/nest-listener-") ? (await managedAgents(g.nestId)).get(g.key)?.name : null;
+      label = row?.title || named || g.key.split("/").pop() || g.key;
     } else if (by === "nest") {
       const row = (await db.get("SELECT name FROM nests WHERE id = ?", [g.key])) as { name: string } | undefined;
       label = n1 ? PRIVATE_TITLE : row?.name ?? g.key;

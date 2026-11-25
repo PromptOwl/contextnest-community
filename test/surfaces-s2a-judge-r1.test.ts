@@ -1049,6 +1049,20 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     expect(r.calls[0].system).toContain('target_folder must be one of: "inbox/"');
     expect(JSON.parse(r.w.blocked)).toEqual({ over_limit: 1 });
     expect(r.w.item_count).toBe(1);
+    const tr = await jsonRequest(app, "GET", `/ledger/win_${r.w.id}`, undefined, root.apiKey);
+    expect(tr.data.entry.agent.name).toBe("General ears");
+    const roll = await jsonRequest(app, "GET", `/nests/${F}/rollups?${new URLSearchParams({ ...range(), by: "agent", grain: "week" })}`, undefined, root.apiKey);
+    expect(roll.status).toBe(200);
+    expect(roll.data.rows.map((x: any) => x.label)).toContain("General ears");
+
+    // EX-15: with no name of its own, a listener is called by its channel, on every screen.
+    expect((await jsonRequest(app, "PATCH", `/surfaces/bindings/${r.id}`, { judge: { name: null } }, alice.apiKey)).status).toBe(200);
+    const called = `c427 nest agent ${l.node_id.split("-").pop()}`;
+    expect((await jsonRequest(app, "GET", `/ledger/win_${r.w.id}`, undefined, root.apiKey)).data.entry.agent.name).toBe(called);
+    const again = await jsonRequest(app, "GET", `/nests/${F}/rollups?${new URLSearchParams({ ...range(), by: "agent", grain: "week" })}`, undefined, root.apiKey);
+    expect(again.data.rows.map((x: any) => x.label)).toContain(called);
+    const list = await jsonRequest(app, "GET", `/nests/${F}/metacognition`, undefined, alice.apiKey);
+    expect(list.data.agents.find((a: any) => a.node_id === l.node_id).persona.name).toBe(called);
 
     // Two steps: a third turn is never asked for.
     const loop = await judgeOnce("C428", () => ({ content: [{ type: "tool_use", id: `t${Math.random()}`, name: "list_nodes", input: { folder: "inbox" } }], stop_reason: "tool_use", usage: { input_tokens: 10, output_tokens: 10 } }), { max_turns: 2 });

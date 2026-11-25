@@ -9,7 +9,7 @@ import { Label } from "@/components/ui/label";
 import { listSurfacesBindings, updateSurfacesListener, type SurfacesBinding, type SurfacesJudgeTuning } from "../../../lib/api";
 
 export const FIELDS = [
-  { key: "name", label: "Name", hint: "Blank: Nest listener", min: 0, max: 0 },
+  { key: "name", label: "Name", hint: "Blank: the channel's name, nest agent and its id", min: 0, max: 0 },
   { key: "avatar", label: "Picture", hint: "An emoji or up to 4 letters", min: 0, max: 0 },
   { key: "model", label: "Model", hint: "Blank: the server's judge model", min: 0, max: 0 },
   { key: "max_output_tokens", label: "Max output tokens", hint: "500 to 8000. Blank: 1500. Reasoning models need more", min: 500, max: 8000 },
