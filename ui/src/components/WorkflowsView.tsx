@@ -2399,9 +2399,10 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                     </div>
                     <p className="text-[11px] text-muted-foreground">
                       Each trigger is a secret URL that queues a run — message
-                      text becomes the run's inputs. Add
-                      SLACK_SIGNING_SECRET to the Tool environment to verify
-                      Slack requests.
+                      text becomes the run's inputs. Slack and Teams triggers
+                      refuse every request until SLACK_SIGNING_SECRET /
+                      TEAMS_WEBHOOK_SECRET is in the Tool environment. For
+                      Slack, add it before you give Slack the URL.
                     </p>
                   </div>
                 )}
