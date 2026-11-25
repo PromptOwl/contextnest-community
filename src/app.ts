@@ -94,7 +94,7 @@ import {
 } from "./workflow/run-routes.js";
 import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { metacognitionRoutes } from "./metacognition/routes.js";
-import { envRoutes } from "./workflow/env-routes.js";
+import { envRoutes, storedEnvValues } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
 import { onboardingRoutes } from "./onboarding/routes.js";
 import { surfacesRoutes, linkPageRoutes } from "./surfaces/routes.js";
@@ -1181,7 +1181,7 @@ export function createApp(): Hono<AuthEnv> {
       return c.json({ error: "Only the server admin can view this." }, 403);
     // With a nest, what that nest's calls can reach: its own key comes first.
     const forNest = c.req.query("nest_id");
-    const credential = resolveModelCredential(forNest ? await (await import("./workflow/env-routes.js")).storedEnvValues(forNest) : {});
+    const credential = resolveModelCredential(forNest ? await storedEnvValues(forNest) : {});
     const current = hootieModel(credential);
     // On the server's own gateway every call stays there, so PromptOwl-held
     // own-provider models aren't offered.
@@ -1602,8 +1602,9 @@ export function createApp(): Hono<AuthEnv> {
     if ("surfaces_quiet_minutes" in body) {
       const raw = body.surfaces_quiet_minutes;
       const n = raw === null || String(raw).trim() === "" ? DEFAULT_SURFACE_SETTINGS.quiet_minutes : Number(raw);
+      const now = await getSurfaceSettings();
       try {
-        applySettingsPatch(await getSurfaceSettings(), { quiet_minutes: n });
+        applySettingsPatch(now, { quiet_minutes: n });
         quietMinutes = n;
       } catch {
         addError("surfaces_quiet_minutes", `Quiet window must be a whole number of minutes from 5 to 240 (empty uses the default, ${DEFAULT_SURFACE_SETTINGS.quiet_minutes}).`);
@@ -2170,13 +2171,24 @@ export function createApp(): Hono<AuthEnv> {
           .map((p) => authOrEmailSetting(p.name)!),
       ),
     ];
+    // First, so when it fails nothing else has been saved.
+    if (quietMinutes !== null) {
+      try {
+        await updateSurfaceSettings({ quiet_minutes: quietMinutes });
+      } catch (e) {
+        return c.json(
+          { error: `Nothing was saved. Could not save the quiet window: ${e instanceof Error ? e.message : String(e)}`, settings: await currentServerSettings() },
+          500,
+        );
+      }
+    }
     for (const { name, value } of pending) {
       try {
         await persistSetting(name, value);
       } catch (e) {
         return c.json(
           {
-            error: `Could not persist ${name}: ${e instanceof Error ? e.message : String(e)}`,
+            error: `Could not persist ${name}: ${e instanceof Error ? e.message : String(e)}. Other settings in this save may already be stored.`,
             settings: await currentServerSettings(),
           },
           500
@@ -2184,16 +2196,6 @@ export function createApp(): Hono<AuthEnv> {
       }
       if (value === null) delete process.env[name];
       else process.env[name] = value;
-    }
-    if (quietMinutes !== null) {
-      try {
-        await updateSurfaceSettings({ quiet_minutes: quietMinutes });
-      } catch (e) {
-        return c.json(
-          { error: `Could not save the quiet window: ${e instanceof Error ? e.message : String(e)}`, settings: await currentServerSettings() },
-          500,
-        );
-      }
     }
     // Round 9: queued once the save has committed (the outbox delivers and
     // retries in the background; the Slack DM doesn't depend on mail settings).

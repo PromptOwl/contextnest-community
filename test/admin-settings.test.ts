@@ -406,6 +406,23 @@ describe("/admin/settings — validation", () => {
     expect((await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_org_name: "Evil" }, stranger.apiKey)).status).toBe(403);
   });
 
+  it("a quiet window that can't be stored saves nothing else either", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    const { getDb } = await import("../src/db/client.js");
+    await getDb().run("CREATE TRIGGER no_surface_settings BEFORE INSERT ON surface_settings BEGIN SELECT RAISE(ABORT, 'disk full'); END", []);
+    try {
+      const r = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_quiet_minutes: "5", surfaces_org_name: "Half Saved" }, admin.apiKey);
+      expect(r.status).toBe(500);
+      expect(r.data.error).toMatch(/^Nothing was saved/);
+      expect(r.data.settings).toMatchObject({ surfaces_quiet_minutes: 20 });
+      expect(r.data.settings.surfaces_org_name).not.toBe("Half Saved");
+      expect((await persistedSetting("SURFACES_ORG_NAME")) ?? null).not.toBe("Half Saved");
+    } finally {
+      await getDb().run("DROP TRIGGER no_surface_settings", []);
+    }
+  });
+
   it("experimental doc stream: its own switch beside plane + metacognition, each reported as set", async () => {
     const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
     const admin = await registerUser(app, OWNER_EMAIL);

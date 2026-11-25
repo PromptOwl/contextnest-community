@@ -44,6 +44,9 @@ describe("mayRepairInvalid", () => {
   it("a wrong shape may be repaired; a flagged, sensitive or never-propose answer may not", () => {
     expect(mayRepairInvalid({ items: [item({ title: "x".repeat(90) })] }, [])).toBe(true);
     expect(mayRepairInvalid({ items: [item({ sensitive: true })] }, [])).toBe(false);
+    // Whichever item it is in.
+    const long = item({ title: "x".repeat(90) });
+    for (const second of [item({ sensitive: true }), item({ body: "Her salary is 90000." })]) expect(mayRepairInvalid({ items: [long, second] }, [])).toBe(false);
     expect(mayRepairInvalid({ items: [item({ title: "x".repeat(90), body: "Her salary is 90000." })] }, [])).toBe(false);
     expect(mayRepairInvalid({ items: [item({ body: "The compensation plan." })] }, ["compensation"])).toBe(false);
     expect(mayRepairInvalid(null, [])).toBe(false);
