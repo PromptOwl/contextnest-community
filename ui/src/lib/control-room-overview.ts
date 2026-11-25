@@ -454,6 +454,27 @@ export function agentRows(agentRollups: RollupRow[]): AgentRow[] {
   return out.sort((a, b) => (a.lastAt < b.lastAt ? 1 : a.lastAt > b.lastAt ? -1 : a.name.localeCompare(b.name)));
 }
 
+/**
+ * The list plus every connected channel's listener that has no row yet, so a new
+ * listener can be seen and set up before its first conversation. `lastAt` "" = none.
+ */
+export function withIdleListeners(
+  rows: AgentRow[],
+  bindings: Array<{ nest_id: string; status: string; listener_agent_node_id?: string | null; listener_name?: string | null; conversation_kind?: string }>,
+  nestId: string | null,
+): AgentRow[] {
+  const have = new Set(rows.map((r) => r.id));
+  const idle: AgentRow[] = [];
+  for (const b of bindings) {
+    const nodeId = b.listener_agent_node_id;
+    const id = `${b.nest_id}\u0000${nodeId}`;
+    if (!nodeId || b.status === "removed" || b.conversation_kind === "dm" || (nestId && b.nest_id !== nestId) || have.has(id)) continue;
+    have.add(id);
+    idle.push({ id, nodeId, nestId: b.nest_id, name: b.listener_name || nodeId.split("/").pop() || nodeId, source: "surfaces", totals: sumRows([]), approvedPct: null, lastAt: "" });
+  }
+  return [...rows, ...idle.sort((a, b) => a.name.localeCompare(b.name))];
+}
+
 /** Rollup table rows, newest bucket first, then by label. */
 export function rollupTable(rows: RollupRow[]): RollupRow[] {
   return [...rows].sort((a, b) => (a.bucket === b.bucket ? (a.label ?? a.key).localeCompare(b.label ?? b.key) : a.bucket < b.bucket ? 1 : -1));

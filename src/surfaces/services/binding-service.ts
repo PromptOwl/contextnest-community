@@ -9,6 +9,7 @@
  */
 import { v4 as uuid } from "uuid";
 import { readJudgeTuning, starterFolders } from "./judge-tuning.js";
+import { listenerName } from "../../metacognition/managed.js";
 import { getAgent } from "../../metacognition/store.js";
 import { getDb } from "../../db/client.js";
 import { config } from "../../config.js";
@@ -256,6 +257,7 @@ export async function bindingView(row: BindingRow) {
     listener_agent_node_id: row.listener_agent_node_id,
     judge: readJudgeTuning(listener?.config),
     listener_folders: starterFolders(listener?.config),
+    listener_name: listener ? listenerName(listener.persona.name, row.conversation_kind === "dm" ? null : row.conversation_name, listener.node_id) : null,
     explicit_public_bind: !!row.explicit_public_bind,
     is_ext_shared: !!row.is_ext_shared,
     ext_capture_enabled: !!row.ext_capture_enabled,

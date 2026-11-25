@@ -5627,6 +5627,9 @@ export interface SurfacesBinding {
   judge?: SurfacesJudgeTuning;
   /** The folders its starter gave it: what `judge.folders` may narrow. */
   listener_folders?: string[];
+  /** What the listener is called; null = no better name than its id. */
+  listener_name?: string | null;
+  conversation_kind?: string;
   [k: string]: unknown;
 }
 
