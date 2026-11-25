@@ -2,15 +2,12 @@ import { useState } from "react";
 import { FolderInput, Loader2, Send, Tag, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../../lib/api";
-import { prettyFolderPath } from "../FolderTree";
+import { FolderSelect } from "../FolderSelect";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
 
 type Row = { id: string; title?: string; outcome: string; code?: string; reason?: string };
 type Action = "move" | "tag" | "delete" | "submit";
@@ -48,7 +45,7 @@ export function BulkSelectionBar({
   onDone: () => void;
 }) {
   const [action, setAction] = useState<Action | null>(null);
-  const [dest, setDest] = useState("__root__");
+  const [dest, setDest] = useState("");
   const [addTags, setAddTags] = useState("");
   const [removeTags, setRemoveTags] = useState("");
   const [busy, setBusy] = useState(false);
@@ -66,7 +63,7 @@ export function BulkSelectionBar({
       let res: { requested: number; skipped: number; failed: number; results: Row[] };
       let done: number;
       if (action === "move") {
-        const r = await api.bulkMoveNodes(nestId, ids, dest === "__root__" ? "" : dest);
+        const r = await api.bulkMoveNodes(nestId, ids, dest);
         res = r;
         done = r.done;
       } else if (action === "delete") {
@@ -183,17 +180,7 @@ export function BulkSelectionBar({
                 Version history, review state and [[wiki links]] follow each document. Ones under
                 review or that you can't edit are skipped and listed.
               </p>
-              <Select value={dest} onValueChange={setDest}>
-                <SelectTrigger data-testid="bulk-move-select">
-                  <SelectValue placeholder="Choose a folder" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__root__">Nest root</SelectItem>
-                  {folders.map((f) => (
-                    <SelectItem key={f} value={f}>{prettyFolderPath(f)}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <FolderSelect value={dest} onChange={setDest} folders={folders} testId="bulk-move-select" />
             </>
           )}
           {action === "tag" && (

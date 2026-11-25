@@ -22,8 +22,9 @@ export function safeNestReturn(value: string | null | undefined): string | null 
   if (!value) return null;
   // The fixed prefix rules out `//host` and `/\host`; no scheme can precede it.
   if (!/^\/nest\/[^/?#\\]+(?:[/?#][^\\]*)?$/.test(value)) return null;
-  // No `.` or `..` path segment: the address must stay under /nest/<id>.
+  // No `.` or `..` segment, plain or encoded (`%2e`): it must stay under /nest/<id>.
   const path = value.split(/[?#]/)[0];
+  if (/%2e/i.test(path)) return null;
   return path.split("/").some((seg) => seg === "." || seg === "..") ? null : value;
 }
 
@@ -46,6 +47,27 @@ export function takeNestReturn(store: Store = sessionStorage, now = Date.now()):
     const { value, at } = JSON.parse(raw) as { value?: string; at?: number };
     if (!at || now - at > MAX_AGE_MS) return null;
     return safeNestReturn(value);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The sign-in page's address while a nest link waits behind it (PO-1200):
+ * `/?next=<link>`. The link stays visible, so a reload, a copy into a new
+ * tab, or a sign-in that leaves the page and comes back with the address
+ * still returns to it — sessionStorage alone is one tab's. A link that would
+ * not be followed is not written.
+ */
+export function signInAddress(link: string): string {
+  const value = safeNestReturn(link);
+  return value ? `/?next=${encodeURIComponent(value)}` : "/";
+}
+
+/** The `?next=` link in a query string, if it is one this app follows. */
+export function nextFromSearch(search: string): string | null {
+  try {
+    return safeNestReturn(new URLSearchParams(search).get("next"));
   } catch {
     return null;
   }

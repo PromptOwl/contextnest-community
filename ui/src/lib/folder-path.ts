@@ -73,3 +73,11 @@ export function checkFolderPath(raw: string): FolderPathCheck {
   }
   return { path, label, error: null, rewritten };
 }
+
+/** The name a typed folder will show under, when that differs from what was
+ *  typed in any way, case included (po-1221). Null: nothing to say. */
+export function folderNamePreview(raw: string): string | null {
+  const { label, error } = checkFolderPath(raw);
+  if (!label || error) return null;
+  return label === raw.split("/").map((s) => s.trim()).filter(Boolean).join(" / ") ? null : label;
+}

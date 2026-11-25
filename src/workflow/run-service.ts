@@ -623,7 +623,7 @@ export async function cancelDescendants(runId: string): Promise<number> {
  */
 export async function closeRun(
   runId: string,
-  input: { status?: unknown; trace?: unknown },
+  input: { status?: unknown; trace?: unknown; /** A fixed failure code the ledger shows (server closers only). */ reasonCode?: string | null },
 ): Promise<{ status: string }> {
   const status = input.status;
   if (typeof status !== "string" || !RUN_STATUSES.includes(status)) {
@@ -635,7 +635,7 @@ export async function closeRun(
   const totals = input.trace === undefined ? null : runTotals(input.trace);
   const res = await getDb().run(
     `UPDATE runs SET status = ?, trace = COALESCE(?, trace), finished_at = ?,
-            est_cost_micros = COALESCE(?, est_cost_micros), tokens = COALESCE(?, tokens)
+            est_cost_micros = COALESCE(?, est_cost_micros), tokens = COALESCE(?, tokens), reason_code = COALESCE(?, reason_code)
       WHERE id = ? AND status = 'running'`,
     [
       status,
@@ -643,6 +643,7 @@ export async function closeRun(
       terminal ? new Date().toISOString() : null,
       totals ? totals.costMicros : null,
       totals ? totals.tokens : null,
+      input.reasonCode ?? null,
       runId,
     ],
   );
