@@ -907,15 +907,6 @@ export const config = {
   },
 
   /**
-   * Experimental: the agent team stream, S1 channels (PO-1179). Slack-style
-   * channels inside a nest where agents and people post and reply; a channel
-   * is a node under `channels/`, its messages are that node's comment threads.
-   * Off by default; off → every /nests/:id/channels route 404s, the MCP
-   * channel tools are not offered and the UI hides Channels. Superadmin
-   * switchable live under Settings → Features
-   * (`experimental_agent_stream_enabled`). May change or disappear.
-   */
-  /**
    * Internal agent runners (chat as orchestration): bare host names, comma
    * separated, that an agent wake-up target may use even though they resolve
    * to a private address — e.g. `runner` for a compose service on this
@@ -930,6 +921,15 @@ export const config = {
       .filter((h) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/.test(h))
       .filter((h) => h !== "localhost" && !h.endsWith(".localhost") && !/^[0-9.]+$/.test(h));
   },
+  /**
+   * Experimental: the agent team stream, S1 channels (PO-1179). Slack-style
+   * channels inside a nest where agents and people post and reply; a channel
+   * is a node under `channels/`, its messages are that node's comment threads.
+   * Off by default; off → every /nests/:id/channels route 404s, the MCP
+   * channel tools are not offered and the UI hides Channels. Superadmin
+   * switchable live under Settings → Features
+   * (`experimental_agent_stream_enabled`). May change or disappear.
+   */
   get EXPERIMENTAL_AGENT_STREAM(): boolean {
     // An alias of TEAM_CHAT_ENABLED since the team chat harness (PO-1197):
     // either name turns the same thing on. Kept so existing deploys and

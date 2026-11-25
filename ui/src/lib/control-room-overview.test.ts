@@ -23,7 +23,6 @@ import {
   type LedgerEntry,
   type RollupRow,
 } from "./control-room-overview";
-import { administersAnyNest } from "./administers-nest";
 
 const row = (over: Partial<RollupRow>): RollupRow => ({ ...ZERO_TOTALS, bucket: "2026-11-08", key: "k", label: null, nest_id: "n1", last_at: "2026-11-08T10:00:00.000Z", source: "surfaces", ...over });
 const entry = (over: Partial<LedgerEntry>): LedgerEntry => ({
@@ -159,12 +158,5 @@ describe("agents and formatting", () => {
     expect(usd(0.004)).toBe("$0.004");
     expect(usd(11.42)).toBe("$11.42");
     expect(sumRows([{ cost_usd: 0.1 }, { cost_usd: 0.2 }]).cost_usd).toBe(0.3);
-  });
-
-  it("decision 3: a person who owns or administers a nest gets the Control room", () => {
-    expect(administersAnyNest([{ permission: "read" }, { permission: "admin" }])).toBe(true);
-    expect(administersAnyNest([{ is_owner: true, permission: "read" }])).toBe(true);
-    expect(administersAnyNest([{ permission: "write" }])).toBe(false);
-    expect(administersAnyNest(undefined)).toBe(false);
   });
 });

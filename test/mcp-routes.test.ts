@@ -501,11 +501,17 @@ describe("MCP tools/call — structuredContent", () => {
     expect(seeded.status).toBe(201);
   });
 
-  it("context_list: prose unchanged, documents[] alongside it", async () => {
+  it("context_list: prose names the last editor (prose only — no catalog field yet), documents[] alongside it", async () => {
     const r = await callToolRaw("context_list", {}, 710, sid);
-    expect(r.content).toEqual([
-      { type: "text", text: `1 node(s):\n\n1. **Pricing Sheet** [document]${webLinkPattern(sid)}` },
-    ]);
+    expect(r.content).toHaveLength(1);
+    // po-1213: each row ends with who last edited it, human first; PO-1336:
+    // the listing then ends with the web app link pattern.
+    const text: string = r.content[0].text;
+    const linkTail = webLinkPattern(sid);
+    expect(text.endsWith(linkTail)).toBe(true);
+    expect(text.slice(0, -linkTail.length)).toMatch(
+      /^1 node\(s\):\n\n1\. \*\*Pricing Sheet\*\* \[document\] · edited by \S+@\S+( via \S+)?, \d{4}-\d{2}-\d{2}$/,
+    );
     expect(r.structuredContent).toEqual({
       documents: [
         {

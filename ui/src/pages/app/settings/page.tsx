@@ -6,7 +6,7 @@
  * tabs by role so the page stays short. Add a new setting to a tab's <Card>
  * list and to that tab's `keys` (so the unsaved-changes dot tracks it).
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -60,6 +60,7 @@ import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
 import { NetworkStatusPanel } from "./NetworkStatusPanel";
 import { toast } from "sonner";
+import { generateBufferKey, hostedSlackUrls } from "../../../lib/control-room-setup";
 
 interface SettingsPageProps {
   settings: AdminSettings | null;
@@ -128,7 +129,7 @@ const TABS: {
       "distill_enabled",
       "experimental_doc_stream_enabled",
       "experimental_doc_pins",
-      "experimental_agent_stream_enabled",
+      "team_chat_enabled",
       "subagent_max_depth",
       "subagent_max_children",
       "promptowl_teams_enabled",
@@ -411,6 +412,7 @@ function SecretField({
   onChange,
   placeholder,
   error,
+  action,
 }: {
   id: string;
   label: string;
@@ -419,10 +421,15 @@ function SecretField({
   onChange: (v: string | null | undefined) => void;
   placeholder?: string;
   error?: string;
+  /** A control beside the label (po-1448: Generate for the buffer key). */
+  action?: ReactNode;
 }) {
   return (
     <div className="space-y-1.5">
-      <Label htmlFor={id}>{label}</Label>
+      <div className="flex items-center justify-between gap-2">
+        <Label htmlFor={id}>{label}</Label>
+        {action}
+      </div>
       <div className="text-xs text-muted-foreground">
         {value === null ? "Will be cleared when you save." : isSet ? "Set (hidden)." : "Not set."}
       </div>
@@ -438,6 +445,79 @@ function SecretField({
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * po-1448: make a buffer key in the browser. It reaches the server only on
+ * Save. Replacing a saved key asks first: what Nest holds now can't be read.
+ */
+function GenerateBufferKey({ isSet, onKey }: { isSet: boolean; onKey: (key: string) => void }) {
+  const [confirm, setConfirm] = useState(false);
+  const make = () => {
+    onKey(generateBufferKey());
+    setConfirm(false);
+    toast.success("New key ready. Click Save to use it.");
+  };
+  return (
+    <>
+      <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => (isSet ? setConfirm(true) : make())} data-testid="generate-buffer-key">
+        Generate
+      </Button>
+      <AlertDialog open={confirm} onOpenChange={setConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Replace the buffer key?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Messages Nest is holding right now were encrypted with the old key and will be lost. Approved notes aren&apos;t affected. Nothing changes until you click Save.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={make}>Generate a new key</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+}
+
+/** po-1448: where each hosted Slack app value comes from, with this server's own URLs. */
+function HostedSlackGuide({ baseUrl }: { baseUrl: string | null | undefined }) {
+  const urls = hostedSlackUrls(baseUrl);
+  const row = (where: string, url: string) => (
+    <li>
+      {where}
+      <div className="mt-1 flex min-w-0 items-center gap-2">
+        <code className="min-w-0 truncate rounded bg-muted px-1.5 py-0.5 text-xs">{url}</code>
+        <CopyButton text={url} toastMessage="Copied" />
+      </div>
+    </li>
+  );
+  return (
+    <details className="rounded-md border px-3 py-2 text-sm" data-testid="hosted-slack-guide">
+      <summary className="cursor-pointer font-medium">Where do I find these?</summary>
+      <ol className="mt-2 list-decimal space-y-2 pl-5 text-foreground/80">
+        <li>
+          Open{" "}
+          <a href="https://api.slack.com/apps" target="_blank" rel="noreferrer" className="underline">
+            api.slack.com/apps
+          </a>{" "}
+          and create the app, or open the existing one.
+        </li>
+        <li>In Basic Information → App Credentials, copy the Client ID, Client Secret and Signing Secret into the fields below.</li>
+        {urls ? (
+          <>
+            {row("In OAuth & Permissions → Redirect URLs, add:", urls.redirect)}
+            {row("In Event Subscriptions, turn events on and set the Request URL to:", urls.events)}
+            {row("In Interactivity & Shortcuts, turn interactivity on and set the Request URL to:", urls.interactions)}
+            {row("In Slash Commands, create /nest with the Request URL:", urls.commands)}
+          </>
+        ) : (
+          <li className="text-red-800">Set Public base URL in the Basic tab first. The Slack app's URLs are built from it.</li>
+        )}
+      </ol>
+    </details>
   );
 }
 
@@ -816,7 +896,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
         icon={Shield}
         title="Server settings"
         description="Server-wide options. Changes apply on Save and persist across restarts."
-        className="mb-6"
+        // Under the 4rem app header: Save and "Unsaved changes" stay in reach.
+        className="sticky top-16 z-20 mb-3 border-b bg-background py-3"
         actions={
           settings && (
             <>
@@ -875,7 +956,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
         </div>
       ) : (
         <Tabs value={currentTab} onValueChange={setActiveTab}>
-          <TabsList>
+          {/* Wraps: the tabs are wider than the page beside the sidebar. */}
+          <TabsList className="h-auto flex-wrap justify-start">
             {visibleTabs.map((t) => (
               <TabsTrigger key={t.id} value={t.id} className="gap-1.5">
                 {t.label}
@@ -922,8 +1004,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     onChange={(v) => set({ public_base_url: v })}
                   />
                   <p className="text-xs text-muted-foreground">
-                    This server's public address — used for share links and
-                    SSO redirects. Leave empty if unsure.
+                    This server's public https address, used for share links,
+                    SSO redirects and Slack. Slack can't reach localhost or a
+                    private network address.
                   </p>
                 </div>
                 <div className="space-y-1.5">
@@ -1390,27 +1473,31 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
               </CardContent>
             </Card>
 
-            {/* Experimental: agent team stream channels (PO-1179) — its own switch */}
-            <Card>
+            {/* Team chat (PO-1197, PO-1200) — the server switch; a nest's
+                owner can also turn it off for that nest in its settings. */}
+            <Card data-testid="settings-team-chat">
               <CardHeader>
-                <CardTitle className="text-base">Channels (experimental)</CardTitle>
+                <CardTitle className="text-base">Team chat</CardTitle>
                 <CardDescription>
-                  Slack-style channels inside each nest where agents and people
-                  post, reply in threads and @mention each other, next to the
-                  knowledge. Agents post over MCP and show as "agent, on behalf
-                  of person". Off by default. Experimental: it may change or
-                  disappear in a later release.
+                  Channels, direct and group messages, threads, reactions,
+                  presence and live updates inside each nest, for the people
+                  added to it and their agents. Agents take part over MCP and
+                  show as "agent, on behalf of person". A launcher on every nest
+                  page opens it beside the page. Off by default; off hides it
+                  everywhere, and each nest's owner can turn it off for that
+                  nest alone.
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="flex items-center justify-between">
                   <span className="text-sm">
-                    {draft.experimental_agent_stream_enabled ? "On" : "Off"}
+                    {draft.team_chat_enabled ? "On" : "Off"}
                   </span>
                   <Switch
-                    checked={draft.experimental_agent_stream_enabled}
-                    onCheckedChange={(v) => set({ experimental_agent_stream_enabled: v })}
-                    aria-label="Channels (experimental)"
+                    checked={draft.team_chat_enabled}
+                    onCheckedChange={(v) => set({ team_chat_enabled: v })}
+                    aria-label="Team chat"
+                    data-testid="settings-team-chat-switch"
                   />
                 </div>
               </CardContent>
@@ -2388,8 +2475,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   isSet={!!settings?.surfaces_buffer_key_set}
                   value={draft.surfaces_buffer_key}
                   onChange={(v) => set({ surfaces_buffer_key: v })}
-                  placeholder="32 bytes, base64 or hex — e.g. openssl rand -base64 32"
+                  placeholder="32 bytes, base64 or hex. Click Generate, or run: openssl rand -base64 32"
                   error={fieldErrors.surfaces_buffer_key}
+                  action={<GenerateBufferKey isSet={!!settings?.surfaces_buffer_key_set} onKey={(k) => set({ surfaces_buffer_key: k })} />}
                 />
                 <div className="space-y-1.5">
                   <Label htmlFor="surfaces-judge-model">Judge model</Label>
@@ -2430,6 +2518,7 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     aria-label="Self-serve Slack"
                   />
                 </div>
+                <HostedSlackGuide baseUrl={draft.public_base_url} />
                 <div className="space-y-1.5">
                   <Label htmlFor="surfaces-slack-client-id">Client ID</Label>
                   <TextField id="surfaces-slack-client-id" error={fieldErrors.surfaces_slack_hosted_client_id} value={draft.surfaces_slack_hosted_client_id ?? ""} onChange={(v) => set({ surfaces_slack_hosted_client_id: v })} />

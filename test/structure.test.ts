@@ -5,7 +5,7 @@
  * the nest can read and check them.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
 
@@ -85,6 +85,21 @@ describe("structure rules per nest", () => {
     expect(first.data.folders.map((f: { pattern: string }) => f.pattern)).toEqual(["clients/{client}", "clients/{client}/meetings"]);
     const second = await jsonRequest(app, "GET", `/nests/${otherNestId}/structure`, undefined, owner.apiKey);
     expect(second.data.folders.map((f: { pattern: string }) => f.pattern)).toEqual(["runbooks"]);
+  });
+
+  it("a nest with no settings file gets one on its first save, instead of refusing", async () => {
+    const id = (await jsonRequest(app, "POST", "/nests", { name: "No Settings" }, owner.apiKey)).data.nest.id;
+    const config = join(env.dataDir, "nests", id, ".context", "config.yaml");
+    rmSync(config);
+    expect(existsSync(config)).toBe(false);
+    const own = { folders: { governed: { types: ["document"] } } };
+    const put = await jsonRequest(app, "PUT", `/nests/${id}/structure`, own, owner.apiKey);
+    expect(put.status, JSON.stringify(put.data)).toBe(200);
+    const saved = readFileSync(config, "utf-8");
+    expect(saved).toContain("name: No Settings");
+    expect(saved).toContain("governed");
+    const get = await jsonRequest(app, "GET", `/nests/${id}/structure`, undefined, owner.apiKey);
+    expect(get.data.folders.map((f: { pattern: string }) => f.pattern)).toEqual(["governed"]);
   });
 
   it("only owners and admins save rules: a write or read collaborator is refused", async () => {

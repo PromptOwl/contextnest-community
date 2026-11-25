@@ -26,6 +26,7 @@ import { emptyForm, formFromConfig, summarize, type FormState } from "../lib/met
 import { MetacognitionForm } from "./MetacognitionForm";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
+import { useAuth } from "../auth/AuthContext";
 
 /** A glyph, never an image: a remote image URL would be fetched by every
  *  reviewer's browser that shows the persona. */
@@ -58,6 +59,25 @@ export function RunCost({ trace }: { trace: MetacognitionTrace | null | undefine
   );
 }
 
+/** What a Slack listener row says instead of the generic settings, which don't apply to it. */
+export function ManagedBySlack({ managed, canOpenSetup }: { managed: NonNullable<MetacognitionAgent["managed_by"]>; canOpenSetup: boolean }) {
+  return (
+    <div className="pl-9 text-xs text-muted-foreground" data-testid="metacognition-managed">
+      {managed.status === "active" ? "Listens" : "Paused"} in {managed.channel ? `#${managed.channel}` : "a Slack conversation"}.{" "}
+      {managed.folders.length
+        ? `Proposes into ${managed.folders.map((f) => (f === "/" ? "the top level" : f)).join(", ")}.`
+        : "It has no folders yet, so it proposes nothing: add starter folders in Slack setup."}{" "}
+      {canOpenSetup ? (
+        <a href="/control-room?section=setup" className="text-primary underline underline-offset-2">
+          Change it in Control room → Setup
+        </a>
+      ) : (
+        "A server admin can change it in Control room → Setup."
+      )}
+    </div>
+  );
+}
+
 /** Shown to nest owners and admins only (WorkflowsView gates the tab). */
 export function MetacognitionPanel({
   nestId,
@@ -67,6 +87,7 @@ export function MetacognitionPanel({
   /** Open a run's trace (Workflows → Run). */
   onOpenRun?: (runId: string) => void;
 }) {
+  const { isAdmin, authMode } = useAuth();
   const [agents, setAgents] = useState<MetacognitionAgent[]>([]);
   const [agentDocs, setAgentDocs] = useState<Array<{ id: string; title: string }>>([]);
   const [runs, setRuns] = useState<RunSummary[]>([]);
@@ -160,18 +181,26 @@ export function MetacognitionPanel({
                 <div className="flex flex-wrap items-center gap-2 text-sm">
                   <Avatar avatar={a.persona.avatar} name={a.persona.name} />
                   <span className="font-medium truncate shrink-0 max-w-[16rem]">{a.persona.name}</span>
-                  <span className="text-xs text-muted-foreground truncate" title={a.node_id}>
-                    runs {titleOf(a.node_id)}
-                  </span>
-                  {!a.enabled && (
-                    <Badge variant="outline" className="text-[10px]">
-                      off
+                  {a.managed_by ? (
+                    <Badge variant="secondary" className="text-[10px] shrink-0">
+                      Managed by Slack
                     </Badge>
+                  ) : (
+                    <>
+                      <span className="text-xs text-muted-foreground truncate" title={a.node_id}>
+                        runs {titleOf(a.node_id)}
+                      </span>
+                      {!a.enabled && (
+                        <Badge variant="outline" className="text-[10px]">
+                          off
+                        </Badge>
+                      )}
+                      <Badge variant="secondary" className="text-[10px] shrink-0" title={summarize(a)}>
+                        reads {a.scope.read.length ? a.scope.read.join(", ") : "everything"} · proposes in{" "}
+                        {a.scope.propose[0] === "*" ? "what it reads" : a.scope.propose.length ? a.scope.propose.join(", ") : "nothing (proposals off)"}
+                      </Badge>
+                    </>
                   )}
-                  <Badge variant="secondary" className="text-[10px] shrink-0" title={summarize(a)}>
-                    reads {a.scope.read.length ? a.scope.read.join(", ") : "everything"} · proposes in{" "}
-                    {a.scope.propose[0] === "*" ? "what it reads" : a.scope.propose.length ? a.scope.propose.join(", ") : "nothing (proposals off)"}
-                  </Badge>
                   <div className="flex-1" />
                   <Button
                     variant="ghost"
@@ -188,53 +217,58 @@ export function MetacognitionPanel({
                     )}
                     Activity
                   </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 text-xs shrink-0"
-                    disabled={!a.enabled || busy === a.node_id || last?.status === "running"}
-                    onClick={async () => {
-                      setBusy(a.node_id);
-                      try {
-                        await runMetacognitionAgent(nestId, a.node_id);
-                        await load();
-                      } catch (err) {
-                        setError(err instanceof Error ? err.message : "Could not start the run");
-                      } finally {
-                        setBusy(null);
-                      }
-                    }}
-                    data-testid="metacognition-run-now"
-                  >
-                    {busy === a.node_id || last?.status === "running" ? (
-                      <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
-                    ) : (
-                      <Play className="h-3.5 w-3.5 mr-1" />
-                    )}
-                    {last?.status === "running" ? "Running" : "Run now"}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 shrink-0"
-                    title="Edit"
-                    onClick={() => setDraft({ form: formFromConfig(a.node_id, a.enabled, a), isNew: false })}
-                  >
-                    <Pencil className="h-3.5 w-3.5" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
-                    title="Stop it being a metacognition agent (the document stays)"
-                    onClick={async () => {
-                      await deleteMetacognitionAgent(nestId, a.node_id);
-                      await load();
-                    }}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
+                  {!a.managed_by && (
+                    <>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs shrink-0"
+                        disabled={!a.enabled || busy === a.node_id || last?.status === "running"}
+                        onClick={async () => {
+                          setBusy(a.node_id);
+                          try {
+                            await runMetacognitionAgent(nestId, a.node_id);
+                            await load();
+                          } catch (err) {
+                            setError(err instanceof Error ? err.message : "Could not start the run");
+                          } finally {
+                            setBusy(null);
+                          }
+                        }}
+                        data-testid="metacognition-run-now"
+                      >
+                        {busy === a.node_id || last?.status === "running" ? (
+                          <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                        ) : (
+                          <Play className="h-3.5 w-3.5 mr-1" />
+                        )}
+                        {last?.status === "running" ? "Running" : "Run now"}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 shrink-0"
+                        title="Edit"
+                        onClick={() => setDraft({ form: formFromConfig(a.node_id, a.enabled, a), isNew: false })}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
+                        title="Stop it being a metacognition agent (the document stays)"
+                        onClick={async () => {
+                          await deleteMetacognitionAgent(nestId, a.node_id);
+                          await load();
+                        }}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </>
+                  )}
                 </div>
+                {a.managed_by && <ManagedBySlack managed={a.managed_by} canOpenSetup={isAdmin && authMode !== "open"} />}
                 {last && (
                   <div className="pl-9 text-xs space-y-0.5">
                     <div>

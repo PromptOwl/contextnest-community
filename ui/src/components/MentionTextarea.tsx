@@ -44,6 +44,8 @@ export interface MentionTextareaProps
   /** Agent handles to offer after the people (channels). Each is marked as an
    *  agent; one a mention can't wake says so quietly. */
   agents?: MentionAgent[];
+  /** Rows offered last, by name (channels: `@channel` and `@here`). */
+  extras?: Array<{ name: string; detail: string }>;
   /** Comment boxes: a markdown toolbar, and formatted paste kept as markdown. */
   formatting?: boolean;
   /**
@@ -76,7 +78,7 @@ export const MentionTextarea = forwardRef<
   HTMLTextAreaElement,
   MentionTextareaProps
 >(function MentionTextarea(
-  { value, onValueChange, members, agents, className, onKeyDown, formatting, onEnterSend, ...rest },
+  { value, onValueChange, members, agents, extras, className, onKeyDown, formatting, onEnterSend, ...rest },
   forwardedRef,
 ) {
   const innerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -122,8 +124,12 @@ export const MentionTextarea = forwardRef<
       detail: a.wakeable ? "Agent" : "Agent · not woken by a mention, sees it on its next check",
       agent: true,
     }));
-    return [...people, ...handles];
-  }, [trigger, members, agents, me]);
+    const q = trigger.query.toLowerCase();
+    const more = (extras ?? [])
+      .filter((x) => x.name.toLowerCase().startsWith(q))
+      .map((x) => ({ key: `extra:${x.name}`, insert: x.name, title: `@${x.name}`, detail: x.detail, agent: false }));
+    return [...people, ...handles, ...more];
+  }, [trigger, members, agents, extras, me]);
 
   useEffect(() => setHighlight(0), [trigger?.query, results.length]);
 

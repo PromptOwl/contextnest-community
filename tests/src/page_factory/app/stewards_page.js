@@ -30,17 +30,17 @@ class StewardsPage {
 
     // ── Nest page ──────────────────────────────────────────────────────────
     this.tabs = page.getByRole('tab');
-    this.stewardsTab = page.getByRole('tab', { name: /^Stewards/ });
     this.nestMenu = page.getByTitle('More actions').first();
     this.assignStewardItem = page.getByRole('menuitem', { name: 'Assign Steward', exact: true });
 
-    // ── Stewards tab ───────────────────────────────────────────────────────
-    this.stewardsTitle = this.main.getByText('Stewards', { exact: true });
+    // ── Stewards, on the Collaborators tab ───────────────────────────────────────────────────────
+    this.section = page.getByTestId('nest-stewards-section');
+    this.stewardsTitle = this.section.getByText('Stewards', { exact: true });
     this.ownerRow = page.getByTestId('steward-owner-row');
-    this.emptyRoster = this.main.getByText(/No delegated stewards yet/);
-    this.assignFirstButton = this.main.getByRole('button', { name: 'Assign your first steward' });
-    this.roleFilter = this.main.getByRole('combobox').last();
-    this.rosterRows = this.main.locator('div.p-2.rounded-lg.border.bg-card');
+    this.emptyRoster = this.section.getByText(/No delegated stewards yet/);
+    this.assignFirstButton = this.section.getByRole('button', { name: 'Assign your first steward' });
+    this.roleFilter = this.section.getByRole('combobox').last();
+    this.rosterRows = this.section.locator('div.p-2.rounded-lg.border.bg-card');
 
     // ── Assign / Edit dialog ───────────────────────────────────────────────
     this.assignDialog = page.getByRole('dialog').filter({ hasText: 'Assign Context Steward' });
@@ -92,7 +92,7 @@ class StewardsPage {
    * settings read after the page first draws; reading them earlier sees the
    * nest as ungoverned.
    */
-  async gotoNest(nestId) {
+  async gotoNest(nestId, query = '') {
     this._log(`Opening nest ${nestId}`);
     const settings = this.page
       .waitForResponse(
@@ -100,7 +100,7 @@ class StewardsPage {
         { timeout: 30_000 }
       )
       .catch(() => null);
-    await this.page.goto(`/nest/${nestId}`);
+    await this.page.goto(`/nest/${nestId}${query}`);
     await this.tabs.first().waitFor({ state: 'visible' });
     await settings;
     await this.page.waitForTimeout(500);
@@ -112,9 +112,15 @@ class StewardsPage {
     return (await this.tabs.allInnerTexts()).map((t) => t.split('\n')[0].trim());
   }
 
-  /** Open the Stewards tab and wait for the roster (or its empty state). */
+  /** Whether the nest shows this viewer the steward roster. Opens the old ?tab=stewards link. */
+  async hasStewards(nestId) {
+    await this.gotoNest(nestId, '?tab=stewards');
+    return this.section.isVisible();
+  }
+
+  /** Open the steward roster (through the old ?tab=stewards link) and wait for the roster (or its empty state). */
   async gotoStewards(nestId) {
-    this._log(`Opening the Stewards tab of nest ${nestId}`);
+    this._log(`Opening the stewards of nest ${nestId}`);
     await this.page.goto(`/nest/${nestId}?tab=stewards`);
     await this.ownerRow.or(this.emptyRoster).first().waitFor({ state: 'visible' });
   }
@@ -221,12 +227,12 @@ class StewardsPage {
 
   /** A steward's row in the list, by email. */
   stewardRow(email) {
-    return this.main.locator('div.p-2.rounded-lg.border.bg-card').filter({ hasText: email });
+    return this.rosterRows.filter({ hasText: email });
   }
 
   /** A scope filter button: 'All', 'Document', 'Tag' or 'Nest'. */
   scopeFilter(label) {
-    return this.main.getByRole('button', { name: label, exact: true });
+    return this.section.getByRole('button', { name: label, exact: true });
   }
 
   /** Pick a role filter: 'All', 'Viewer', 'Editor' or 'Reviewer'. */

@@ -151,3 +151,17 @@ describe("read-only reason", () => {
     expect(readOnlyReason({ requestedBy: "b@x.com" }, "a@x.com")).toBeNull();
   });
 });
+
+import { skipReviewNodeId } from "./review-pane";
+
+describe("skipReviewNodeId", () => {
+  const q = [{ nodeId: "a" }, { nodeId: "b" }, { nodeId: "c" }];
+  it("goes to the next change, and wraps from the last back to the first", () => {
+    expect(skipReviewNodeId(q, "a")).toBe("b");
+    expect(skipReviewNodeId(q, "c")).toBe("a");
+  });
+  it("has nothing to skip to when it is the only change or not in the queue", () => {
+    expect(skipReviewNodeId([{ nodeId: "a" }], "a")).toBeNull();
+    expect(skipReviewNodeId(q, "zzz")).toBeNull();
+  });
+});

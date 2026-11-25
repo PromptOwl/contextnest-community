@@ -23,6 +23,7 @@ import { listNestFolders } from "../nodes/service.js";
 import { resolveExportBody, agentInstructionsBody } from "../nodes/readable-body.js";
 import { listAgents, getAgent, upsertAgent, deleteAgent, type MetacognitionAgent } from "./store.js";
 import { agentStats } from "./stats.js";
+import { assertNotManaged, listenerFoldersView, managedAgents, type ManagedBy } from "./managed.js";
 
 export const NOT_ENABLED =
   "Metacognition agents are not enabled on this server. An admin can turn them on with FEATURE_METACOGNITION=true (and FEATURE_WORKFLOW_PLANE=true).";
@@ -66,8 +67,10 @@ export async function isMetacognitionAgent(nestId: string, nodeId: string): Prom
   return !!(await getAgent(nestId, nodeId));
 }
 
-export function agentView(a: MetacognitionAgent) {
+export function agentView(a: MetacognitionAgent, managed?: ManagedBy) {
   return {
+    // Set on a Slack listener: read-only here, with the folders it proposes into.
+    managed_by: managed ? { ...managed, folders: listenerFoldersView(a) } : null,
     node_id: a.node_id,
     enabled: a.enabled,
     persona: { name: a.persona.name, avatar: a.persona.avatar, email: a.persona.email },
@@ -98,14 +101,15 @@ export async function ownerCanRun(nestId: string, email: string): Promise<boolea
 }
 
 export async function listAgentViews(nestId: string) {
-  return (await listAgents(nestId)).map(agentView);
+  const managed = await managedAgents(nestId);
+  return (await listAgents(nestId)).map((a) => agentView(a, managed.get(a.node_id)));
 }
 
 export async function getAgentView(nestId: string, rawNodeId: string) {
   const nodeId = assertSafeNodeId(rawNodeId);
   const agent = await getAgent(nestId, nodeId);
   if (!agent) throw new NotFoundError(`${nodeId} is not a metacognition agent`);
-  return agentView(agent);
+  return agentView(agent, (await managedAgents(nestId)).get(nodeId));
 }
 
 /**
@@ -119,6 +123,7 @@ export async function validateAgentConfig(
   body: Record<string, unknown>,
 ): Promise<{ nodeId: string; config: MetacognitionConfig; enabled: boolean }> {
   const nodeId = assertSafeNodeId(rawNodeId);
+  await assertNotManaged(nestId, nodeId);
   await readAgentDoc(nestId, nodeId);
   if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
     throw new ValidationError("enabled must be true or false");
@@ -190,6 +195,7 @@ export async function configureAgent(opts: {
 /** Stop a node being a metacognition agent. The document stays. */
 export async function removeAgent(nestId: string, rawNodeId: string): Promise<void> {
   const nodeId = assertSafeNodeId(rawNodeId);
+  await assertNotManaged(nestId, nodeId);
   if (!(await deleteAgent(nestId, nodeId))) throw new NotFoundError(`${nodeId} is not a metacognition agent`);
 }
 

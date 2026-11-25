@@ -280,17 +280,17 @@ describe("binding a channel: the one notice links the member explainer", () => {
     expect(b.data.notice).toBe("posted");
     const notices = slack.posted.slice(before).filter((p) => p.channel === "C_OPS");
     expect(notices.length).toBe(1);
-    expect(notices[0].text).toMatch(/^Nest is now listening here/);
+    expect(notices[0].text).toMatch(/^<@UBOT> is now listening here/);
     expect(notices[0].text).toContain(`<${BASE}/about/surfaces|How Nest handles your messages>`);
     const list = await jsonRequest(app, "GET", `/surfaces/slack/installs/${installId}/channels`, undefined, root.apiKey);
     const ops = list.data.channels.find((c: any) => c.id === "C_OPS");
-    expect(ops.binding).toEqual({ id: b.data.binding.id, nest_id: N, status: "active" });
+    expect(ops.binding).toEqual({ id: b.data.binding.id, nest_id: N, status: "active", paused_by_admin: false });
   });
 
   it("with no PUBLIC_BASE_URL the notice has no link (nothing to point at)", async () => {
     const { enableNotice } = await import("../src/surfaces/services/notice-service.js");
-    expect(enableNotice("Revenue", null, 24)).not.toMatch(/about\/surfaces/);
-    expect(enableNotice("Revenue", "https://x.test/about/surfaces", 24)).toMatch(/<https:\/\/x\.test\/about\/surfaces\|How Nest handles your messages>$/);
+    expect(enableNotice("Revenue", null, 24, "UBOT")).not.toMatch(/about\/surfaces/);
+    expect(enableNotice("Revenue", "https://x.test/about/surfaces", 24, "UBOT")).toMatch(/<https:\/\/x\.test\/about\/surfaces\|How Nest handles your messages>$/);
     const { aboutSurfacesUrl } = await import("../src/surfaces/about-page.js");
     delete process.env.PUBLIC_BASE_URL;
     try {
@@ -311,7 +311,7 @@ describe("binding a channel: the one notice links the member explainer", () => {
 
   it("a very long nest name is capped, so the disclosure and the link always fit", async () => {
     const { enableNotice, NOTICE_NEST_MAX } = await import("../src/surfaces/services/notice-service.js");
-    const text = enableNotice("N".repeat(5000), "https://x.test/about/surfaces", 24);
+    const text = enableNotice("N".repeat(5000), "https://x.test/about/surfaces", 24, "UBOT");
     expect(text).toContain(`${"N".repeat(NOTICE_NEST_MAX - 1)}…. It stays quiet`);
     expect(text).not.toContain("N".repeat(NOTICE_NEST_MAX + 1));
     expect(text).toMatch(/<https:\/\/x\.test\/about\/surfaces\|How Nest handles your messages>$/);
@@ -319,8 +319,8 @@ describe("binding a channel: the one notice links the member explainer", () => {
 
   it("the notice states the server's own buffer TTL, the same number the member page shows", async () => {
     const { enableNotice } = await import("../src/surfaces/services/notice-service.js");
-    expect(enableNotice("Revenue", null, 24)).toMatch(/messages are cleared within 24 hours/);
-    expect(enableNotice("Revenue", null, 12)).toMatch(/messages are cleared within 12 hours/);
+    expect(enableNotice("Revenue", null, 24, "UBOT")).toMatch(/messages are cleared within 24 hours/);
+    expect(enableNotice("Revenue", null, 12, "UBOT")).toMatch(/messages are cleared within 12 hours/);
     await jsonRequest(app, "PATCH", "/surfaces/settings", { buffer_ttl_hours: 12, window_max_age_hours: 6 }, root.apiKey);
     try {
       slack.convs.set("C_TTL", { info: { id: "C_TTL", name: "ttl-room", is_private: false, is_ext_shared: false }, members: ["U_ROOT", "UBOT"] });
@@ -366,11 +366,11 @@ describe("the notice never states a default retention it can't confirm", () => {
     slack.convs.set("C_AGAIN", { info: { id: "C_AGAIN", name: "again-room", is_private: false, is_ext_shared: false }, members: ["U_ROOT", "UBOT"] });
     const first = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C_AGAIN", nest_id: N }, root.apiKey);
     expect(first.data.notice).toBe("posted");
-    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${first.data.binding.id}`, undefined, root.apiKey)).status).toBeLessThan(300);
+    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${first.data.binding.id}`, { reason: "test remove" }, root.apiKey)).status).toBeLessThan(300);
     const again = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C_AGAIN", nest_id: N }, root.apiKey);
     expect(again.status).toBe(201);
     expect(again.data.notice).toBe("already_posted");
-    await jsonRequest(app, "DELETE", `/surfaces/bindings/${again.data.binding.id}`, undefined, root.apiKey);
+    await jsonRequest(app, "DELETE", `/surfaces/bindings/${again.data.binding.id}`, { reason: "test remove" }, root.apiKey);
     const viaMcp = await mcp(`/nests/${N}/mcp`, { name: "context_surfaces_binding_create", arguments: { install_id: installId, conversation_id: "C_AGAIN" } }, root.apiKey);
     const text = viaMcp.result?.content?.[0]?.text ?? "";
     expect(viaMcp.result?.isError, text).not.toBe(true);
@@ -379,14 +379,15 @@ describe("the notice never states a default retention it can't confirm", () => {
 });
 
 describe("AC-CR-16: GET /about/surfaces", () => {
-  it("AC-CR-16: an anonymous visitor gets the page with the never list and '@Nest skip me', and no nest, channel or user names", async () => {
+  it("AC-CR-16: an anonymous visitor gets the page with the never list and how to skip, and no nest, channel or user names", async () => {
     const res = await app.request("/about/surfaces");
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toMatch(/text\/html/);
     expect(res.headers.get("content-security-policy")).toMatch(/default-src 'none'/);
     const html = await res.text();
     expect(html).toContain("How Nest handles your messages");
-    expect(html).toContain("@Nest skip me");
+    expect(html).toContain("mention the app and say <code>skip me</code>");
+    expect(html).not.toContain("@Nest");
     for (const t of [
       "Read DMs between people, or channels it isn't in",
       "Import channel history",

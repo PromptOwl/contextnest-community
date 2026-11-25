@@ -48,6 +48,7 @@ import { useAuth } from "../auth/AuthContext";
 import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { slugifyFolderPath } from "../lib/folder-target";
+import { folderNamePreview } from "../lib/folder-path";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -732,12 +733,15 @@ function MaturityBoardInner({
     [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.filterFields, fieldDefs, config.hideDoneAfterDays, assigneeFilter, hideBlocked, filterDraft],
   );
 
+  const [addingIn, setAddingIn] = useState<{ cell: string; col: string; lane?: string; parent?: string } | null>(null);
   // Folders with nothing in them — the sidebar's census read (shared cache), so
   // the folder board lists the same folders the tree does.
   const census = useQuery({
     ...reads.census(nestId),
-    enabled: effectiveConfig.dimension === "folder",
+    // The New task dialog's folder picker needs them on any board.
+    enabled: effectiveConfig.dimension === "folder" || addingIn !== null,
   });
+  const allFolders = useMemo(() => (census.data?.census.folders ?? []).map((f) => f.path), [census.data]);
   const emptyFolders = useMemo(
     () => (census.data?.census.folders ?? []).filter((f) => !f.total).map((f) => f.path),
     [census.data],
@@ -899,7 +903,6 @@ function MaturityBoardInner({
   );
 
   // ── "+ Add task" ──
-  const [addingIn, setAddingIn] = useState<{ cell: string; col: string; lane?: string; parent?: string } | null>(null);
   const createCard = useCallback(
     async (colKey: string, task: NewTask, parent?: string, laneKey?: string) => {
       const placement = newCardPlacement(colKey, effectiveConfig);
@@ -955,6 +958,7 @@ function MaturityBoardInner({
         };
         // The surface picked in the dialog is an ordinary tag, added to whatever
         // the column and filters already put on the card.
+        if (payload.folder === "") delete payload.folder; // the nest root
         if (surfaceTag) payload.tags = [...new Set([...(payload.tags ?? []), `#${surfaceTag}`])];
         const res = await api.createNode(nestId, payload as any);
         qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
@@ -1788,41 +1792,45 @@ function MaturityBoardInner({
             {draggable ? "Drop here" : "Empty"}
           </div>
         )}
-        {addingIn?.cell === cell && (
-          <CreateTaskDialog
-            parentTitle={
-              addingIn.parent ? nodes.find((x) => x.id === addingIn.parent)?.title ?? "task" : undefined
-            }
-            initial={{
-              assignee:
-                newCardPlacement(col.key, effectiveConfig)?.assignee ??
-                (assigneeFilter.size === 1 && !assigneeFilter.has(UNASSIGNED)
-                  ? [...assigneeFilter][0]
-                  : undefined),
-              priority: newCardPlacement(col.key, effectiveConfig)?.priority,
-            }}
-            people={members}
-            me={me}
-            surfaces={surfaceChoices}
-            defaultSurface={defaultSurfaceTag}
-            onSubmit={async (task) => {
-              const id = await createCard(col.key, task, addingIn.parent, addingIn.lane);
-              setAddingIn(null);
-              // Stay on the Board (PO-1246); the card lands in its column.
-              if (id)
-                toast.success(`Task "${task.title}" created`, {
-                  action: { label: "Open", onClick: () => onOpenDocument(id) },
-                });
-            }}
-            onClose={() => setAddingIn(null)}
-          />
-        )}
       </div>
     );
   };
 
   return (
     <div className="space-y-4">
+      {/* One dialog for every column and lane, on the board and in the list. */}
+      {addingIn && (
+        <CreateTaskDialog
+          nestId={nestId}
+          parentTitle={
+            addingIn.parent ? nodes.find((x) => x.id === addingIn.parent)?.title ?? "task" : undefined
+          }
+          initial={{
+            assignee:
+              newCardPlacement(addingIn.col, effectiveConfig)?.assignee ??
+              (assigneeFilter.size === 1 && !assigneeFilter.has(UNASSIGNED)
+                ? [...assigneeFilter][0]
+                : undefined),
+            priority: newCardPlacement(addingIn.col, effectiveConfig)?.priority,
+            folder: newCardPlacement(addingIn.col, effectiveConfig)?.folder,
+          }}
+          folders={allFolders}
+          people={members}
+          me={me}
+          surfaces={surfaceChoices}
+          defaultSurface={defaultSurfaceTag}
+          onSubmit={async (task, another) => {
+            const id = await createCard(addingIn.col, task, addingIn.parent, addingIn.lane);
+            if (!another) setAddingIn(null);
+            // Stay on the Board (PO-1246); the card lands in its column.
+            if (id)
+              toast.success(`Task "${task.title}" created`, {
+                action: { label: "Open", onClick: () => onOpenDocument(id) },
+              });
+          }}
+          onClose={() => setAddingIn(null)}
+        />
+      )}
       <NestPageHeader nestName={nestName} onBack={onBack}>
         <div className="flex flex-wrap items-center gap-2">
           {/* Two capsules — what the columns are, and how the rows split — so
@@ -1984,8 +1992,17 @@ function MaturityBoardInner({
                 e.preventDefault();
                 void addColumn(newColumn);
               }}
-              className="flex items-center gap-1"
+              className="relative flex items-center gap-1"
             >
+              {effectiveConfig.dimension === "folder" && folderNamePreview(newColumn) && (
+                <p
+                  role="status"
+                  className="absolute left-0 top-full z-20 mt-1 w-max max-w-xs rounded-md border bg-popover px-2 py-1 text-xs text-muted-foreground shadow-md"
+                  data-testid="board-new-folder-preview"
+                >
+                  Will be created as <span className="font-medium text-foreground">{folderNamePreview(newColumn)}</span>
+                </p>
+              )}
               <Input
                 value={newColumn}
                 onChange={(e) => setNewColumn(e.target.value)}
@@ -2543,6 +2560,8 @@ function MaturityBoardInner({
           me={me}
           personLabel={personLabel}
           canEdit={canEditDocs}
+          canAddTo={(key) => canEditDocs && !!newCardPlacement(key, effectiveConfig)}
+          onAddTask={(key) => setAddingIn({ cell: key, col: key })}
           governance={governance}
           doneTags={doneTags}
           tagSuggestions={allTagValues}

@@ -30,15 +30,20 @@ import {
   type DatePreset, type SavedFilter,
 } from "../../lib/saved-filters";
 import {
-  FileCode2, Plus, History, Search, Upload,
+  Plus, History, Search, Upload,
   CheckCircle2, Send, Loader2,
   Pencil, Trash2, FolderInput,
-  LayoutGrid, List as ListIcon, Star, X, MoreVertical,
-  FolderOpen, ChevronRight, Share2, Globe, FolderPlus, Activity, Ruler,
+  Star, X, MoreVertical,
+  FolderOpen, ChevronRight, Share2, Globe, Activity, Ruler,
 } from "lucide-react";
 import { FolderTree, prettyFolder, prettyFolderPath, type KnownFolder } from "../FolderTree";
+import { FolderSelect } from "../FolderSelect";
 import { ActivityLogPanel } from "../ActivityLogPanel";
 import { AuthorshipChips } from "../AuthorshipChips";
+import { rowLastEdit } from "@/lib/version-author";
+import { LastEditText } from "./DocumentsHome";
+import { ListRowActions } from "./ListRowActions";
+import { useMediaQuery } from "@/lib/use-media-query";
 import {
   LifecycleStatusBadge, SubmitForReviewModal, ReasonDialog, VersionHistoryModal,
   type DocumentLifecycleStatus, type Steward, type ReviewRequest, type Version,
@@ -65,7 +70,7 @@ import {
   DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
-  Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue,
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 
 type Node = any;
@@ -132,6 +137,9 @@ interface Props {
   onWithdrawDeletion: (request: api.DeletionRequest) => void;
   /** The header's hidden file input, for the empty state's Import button. */
   importInputRef: React.RefObject<HTMLInputElement>;
+  /** List or grid. Owned by the nest page: the switch lives in the header's
+   *  ⋯ menu (po-1213). */
+  viewMode: "list" | "cards";
 }
 
 export function DocumentsTab({
@@ -173,8 +181,12 @@ export function DocumentsTab({
   onRefresh,
   onWithdrawDeletion,
   importInputRef,
+  viewMode,
 }: Props) {
   const { canManage, collabCanWrite, canEditDocs, isReadOnly } = caps;
+  // Phone width (below Tailwind's sm): list rows show the ⋮ menu, not the
+  // hover buttons. Same breakpoint NestView folds its header actions at.
+  const isPhone = useMediaQuery("(max-width: 639px)");
   const qc = useQueryClient();
   // Per-node comment counts drive the activity and "most comments" sorts —
   // a Documents-tab need, so it is read here, not on the nest page.
@@ -490,23 +502,6 @@ export function DocumentsTab({
   >("activity");
   // Per-node comment (annotation thread) counts, for the "Most comments" sort.
 
-  // List vs cards, persisted per-browser (not per-nest — it's a reading pref).
-  const [viewMode, setViewMode] = useState<"list" | "cards">(() => {
-    try {
-      return localStorage.getItem("nest:viewMode") === "cards"
-        ? "cards"
-        : "list";
-    } catch {
-      return "list";
-    }
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem("nest:viewMode", viewMode);
-    } catch {
-      /* ignore quota/availability */
-    }
-  }, [viewMode]);
   // Saved filters, persisted per nest.
   const savedKey = `nest:${nestId}:savedFilters`;
   const [savedFilters, setSavedFilters] = useState<SavedFilter[]>([]);
@@ -746,7 +741,6 @@ export function DocumentsTab({
     [filtered],
   );
   const allTags = documentFacetsForFilter.tags;
-  const documentsRecentlyEdited = documentFacetsForFilter.recent;
 
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
   const [dropFolder, setDropFolder] = useState<string | null>(null);
@@ -893,29 +887,6 @@ export function DocumentsTab({
                       <SelectItem value="comments">Most comments</SelectItem>
                     </SelectContent>
                   </Select>
-                  {/* List vs cards density toggle. */}
-                  <div className="flex items-center rounded-md border h-8">
-                    <button
-                      type="button"
-                      title="List view"
-                      aria-pressed={viewMode === "list"}
-                      className={`px-2 h-full rounded-l-md ${viewMode === "list" ? "bg-muted" : "hover:bg-muted/50"
-                        }`}
-                      onClick={() => setViewMode("list")}
-                    >
-                      <ListIcon className="h-4 w-4" />
-                    </button>
-                    <button
-                      type="button"
-                      title="Card view"
-                      aria-pressed={viewMode === "cards"}
-                      className={`px-2 h-full rounded-r-md ${viewMode === "cards" ? "bg-muted" : "hover:bg-muted/50"
-                        }`}
-                      onClick={() => setViewMode("cards")}
-                    >
-                      <LayoutGrid className="h-4 w-4" />
-                    </button>
-                  </div>
                 </div>
               </div>
             </CardHeader>
@@ -1122,27 +1093,6 @@ export function DocumentsTab({
                       clear
                     </button>
                   )}
-                </div>
-              )}
-              {documentsRecentlyEdited.length > 0 && (
-                <div className="flex items-center flex-wrap gap-1.5 mb-3 text-xs">
-                  <span className="text-muted-foreground">Recently edited:</span>
-                  {documentsRecentlyEdited.map((n) => (
-                    <button
-                      key={n.id}
-                      type="button"
-                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 hover:bg-muted truncate max-w-[180px] ${n.type === "artifact"
-                          ? "border-amber-300 text-amber-700 dark:text-amber-300"
-                          : "text-primary"
-                        }`}
-                      onClick={() => onOpenDocument(n.id)}
-                    >
-                      {n.type === "artifact" && (
-                        <FileCode2 className="h-3 w-3 shrink-0" />
-                      )}
-                      <span className="truncate">{n.title}</span>
-                    </button>
-                  ))}
                 </div>
               )}
               {!initialLoad && selectableVisible.length > 0 && (
@@ -1436,7 +1386,7 @@ export function DocumentsTab({
                           {cards && selectBox}
                           {cards && <NodeTypeIcon type={node.type} className="h-4 w-4" />}
                           <span
-                            className="font-medium truncate min-w-0"
+                            className="font-medium truncate min-w-0 max-w-full"
                             title={node.title}
                           >
                             {node.title}
@@ -1515,7 +1465,7 @@ export function DocumentsTab({
                           })()}
                           {cards && <div className="ml-auto">{actionMenu}</div>}
                         </div>
-                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
+                        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground mt-1">
                           <span>v{node.version || 1}</span>
                           {node.tags?.length > 0 && (
                             <>
@@ -1555,13 +1505,44 @@ export function DocumentsTab({
                               />
                             </>
                           )}
+                          {/* Last edit: when, and who — the human, then the
+                              agent (po-1213). Nobody is named when the read
+                              withheld last_edit (a public reader). */}
+                          {(() => {
+                            const edit = rowLastEdit(node, roster?.people);
+                            if (!edit || cards) return null;
+                            return (
+                              <>
+                                {/* The dot travels with the editor, so a wrapped
+                                    line never ends on a separator. */}
+                                <span className="inline-flex min-w-0 max-w-full items-center gap-1" data-testid={`last-edit-${node.id}`}>
+                                  <span aria-hidden className="mr-1">·</span>
+                                  <LastEditText edit={edit} />
+                                </span>
+                              </>
+                            );
+                          })()}
                         </div>
+                        {/* Cards: the last edit gets its own line. */}
+                        {cards && (() => {
+                          const edit = rowLastEdit(node, roster?.people);
+                          if (!edit) return null;
+                          return (
+                            <div className="mt-1 flex min-w-0 items-center gap-1 text-xs text-muted-foreground" data-testid={`last-edit-${node.id}`}>
+                              <LastEditText edit={edit} />
+                            </div>
+                          );
+                        })()}
                       </div>
+                      {/* On a phone there is no hover, and the hidden buttons
+                          still took the row's width and squeezed the title to
+                          nothing: list rows get the cards' ⋮ menu instead.
+                          One set is mounted, never both (one pin per row). */}
                       {!cards && (
-                        <div
-                          className="flex items-center gap-1 transition-opacity opacity-0 group-hover:opacity-100"
-                          onClick={(e) => e.stopPropagation()}
-                        >
+                        <ListRowActions
+                          phone={isPhone}
+                          menu={actionMenu}
+                          inline={<>
                           {canSubmit && (
                             <Button variant="outline" size="sm" onClick={() => setSubmitNode(node)}>
                               <Send className="h-3.5 w-3.5 mr-1" />
@@ -1619,7 +1600,8 @@ export function DocumentsTab({
                               <Trash2 className="h-3.5 w-3.5" />
                             </Button>
                           )}
-                        </div>
+                          </>}
+                        />
                       )}
                     </div>
                   );
@@ -2192,45 +2174,20 @@ export function DocumentsTab({
             Version history, review state, and [[wiki links]] follow the
             document.
           </p>
-          <Select
-            value={
-              moveNewFolder !== null
-                ? "__new__"
-                : moveDest === ""
-                  ? "__root__"
-                  : moveDest
-            }
-            onValueChange={(v) => {
+          <FolderSelect
+            value={moveNewFolder !== null ? "__new__" : moveDest}
+            onChange={(v) => {
               if (v === "__new__") {
                 setMoveNewFolder("");
                 return;
               }
               setMoveNewFolder(null);
-              setMoveDest(v === "__root__" ? "" : v);
+              setMoveDest(v);
             }}
-          >
-            <SelectTrigger data-testid="move-folder-select">
-              <SelectValue placeholder="Choose a folder" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__root__">Nest root</SelectItem>
-              {allFolders.map((f) => (
-                <SelectItem key={f} value={f}>
-                  {prettyFolderPath(f)}
-                </SelectItem>
-              ))}
-              {/* Below the rule: the entries above are destinations, this one
-                  starts a different flow. Undifferentiated, it read as one
-                  more existing folder. */}
-              <SelectSeparator />
-              <SelectItem value="__new__">
-                <span className="inline-flex items-center gap-1.5">
-                  <FolderPlus className="h-3.5 w-3.5" />
-                  New folder…
-                </span>
-              </SelectItem>
-            </SelectContent>
-          </Select>
+            folders={allFolders}
+            extra={[{ value: "__new__", label: "New folder…" }]}
+            testId="move-folder-select"
+          />
           {moveNewFolder !== null && (
             <>
               <Input

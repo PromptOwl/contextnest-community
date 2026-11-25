@@ -204,59 +204,60 @@ test.describe('My Drafts', () => {
   // Getting there and the empty states
   // ══════════════════════════════════════════════════════════════════════════
   test.describe('Access and shell', () => {
-    test('CN-DRAFT-001: My Drafts opens from the rail with a muted count badge', async ({
-      primary_user,
-      commonFunction,
-    }) => {
-      // Several writes and two page loads on a shared server: more than the default 2 minutes.
-      test.slow();
-      const { page, drafts, api, nest } = await asAuthor(primary_user, commonFunction);
-      // At least one draft of the primary's own, so the badge has a count.
-      const doc = await seedDraft(api, nest, `Draft ${token()} Badge`);
-      expect((await api.myDrafts({ limit: 1 })).pagination.total).toBeGreaterThan(0);
+    // CN-DRAFT-001 fails on dev since #582: the sidebar rail was removed (My Work / My Drafts in the header, settings pages under Workspace settings, Help in the account menu).
+    // test('CN-DRAFT-001: My Drafts opens from the rail with a muted count badge', async ({
+    //   primary_user,
+    //   commonFunction,
+    // }) => {
+    //   // Several writes and two page loads on a shared server: more than the default 2 minutes.
+    //   test.slow();
+    //   const { page, drafts, api, nest } = await asAuthor(primary_user, commonFunction);
+    //   // At least one draft of the primary's own, so the badge has a count.
+    //   const doc = await seedDraft(api, nest, `Draft ${token()} Badge`);
+    //   expect((await api.myDrafts({ limit: 1 })).pagination.total).toBeGreaterThan(0);
 
-      /**
-       * Load `open` and check the badge shows the server's draft count. Other
-       * suites — and other runs on the shared server — write as this account
-       * in parallel and can move that count between any two reads, so the
-       * badge is held to the totals the server reported from just before the
-       * page loaded until now: it must lie within them, never outside.
-       */
-      const expectBadgeMatchesServer = async (open) => {
-        const seen = [(await api.myDrafts({ limit: 1 })).pagination.total];
-        await open();
-        await expect(drafts.railItem).toBeVisible();
-        await expect
-          .poll(async () => {
-            const shown = (await drafts.railBadge.count())
-              ? Number(await drafts.railBadge.textContent())
-              : 0;
-            seen.push((await api.myDrafts({ limit: 1 })).pagination.total);
-            return shown >= Math.min(...seen) && shown <= Math.max(...seen);
-          }, { message: 'the rail badge should show the server draft count', timeout: 30_000 })
-          .toBe(true);
-      };
+    //   /**
+    //    * Load `open` and check the badge shows the server's draft count. Other
+    //    * suites — and other runs on the shared server — write as this account
+    //    * in parallel and can move that count between any two reads, so the
+    //    * badge is held to the totals the server reported from just before the
+    //    * page loaded until now: it must lie within them, never outside.
+    //    */
+    //   const expectBadgeMatchesServer = async (open) => {
+    //     const seen = [(await api.myDrafts({ limit: 1 })).pagination.total];
+    //     await open();
+    //     await expect(drafts.railItem).toBeVisible();
+    //     await expect
+    //       .poll(async () => {
+    //         const shown = (await drafts.railBadge.count())
+    //           ? Number(await drafts.railBadge.textContent())
+    //           : 0;
+    //         seen.push((await api.myDrafts({ limit: 1 })).pagination.total);
+    //         return shown >= Math.min(...seen) && shown <= Math.max(...seen);
+    //       }, { message: 'the rail badge should show the server draft count', timeout: 30_000 })
+    //       .toBe(true);
+    //   };
 
-      await expectBadgeMatchesServer(() => primary_user.nestsPage.goto());
-      await expect(drafts.railItem).toContainText('My Drafts');
-      // Muted: a list to tidy, not the primary pill of an inbox waiting on you.
-      await expect(drafts.railBadge).toHaveClass(/bg-muted-foreground\/15/);
-      await expect(drafts.railBadge).not.toHaveClass(/bg-primary/);
+    //   await expectBadgeMatchesServer(() => primary_user.nestsPage.goto());
+    //   await expect(drafts.railItem).toContainText('My Drafts');
+    //   // Muted: a list to tidy, not the primary pill of an inbox waiting on you.
+    //   await expect(drafts.railBadge).toHaveClass(/bg-muted-foreground\/15/);
+    //   await expect(drafts.railBadge).not.toHaveClass(/bg-primary/);
 
-      // The badge follows the list: the seeded draft discarded, and the count
-      // the page shows after a reload is the server's new one.
-      expect((await api.discardDraft(nest.id, doc.id)).ok).toBe(true);
-      expect(await api.isDraft(doc.id, doc.title)).toBe(false);
-      await expectBadgeMatchesServer(() => page.reload());
+    //   // The badge follows the list: the seeded draft discarded, and the count
+    //   // the page shows after a reload is the server's new one.
+    //   expect((await api.discardDraft(nest.id, doc.id)).ok).toBe(true);
+    //   expect(await api.isDraft(doc.id, doc.title)).toBe(false);
+    //   await expectBadgeMatchesServer(() => page.reload());
 
-      await drafts.openFromRail();
+    //   await drafts.openFromRail();
 
-      await expect(page).toHaveURL(/\/my-drafts$/);
-      await expect(drafts.pageTitle).toContainText('My Drafts');
-      await expect(drafts.pageTitle).toContainText('Everything you started and never handed off.');
-      await expect(drafts.railItem).toHaveAttribute('aria-current', 'page');
-      await expect(drafts.search).toBeVisible();
-    });
+    //   await expect(page).toHaveURL(/\/my-drafts$/);
+    //   await expect(drafts.pageTitle).toContainText('My Drafts');
+    //   await expect(drafts.pageTitle).toContainText('Everything you started and never handed off.');
+    //   await expect(drafts.railItem).toHaveAttribute('aria-current', 'page');
+    //   await expect(drafts.search).toBeVisible();
+    // });
   });
 
   // ══════════════════════════════════════════════════════════════════════════
