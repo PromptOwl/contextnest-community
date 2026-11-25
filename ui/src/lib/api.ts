@@ -3665,6 +3665,21 @@ export interface ChatUnread {
   nests: Array<{ nest_id: string; nest_name: string; unread: number; mentions: number; channels: Array<{ id: string; name: string; unread: number }>; conversations: Array<{ id: string; unread: number }> }>;
 }
 
+export interface MyAgentThread {
+  nest_id: string; nest_name: string; node_id: string; channel: string | null;
+  kind: "channel" | "conversation" | "document"; thread_id: string; agents: string[];
+  excerpt: string; at: string; answered: boolean;
+}
+export interface MyAgents {
+  agents: Array<{ handle: string; nests: string[]; last_at: string; threads: number; answered: number }>;
+  threads: MyAgentThread[];
+}
+
+/** What the agents that write under my login have said (One chat 8). */
+export async function getMyAgents() {
+  return request<MyAgents>(`/me/chat/agents`);
+}
+
 export async function getChatUnread() {
   return request<ChatUnread>(`/me/chat/unread`);
 }

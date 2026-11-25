@@ -98,6 +98,7 @@ export const keys = {
   presence: (nestId: string) => [...keys.nest(nestId), "presence"] as const,
   chatPreferences: () => [...keys.me, "chat-preferences"] as const,
   chatUnread: () => [...keys.me, "chat-unread"] as const,
+  myAgents: () => [...keys.me, "chat-agents"] as const,
   chatSettings: (nestId: string) => [...keys.nest(nestId), "chat-settings"] as const,
   // C1 message features (PO-1196): a channel's pins, my saved messages, a search.
   channelPins: (nestId: string, name: string) => [...keys.channels(nestId), "pins", name] as const,
@@ -1236,6 +1237,8 @@ export const reads = {
       queryFn: () => api.getChatPreferences(),
       staleTime: 60_000,
     }),
+  myAgents: () =>
+    queryOptions({ queryKey: keys.myAgents(), queryFn: () => api.getMyAgents(), staleTime: 15_000, retry: false }),
   chatUnread: () =>
     queryOptions({
       queryKey: keys.chatUnread(),

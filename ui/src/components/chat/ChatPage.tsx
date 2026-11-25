@@ -5,7 +5,7 @@
  * are open, `paneLayout` says where each pane goes at this width, and each
  * part of the screen is its own component in this folder.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Hash, PanelLeft } from "lucide-react";
 import { toast } from "sonner";
@@ -57,6 +57,9 @@ interface Props {
   onOpenNode: (nodeId: string) => void;
   /** A document mention in the sidebar opens the document's thread. */
   onOpenDocumentThread?: (nodeId: string, threadId: string) => void;
+  /** Chat across every nest (One chat 2): the caller draws the list, and gets
+   *  the per-nest actions that list needs. */
+  sidebar?: (tools: { newChannel: (() => void) | null; newMessage: (() => void) | null }) => ReactNode;
 }
 
 const fail = (fallback: string) => (e: unknown) => {
@@ -92,7 +95,7 @@ function usePageTop(): [React.RefObject<HTMLDivElement>, number] {
   return [ref, top];
 }
 
-export function ChatPage({ nestId, nestName, channel: selected, thread: openThread, onLocation, onOpenNode, onOpenDocumentThread }: Props) {
+export function ChatPage({ nestId, nestName, channel: selected, thread: openThread, onLocation, onOpenNode, onOpenDocumentThread, sidebar: ownSidebar }: Props) {
   const [pageRef, top] = usePageTop();
   const data = useChannels(nestId, selected, openThread);
   const { list, channel, timeline, actions } = data;
@@ -293,7 +296,9 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
     else onOpenNode(m.node_id);
   };
 
-  const sidebar = list.loading ? (
+  const sidebar = ownSidebar ? (
+    ownSidebar({ newChannel: list.canManage ? () => setCreating(true) : null, newMessage: data.conversations.available ? () => setStartingDm(true) : null })
+  ) : list.loading ? (
     <SidebarSkeleton />
   ) : list.error ? (
     <ErrorState title="Couldn't load channels" detail={list.error} onRetry={list.retry} className="m-3" />
@@ -452,7 +457,7 @@ export function ChatPage({ nestId, nestName, channel: selected, thread: openThre
       <div ref={pageRef} className="flex min-h-[24rem] flex-col" style={{ height: `calc(100dvh - ${top}px)` }} data-testid="chat-page">
         <div className="flex min-h-0 flex-1">
           {layout.sidebar === "inline" ? (
-            <aside className="w-[13.5rem] shrink-0 border-r bg-muted/20">{sidebar}</aside>
+            <aside className={cn("shrink-0 border-r bg-muted/20", ownSidebar ? "w-[16.5rem]" : "w-[13.5rem]")}>{sidebar}</aside>
           ) : (
             <ChatSheet open={sidebarSheet} onOpenChange={setSidebarSheet} side="left" title="Channels" testId="chat-sidebar-sheet">
               <div className="flex h-10 shrink-0 items-center justify-between border-b px-3">

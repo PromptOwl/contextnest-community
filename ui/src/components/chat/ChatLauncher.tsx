@@ -1,14 +1,13 @@
 /**
- * The chat on every nest page (PO-1200, AC-C3-07): a slim tab on the right
- * edge, like Hootie's and stacked under it when both show, that opens the
- * chat as a slide-over — the channel switcher at the top, the conversation,
+ * The chat on every nest page (PO-1200, AC-C3-07): opened from Chat in the header
+ * (HeaderChat) as a slide-over — the channel switcher at the top, the conversation,
  * the composer, and "Open full page". One side panel is open at a time
  * (lib/side-panel.ts). Shown only when the switch is on and the caller is a
  * person added to the nest, never on the chat page itself.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Check, ChevronDown, Expand, Hash, Lock, MessagesSquare, PanelRightClose } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, Expand, Hash, Lock, PanelRightClose } from "lucide-react";
 import { toast } from "sonner";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
@@ -16,9 +15,9 @@ import { useAuth } from "../../auth/AuthContext";
 import type { ChannelPost } from "../../lib/api";
 import { channelThreadLink } from "../../lib/channel-deep-link";
 import { initialChannel } from "../../lib/channels";
-import { chatOn, nestChat, orderConversations, railChatTarget } from "../../lib/chat-harness";
-import { launcherPlacement, launcherShown } from "../../lib/chat-layout";
-import { ChatCount, useChatSummary } from "./ChatEntry";
+import { chatOn, orderConversations, railChatTarget } from "../../lib/chat-harness";
+import { launcherShown } from "../../lib/chat-layout";
+import { useChatSummary } from "./ChatEntry";
 import { orderByActivity, unreadElsewhere } from "../../lib/chat-sidebar";
 import { copyTextWithToast } from "../../lib/clipboard";
 import { pushesContent } from "../../lib/hootie-panel";
@@ -48,18 +47,8 @@ export interface ChatLauncherProps {
   onOpenNode: (nestId: string, nodeId: string) => void;
 }
 
-function useViewport(): number {
-  const [w, setW] = useState(() => (typeof window === "undefined" ? 1440 : window.innerWidth));
-  useEffect(() => {
-    const on = () => setW(window.innerWidth);
-    window.addEventListener("resize", on);
-    return () => window.removeEventListener("resize", on);
-  }, []);
-  return w;
-}
-
 export function ChatLauncher(p: ChatLauncherProps) {
-  const { agentStreamEnabled, hootieEnabled, runnerKeyConfigured, isAdmin } = useAuth();
+  const { agentStreamEnabled } = useAuth();
   const meta = useQuery({ ...reads.nest(p.nestId ?? ""), enabled: !!p.nestId && agentStreamEnabled && !p.onChatPage });
   // App-wide unread (C2): the badge, and off a nest the target. One shared,
   // polled read; nothing moves on a timer, the number just changes.
@@ -72,10 +61,6 @@ export function ChatLauncher(p: ChatLauncherProps) {
     : railChatTarget(summary.data, null);
   const [open, setOpen] = useSidePanel("chat");
   const shown = launcherShown({ streamOn: agentStreamEnabled, member: !!target, onChatPage: p.onChatPage });
-  const counts = target ? nestChat(summary.data, target.nestId) : null;
-  // Hootie's own rule for showing its tab (HootiePanel.tsx).
-  const hootieShown = hootieEnabled && (runnerKeyConfigured || isAdmin);
-  const placement = launcherPlacement(hootieShown, useViewport());
 
   // Leaving for the chat page, or losing the gate, closes the slide-over.
   useEffect(() => {
@@ -85,40 +70,6 @@ export function ChatLauncher(p: ChatLauncherProps) {
   if (!shown || !target) return null;
   return (
     <>
-      {!open &&
-        (placement === "corner" ? (
-          <button
-            type="button"
-            onClick={() => setOpen(true)}
-            aria-label="Open chat"
-            title="Chat"
-            data-testid="chat-launcher"
-            data-placement={placement}
-            className="fixed bottom-20 right-4 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg focus:outline-none focus-visible:ring-4 focus-visible:ring-primary/30"
-          >
-            <MessagesSquare className="h-5 w-5" aria-hidden />
-            <ChatCount counts={counts} className="absolute -right-1 -top-1 bg-background text-primary ring-1 ring-primary" />
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setOpen(true)}
-            aria-label="Open chat"
-            title="Chat"
-            data-testid="chat-launcher"
-            data-placement={placement}
-            className={cn(
-              "fixed right-0 z-40 flex flex-col items-center gap-2 rounded-l-xl bg-primary py-3 pl-1.5 pr-1 text-primary-foreground shadow-lg transition-all hover:pl-2.5 focus:outline-none focus-visible:ring-4 focus-visible:ring-primary/30",
-              placement === "centre" ? "top-1/2 -translate-y-1/2" : "top-[calc(50%+4.5rem)]",
-            )}
-          >
-            <span className="relative flex h-8 w-8 items-center justify-center rounded-full bg-background text-primary">
-              <MessagesSquare className="h-4 w-4" aria-hidden />
-              <ChatCount counts={counts} className="absolute -left-2 -top-2 min-w-4 bg-background px-1 text-[10px] leading-4 text-primary ring-1 ring-primary" />
-            </span>
-            <span className="text-xs font-medium [writing-mode:vertical-rl]">Chat</span>
-          </button>
-        ))}
       {open && (
         <ChatSlideOver
           key={target.nestId}
@@ -136,6 +87,18 @@ export function ChatLauncher(p: ChatLauncherProps) {
 const fail = (fallback: string) => (e: unknown) => {
   toast.error((e as Error | undefined)?.message || fallback);
 };
+
+/** The slide-over's way to Hootie on this page (one side panel at a time). */
+function AskHootie() {
+  const { hootieEnabled, hootieBrand, runnerKeyConfigured, isAdmin } = useAuth();
+  const [, openHootie] = useSidePanel("hootie");
+  if (!hootieEnabled || (!runnerKeyConfigured && !isAdmin)) return null;
+  return (
+    <button type="button" onClick={() => openHootie(true)} className="order-last h-8 shrink-0 rounded-md px-2 text-xs font-medium text-primary hover:bg-muted" data-testid="slide-over-hootie">
+      Ask {hootieBrand.name}
+    </button>
+  );
+}
 
 export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: () => void; onOpenFull: (channel: string | null, thread: string | null) => void; onOpenNode: (nodeId: string) => void }) {
   const [selected, setSelected] = useState<string | null>(null);
@@ -215,6 +178,7 @@ export function ChatSlideOver(p: { nestId: string; nestName: string; onClose: ()
               <ArrowLeft className="h-4 w-4" aria-hidden />
             </button>
           ) : null}
+          <AskHootie />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button type="button" className="flex h-8 min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 text-left text-sm font-semibold hover:bg-muted" aria-label="Switch channel" data-testid="slide-over-switcher">
