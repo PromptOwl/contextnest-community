@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import { ANON_USER_ID } from "../shared/constants.js";
-import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
+import { surfacesS1Ddl, surfacesBindingHistoryDdl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterSqlite } from "../surfaces/schema-ddl-s2b.js";
 import { surfacesS3Ddl, surfacesS3AlterSqlite } from "../surfaces/schema-ddl-s3.js";
@@ -2841,6 +2841,13 @@ export function runMigrations(db: Database.Database): void {
       );
     `);
     recordMigration("100_hired_agents");
+  }
+
+  // 101: Surfaces binding history (po-1437): who started, paused, resumed,
+  //   moved or removed a channel binding, when and why. Shared DDL with Postgres.
+  if (!hasMigration("101_surface_binding_history")) {
+    db.exec(surfacesBindingHistoryDdl("(datetime('now'))"));
+    recordMigration("101_surface_binding_history");
   }
 }
 

@@ -207,13 +207,8 @@ export async function effectiveReaders(
       nonUser.push({ kind: "agent", id: node });
     }
   }
-  // outbound connectors (any event)
-  for (const c of (await db.all("SELECT id FROM connectors WHERE nest_id = ? AND enabled = 1", [nestId])) as Array<{ id: string }>) {
-    nonUser.push({ kind: "connector", id: c.id });
-  }
-  // server-wide governance webhooks post every nest's events
-  if (config.SLACK_WEBHOOK_URL) nonUser.push({ kind: "connector", id: "env:SLACK_WEBHOOK_URL" });
-  if (config.MSTEAMS_WEBHOOK_URL) nonUser.push({ kind: "connector", id: "env:MSTEAMS_WEBHOOK_URL" });
+  // Outbound connectors and the server-wide webhooks are not readers: a bound
+  // nest's posts carry no content (boundNest in notify/dispatch + notify, po-1431).
 
   // Server admins (§12 R1): only the server-admin path itself is exempt, so
   // they are never added above for being admins — but one who is ALSO the

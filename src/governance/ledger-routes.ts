@@ -9,9 +9,14 @@
  *   GET  /nests/:nestId/rollups         day/week × agent/nest/binding rollups
  *
  * Org-wide (mounted at /ledger and /rollups behind flexAuth; read-only):
- *   GET  /ledger, GET /rollups          every nest for a server admin, else the
- *                                       nests the caller owns or administers
+ *   GET  /ledger, GET /rollups          every nest for a server admin; a
+ *                                       nest-scoped key sees its own nest
  *   GET  /ledger/:entryId               one entry's chain + steps + gaps
+ *
+ * Every GET serves the Control room page, so it is superadmin-only (po-1406,
+ * Misha 2026-11-18), except for a key scoped to the nest: that is an agent
+ * reading its own nest (see control-room-access.ts). Registering stays with
+ * nest owners/admins and their agents.
  *
  * Every route has a context_agent_* MCP twin over the same service and zod
  * schema (src/mcp/agent-tools.ts). Behind FEATURE_WORKFLOW_PLANE like runs.
@@ -29,6 +34,7 @@ import { consumeAgentRate, registerAgent } from "../workflow/agent-events.js";
 import { exportLedger, ledgerEntryNest, ledgerTrace, listLedger, nestScope, orgScope } from "./ledger-service.js";
 import { rollups } from "./rollup-service.js";
 import { recordNodeAccess } from "./access-log.js";
+import { assertControlRoomReader } from "./control-room-access.js";
 
 const canSeeDetail = (c: any) => permissionLevel(c.get("nestPermission")) >= permissionLevel("write");
 
@@ -60,6 +66,7 @@ agentRegisterRoutes.post("/", requireWorkflowPlane, async (c) => {
 export const nestLedgerRoutes = new Hono<AuthEnv>();
 
 nestLedgerRoutes.get("/", requireWorkflowPlane, async (c) => {
+  await assertControlRoomReader(c);
   consumeAgentRate("reads", { apiKeyId: c.get("apiKeyId"), userId: c.get("userId") });
   const nestId = c.req.param("nestId")!;
   const q = parseOr422(LedgerQuery, c.req.query());
@@ -67,6 +74,7 @@ nestLedgerRoutes.get("/", requireWorkflowPlane, async (c) => {
 });
 
 nestLedgerRoutes.get("/export", requireWorkflowPlane, async (c) => {
+  await assertControlRoomReader(c);
   const nestId = c.req.param("nestId")!;
   // Validate first: a malformed request is a 422 that spends none of the
   // caller's hourly exports.
@@ -109,6 +117,7 @@ nestLedgerRoutes.get("/export", requireWorkflowPlane, async (c) => {
 
 export const nestRollupRoutes = new Hono<AuthEnv>();
 nestRollupRoutes.get("/", requireWorkflowPlane, async (c) => {
+  await assertControlRoomReader(c);
   consumeAgentRate("reads", { apiKeyId: c.get("apiKeyId"), userId: c.get("userId") });
   const nestId = c.req.param("nestId")!;
   const q = parseOr422(RollupsQuery, c.req.query());
@@ -127,6 +136,7 @@ async function orgScopeFor(c: any) {
 export const orgLedgerRoutes = new Hono<AuthEnv>();
 
 orgLedgerRoutes.get("/", requireWorkflowPlane, async (c) => {
+  await assertControlRoomReader(c);
   consumeAgentRate("reads", { apiKeyId: c.get("apiKeyId"), userId: c.get("userId") });
   const q = parseOr422(LedgerQuery, c.req.query());
   return c.json(await listLedger(await orgScopeFor(c), q));
@@ -136,6 +146,7 @@ orgLedgerRoutes.get("/", requireWorkflowPlane, async (c) => {
 // so it re-does the gate's checks the way loadRunWithPermission does: a
 // nest-scoped key stays in its nest, and no read access is a 404 (no oracle).
 orgLedgerRoutes.get("/:entryId", requireWorkflowPlane, async (c) => {
+  await assertControlRoomReader(c);
   consumeAgentRate("reads", { apiKeyId: c.get("apiKeyId"), userId: c.get("userId") });
   const entryId = c.req.param("entryId")!;
   const nestId = await ledgerEntryNest(entryId);
@@ -150,6 +161,7 @@ orgLedgerRoutes.get("/:entryId", requireWorkflowPlane, async (c) => {
 
 export const orgRollupRoutes = new Hono<AuthEnv>();
 orgRollupRoutes.get("/", requireWorkflowPlane, async (c) => {
+  await assertControlRoomReader(c);
   consumeAgentRate("reads", { apiKeyId: c.get("apiKeyId"), userId: c.get("userId") });
   const q = parseOr422(RollupsQuery, c.req.query());
   return c.json(await rollups(await orgScopeFor(c), q, "/ledger"));

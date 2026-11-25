@@ -418,22 +418,44 @@ beforeEach(async () => {
 // ═══ Enable notice + bindings ═════════════════════════════════════════════════
 
 describe("enable notice", () => {
-  it("AC-CRD-12: enabling posts exactly one notice (what Nest does, what it keeps, 🧠, @Nest skip me); never reposted on a later enable", async () => {
+  it("AC-CRD-12: enabling posts exactly one notice (what Nest does, what it keeps, 🧠, how to skip by the app's own id); never reposted on a later enable", async () => {
     const before = slack.posted.filter((p) => p.channel === "C1").length;
     await bind("C1");
     const notices = slack.posted.filter((p) => p.channel === "C1").slice(before);
     expect(notices.length).toBe(1);
     expect(notices[0].text).toMatch(/only summaries a named person approves; messages are cleared within 24 hours/);
     expect(notices[0].text).toMatch(/🧠/);
-    expect(notices[0].text).toMatch(/@Nest skip me/);
+    expect(notices[0].text).toMatch(/^<@UBOT> is now listening/);
+    expect(notices[0].text).toContain('Mention <@UBOT> and say "skip me"');
+    expect(notices[0].text).not.toContain("@Nest");
     // Remove and re-create the same binding: no second notice.
-    await jsonRequest(app, "DELETE", `/surfaces/bindings/${bound.C1}`, undefined, alice.apiKey);
+    await jsonRequest(app, "DELETE", `/surfaces/bindings/${bound.C1}`, { reason: "test remove" }, alice.apiKey);
     const again = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C1", nest_id: N }, alice.apiKey);
     expect(again.status).toBe(201);
     bound.C1 = again.data.binding.id;
     await setFolders(bound.C1);
     expect(slack.posted.filter((p) => p.channel === "C1" && !p.blocks).length).toBe(1);
     for (const c of ["C2", "C3", "C4", "C5", "C6", "C7"]) await bind(c);
+  });
+
+  it("names each app by its own id, and still reads right with no id", async () => {
+    const { enableNotice } = await import("../src/surfaces/services/notice-service.js");
+    expect(enableNotice("Revenue", null, 24, "UDEV")).toContain('Mention <@UDEV> and say "skip me"');
+    const none = enableNotice("Revenue", null, 24, null);
+    expect(none).toMatch(/^This app is now listening/);
+    expect(none).toContain('Mention this app and say "skip me"');
+  });
+
+  it("a renamed slash command works, and its help names that command", async () => {
+    const send = async (text: string) => {
+      const raw = new URLSearchParams({ command: "/nest-dev", text, user_id: "UDANA", channel_id: "CNONE", team_id: "T1" }).toString();
+      const r = await postRaw(`/surfaces/slack/${installId}/commands`, raw, "application/x-www-form-urlencoded");
+      return String(((await r.json()) as { text: string }).text);
+    };
+    expect(await send("leave")).toMatch(/isn't listening in this conversation/);
+    const help = await send("what");
+    expect(help).toContain("`/nest-dev leave`");
+    expect(help).not.toContain("`/nest ");
   });
 });
 
@@ -619,7 +641,7 @@ describe("cards", () => {
     const inC1 = slack.posted.filter((p) => p.channel === "C1");
     for (const p of inC1) {
       if (p.blocks) expect(textOfBlocks(blocksOf(p))).toMatch(/Proposed by Nest · only approved summaries are kept/);
-      else expect(p.text).toMatch(/^Nest is now listening here/);
+      else expect(p.text).toMatch(/^<@UBOT> is now listening here/);
     }
     expect(inC1.filter((p) => !p.blocks).length).toBe(1);
   });
@@ -1275,13 +1297,13 @@ describe("member boot", () => {
   });
 
   it("AC-BOOT-04: re-binding is refused while the booting member is present without consent; they get a one-tap 'Allow Nest back'; after consent it is allowed", async () => {
-    const r = await jsonRequest(app, "POST", `/surfaces/bindings/${bound.CB}/resume`, {}, alice.apiKey);
+    const r = await jsonRequest(app, "POST", `/surfaces/bindings/${bound.CB}/resume`, { reason: "test resume" }, alice.apiKey);
     expect(r.status).toBe(409);
     const prompt = slack.posted.filter((p) => p.channel === "D_U_BOB" && /Allow Nest back/.test(p.blocks ?? "")).pop()!;
     expect(prompt).toBeTruthy();
     const btn = JSON.parse(prompt.blocks).find((b: any) => b.type === "actions").elements[0];
     await interact(actionPayload("U_BOB", btn.action_id, btn.value, { channel: "D_U_BOB" }));
-    const ok = await jsonRequest(app, "POST", `/surfaces/bindings/${bound.CB}/resume`, {}, alice.apiKey);
+    const ok = await jsonRequest(app, "POST", `/surfaces/bindings/${bound.CB}/resume`, { reason: "test resume" }, alice.apiKey);
     expect(ok.status).toBe(200);
     expect(ok.data.binding.status).toBe("active");
   });
@@ -1949,7 +1971,7 @@ describe("security round", () => {
     await submitView("U_BOB", lastView(), {});
     slack.openFail = true;
     try {
-      const r = await jsonRequest(app, "POST", `/surfaces/bindings/${bound.CB2}/resume`, {}, alice.apiKey);
+      const r = await jsonRequest(app, "POST", `/surfaces/bindings/${bound.CB2}/resume`, { reason: "test resume" }, alice.apiKey);
       expect(r.status).toBe(409);
       expect(r.data.consent_prompt).toBe("failed");
       expect(r.data.error).toMatch(/couldn't send/i);
@@ -2587,9 +2609,12 @@ describe("round 7: sealed side channels", () => {
     const sealedPosts = slack.responses.filter((x) => x.url.includes("/services/T0/B0/server")).slice(before);
     expect(JSON.stringify(sealedPosts)).not.toMatch(SECRET);
     expect(sealedPosts.length).toBe(0);
+    // N is bound, so since po-1431 its posts are content-free; it still sends.
     await n.notifyNestEvent(N, "a normal nest event zqnormal");
     await new Promise((r) => setTimeout(r, 80));
-    expect(JSON.stringify(slack.responses.slice(before))).toMatch(/zqnormal/);
+    const normalPosts = JSON.stringify(slack.responses.filter((x) => x.url.includes("/services/T0/B0/server")).slice(before));
+    expect(normalPosts).toMatch(/\[Revenue\]\* 1 update — open ContextNest/);
+    expect(normalPosts).not.toMatch(/zqnormal/);
     // No email to a non-owner about the sealed nest.
     for (const m of sentMail) if (JSON.stringify(m).match(SECRET)) expect(m.to).toBe(dana.email);
   });
@@ -3274,7 +3299,9 @@ describe("po-1186 control room: the decision ledger over real listener windows",
     await click("U_ERIN", "nest_approve", p.id);
     const c = await one("SELECT * FROM surface_commits WHERE window_id = ?", [p.window_id]);
     expect(c).toBeTruthy();
-    const tr = await jsonRequest(app, "GET", `/ledger/win_${p.window_id}`, undefined, alice.apiKey);
+    // po-1406: the REST read serves the superadmin-only Control room; the nest's owner reads it with a key scoped to the nest.
+    const nestKey = (await jsonRequest(app, "POST", "/auth/keys", { label: "ledger-reader", nest_id: N }, alice.apiKey)).data.api_key;
+    const tr = await jsonRequest(app, "GET", `/ledger/win_${p.window_id}`, undefined, nestKey);
     expect(tr.status).toBe(200);
     for (const hop of ["run", "verdict", "proposal", "review", "version", "source"]) expect(tr.data.chain[hop], hop).toBeTruthy();
     expect(tr.data.chain.run.id).toBe((await one("SELECT run_id FROM surface_windows WHERE id = ?", [p.window_id])).run_id);
@@ -3307,7 +3334,8 @@ describe("po-1186 control room: the decision ledger over real listener windows",
     expect(w).toMatchObject({ status: "judged", verdict: "no_op", reason_code: "chatter" });
     const from = new Date(Date.parse(w.judged_at) - 1000).toISOString();
     const to = new Date(Date.parse(w.judged_at) + 1000).toISOString();
-    const page = await jsonRequest(app, "GET", `/nests/${N}/ledger?verdict=no_op&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, undefined, alice.apiKey);
+    const nestKey = (await jsonRequest(app, "POST", "/auth/keys", { label: "ledger-reader-2", nest_id: N }, alice.apiKey)).data.api_key;
+    const page = await jsonRequest(app, "GET", `/nests/${N}/ledger?verdict=no_op&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, undefined, nestKey);
     expect(page.status).toBe(200);
     const row = page.data.entries.find((e: any) => e.entry_id === `win_${w.id}`);
     expect(row).toBeTruthy();
@@ -3396,6 +3424,29 @@ describe("audit, parity, disconnect", () => {
     }
   });
 
+  it("po-1446: channel activity counts what Nest did (received, kept, skipped by reason, judged, cards); counts only; nest admins only", async () => {
+    const b = await one("SELECT * FROM surface_bindings WHERE conversation_id = 'C1' AND status = 'active'");
+    const url = `/surfaces/bindings/${b.id}/activity`;
+    expect((await jsonRequest(app, "GET", url, undefined, bob.apiKey)).status).toBe(403);
+    const before = (await jsonRequest(app, "GET", url, undefined, alice.apiKey)).data;
+    await say("C1", "U_BOB", "the release moved to Thursday because QA needs another day, everyone agreed in standup");
+    await say("C1", "U_BOB", "ok");
+    const after = await jsonRequest(app, "GET", url, undefined, alice.apiKey);
+    expect(after.status, JSON.stringify(after.data)).toBe(200);
+    const a = after.data;
+    expect(a.days).toBe(7);
+    expect(a.received - before.received).toBe(2);
+    expect(a.buffered - before.buffered).toBe(1);
+    expect((a.skipped.too_short ?? 0) - (before.skipped.too_short ?? 0)).toBe(1);
+    expect(a.received).toBe(a.buffered + Object.values(a.skipped as Record<string, number>).reduce((x, y) => x + y, 0));
+    // The new message waits for its quiet window; nothing was judged or posted by it yet.
+    expect(a.waiting).toBeGreaterThanOrEqual(1);
+    expect(a.cards.posted - before.cards.posted).toBe(0);
+    expect(a.judged).toEqual(before.judged);
+    // Counts only: never message text.
+    expect(JSON.stringify(a)).not.toMatch(/Thursday|standup/);
+  });
+
   it("AC-EXP-04 + CF-5 (AC-INS-09): disconnect updates pending cards to Withdrawn BEFORE auth.revoke; afterwards secrets, bindings, buffer, drafts and links are gone; approved nodes and surface_commits remain", async () => {
     await jsonRequest(app, "PATCH", "/surfaces/settings", { reviewer_daily_cards: 10, conversation_daily_cards: 20 }, root.apiKey);
     const p = await makeProposal("C1");
@@ -3407,6 +3458,8 @@ describe("audit, parity, disconnect", () => {
     process.env.SMTP_URL = "smtps://u:p@smtp.test:465";
     process.env.NOTIFY_EMAIL_FROM = "nest@surf.test";
     sentMail.length = 0;
+    // po-1437 review: a display name is not Slack markup.
+    await S.db.getDb().run("UPDATE users SET name = ? WHERE email = ?", ["<!channel> <https://evil.test|Nest>", root.email]);
     const r = await jsonRequest(app, "DELETE", `/surfaces/installs/${installId}`, undefined, root.apiKey);
     expect(r.status).toBe(200);
     const order = slack.calls.map((c) => c.method);
@@ -3430,6 +3483,18 @@ describe("audit, parity, disconnect", () => {
     const node = await jsonRequest(app, "GET", `/nests/${N}/nodes/${approved.node_id}`, undefined, alice.apiKey);
     expect(node.status).toBe(200);
     expect((await one("SELECT status FROM surface_installs WHERE id = ?", [installId])).status).toBe("disconnected");
+    // po-1437: each channel is told who disconnected, BEFORE the token is revoked, and its history names that person.
+    const told = slack.calls.findIndex((c) => c.method === "chat.postMessage" && c.params.channel === "C1" && /disconnected from this Slack workspace by/i.test(String(c.params.text)));
+    expect(told).toBeGreaterThan(-1);
+    expect(told).toBeLessThan(firstRevoke);
+    const toldText = String(slack.calls[told].params.text);
+    expect(toldText).toContain("&lt;!channel&gt; &lt;https://evil.test|Nest&gt;");
+    expect(toldText).not.toContain("<!channel>");
+    expect(r.data.told).toBeGreaterThan(0);
+    const c1 = await one("SELECT id FROM surface_bindings WHERE install_id = ? AND conversation_id = 'C1'", [installId]);
+    const h = await one("SELECT action, reason, actor_user_id, actor_email FROM surface_binding_history WHERE binding_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", [c1.id]);
+    expect(h).toMatchObject({ action: "removed", reason: `Slack disconnected by ${root.email}`, actor_email: root.email });
+    expect(h.actor_user_id).toBeTruthy();
     delete process.env.SMTP_URL;
     delete process.env.NOTIFY_EMAIL_FROM;
   });

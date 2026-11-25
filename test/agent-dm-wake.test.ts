@@ -126,6 +126,10 @@ beforeAll(async () => {
   expect(k.status, JSON.stringify(k.data)).toBeLessThan(300);
   builderKey = k.data.key ?? k.data.apiKey ?? k.data.api_key;
   expect(builderKey).toBeTruthy();
+  // What a paired hire records: this key is the handle's own.
+  const { getDb } = await import("../src/db/client.js");
+  const row = (await getDb().get("SELECT id FROM api_keys WHERE user_id = ? AND label = 'builder' ORDER BY created_at DESC LIMIT 1", [alice.userId])) as { id: string };
+  await getDb().run("INSERT INTO hired_agents (nest_id, kind, handle, hired_by, created_at, ref) VALUES (?, 'key', 'builder', ?, ?, ?)", [nestId, OWNER_EMAIL, new Date().toISOString(), row.id]);
 });
 
 afterEach(() => {

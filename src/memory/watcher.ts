@@ -47,8 +47,10 @@ import { safeJson } from "../shared/json.js";
 import { resolveModelCredential, resolveGatewayModel, hootieModel, type ModelCredential } from "../shared/model-credential.js";
 import { storedEnvValues } from "../workflow/env-routes.js";
 import { closeRun } from "../workflow/run-service.js";
+import { classifyRunFailure, type JudgeFailure } from "../surfaces/services/judge-failure.js";
 import { getAgent, listAgents, upsertAgent, type MetacognitionAgent } from "../metacognition/store.js";
 import { assertCanManageMetacognition, metacognitionEnabled, NOT_ENABLED, ownerCanRun } from "../metacognition/manage.js";
+import { assertNotManaged, managedAgents } from "../metacognition/managed.js";
 import { createTurn, estimateCostUsd, type Usage } from "../metacognition/model.js";
 import { TOOLS, runTool, defang, attr, proposeEditDraft, proposeNewDraft, type ToolContext } from "../metacognition/tools.js";
 import { McpPool } from "../metacognition/mcp-client.js";
@@ -214,7 +216,9 @@ export async function setChannelWatch(
   } else if (current) {
     agent = current.agent;
   } else {
-    const all = await listAgents(caller.nestId);
+    // A Slack listener never watches a channel, so it is not a candidate.
+    const managed = await managedAgents(caller.nestId);
+    const all = (await listAgents(caller.nestId)).filter((a) => !managed.has(a.node_id));
     if (all.length === 1) agent = all[0];
     else if (all.length === 0) throw new ValidationError("This nest has no metacognition agent yet. Set one up first (PUT /metacognition/:node), then add it to the channel.");
     else throw new ValidationError(`This nest has ${all.length} metacognition agents; pass \`agent\` to say which one watches #${view.name}.`);
@@ -229,6 +233,7 @@ export async function setChannelWatch(
     },
     "watch",
   );
+  if (entry.enabled) await assertNotManaged(caller.nestId, agent.node_id);
   // Its drafts go to reviewers who may not be channel members (C2).
   if (entry.enabled && view.private) throw new ValidationError(`#${view.name} is private; a watcher would copy it into drafts the whole nest's reviewers can read.`);
 
@@ -475,6 +480,7 @@ export async function runChannelWatch(
   const result: WatchRunResult = { ran: true, trigger, reason: null, verdict: null, proposals: [], relations: 0, refused: 0, messages: rows.length, run_id: runId };
   const usage: Usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   let model = "";
+  let failure: JudgeFailure | null = null;
   try {
     model = await resolveGatewayModel(credential, agent.config.model ?? hootieModel(credential));
     const fence = randomBytes(6).toString("hex");
@@ -511,7 +517,9 @@ export async function runChannelWatch(
   } catch (err) {
     result.verdict = result.verdict ?? "error_schema";
     result.reason = ac.signal.aborted ? "max_seconds" : "model_error";
-    console.warn("[watch] run failed", nestId, name, (err as Error)?.name ?? err);
+    // po-1452: a fixed code + HTTP status the ledger shows; never the message (it can carry a key or chat).
+    failure = classifyRunFailure(err, ac.signal.aborted);
+    console.warn(`[watch] run ${runId} in ${nestId} #${name} failed: ${failure.name} reason=${failure.code}${failure.status ? ` status=${failure.status}` : ""}`);
   } finally {
     clearTimeout(timer);
   }
@@ -524,8 +532,10 @@ export async function runChannelWatch(
      ON CONFLICT (user_id, nest_id, kind, ref, subject) DO UPDATE SET at = CASE WHEN excluded.at > stream_marks.at THEN excluded.at ELSE stream_marks.at END`,
     [agent.persona.user_id, nestId, channelId, newest],
   );
+  const failed = result.verdict === "error_schema" && !!result.reason;
   await closeRun(runId, {
-    status: result.verdict === "error_schema" && result.reason ? "failed" : "succeeded",
+    status: failed ? "failed" : "succeeded",
+    reasonCode: failed ? (failure?.code ?? "unknown_error") : null,
     trace: {
       kind: "channel_watch",
       persona: { name: agent.persona.name, email: agent.persona.email },
@@ -534,6 +544,7 @@ export async function runChannelWatch(
       ran: true,
       verdict: result.verdict,
       reason: result.reason,
+      ...(failure ? { reason_code: failure.code, error_class: failure.name, http_status: failure.status } : {}),
       proposals: result.proposals.length,
       relations: result.relations,
       refused: result.refused,

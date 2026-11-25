@@ -13,6 +13,7 @@ import { getDb } from "../../../db/client.js";
 import type { InstallRow } from "../../services/install-store.js";
 import { botToken, NO_BOT_TOKEN } from "./connector.js";
 import { slackCall, SlackApiError } from "./api.js";
+import { ADMIN_PAUSE } from "../../services/binding-service.js";
 import { SurfaceRateLimited } from "../../contract.js";
 
 export const MAX_CHANNEL_PAGES = 10;
@@ -33,7 +34,7 @@ export interface InstallChannel {
   is_ext_shared: boolean;
   /** Slack's own count, when it sends one; null otherwise. */
   num_members: number | null;
-  binding: { id: string; nest_id: string; status: string } | null;
+  binding: { id: string; nest_id: string; status: string; paused_by_admin?: boolean } | null;
 }
 
 export async function listInstallChannels(install: InstallRow): Promise<{ channels: InstallChannel[]; truncated: boolean }> {
@@ -55,10 +56,11 @@ export async function listInstallChannels(install: InstallRow): Promise<{ channe
     cursor = String(r.response_metadata?.next_cursor ?? "");
     if (!cursor) break;
   }
-  const bindings = (await getDb().all("SELECT id, nest_id, status, conversation_id FROM surface_bindings WHERE install_id = ? AND status <> 'removed'", [install.id])) as Array<{
+  const bindings = (await getDb().all("SELECT id, nest_id, status, pause_reason, conversation_id FROM surface_bindings WHERE install_id = ? AND status <> 'removed'", [install.id])) as Array<{
     id: string;
     nest_id: string;
     status: string;
+    pause_reason: string | null;
     conversation_id: string;
   }>;
   const byConv = new Map(bindings.map((b) => [b.conversation_id, b]));
@@ -72,7 +74,7 @@ export async function listInstallChannels(install: InstallRow): Promise<{ channe
         is_private: !!(ch.is_private || ch.is_group),
         is_ext_shared: !!(ch.is_ext_shared || ch.is_shared || ch.is_pending_ext_shared),
         num_members: typeof ch.num_members === "number" ? ch.num_members : null,
-        binding: b ? { id: b.id, nest_id: b.nest_id, status: b.status } : null,
+        binding: b ? { id: b.id, nest_id: b.nest_id, status: b.status, paused_by_admin: b.pause_reason === ADMIN_PAUSE } : null,
       };
     })
     .sort((a, b) => (a.name ?? a.id).localeCompare(b.name ?? b.id));

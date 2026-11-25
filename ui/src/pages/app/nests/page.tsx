@@ -8,8 +8,11 @@ import { useQueryClient, useQuery } from "@tanstack/react-query";
 import { reads, useNests } from "../../../lib/queries";
 import { useAuth } from "../../../auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
+import { nestChat } from "../../../lib/chat-harness";
+import { ChatCount, useChatSummary } from "../../../components/chat/ChatEntry";
 import {
   FileText, Plus, Database, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Archive, ArchiveRestore, Bookmark, Building2, UserCheck,
+  MessagesSquare,
 } from "lucide-react";
 import { ANON_USER_ID } from "../../../lib/constants";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -78,7 +81,9 @@ const NEST_SCOPE_KEY = "cn:dashboard:nestScope";
 // as UTC with no zone, which new Date() would read as local time.
 
 export default function NestsPage() {
-  const { openNest: onSelectNest, manageKeys: onManageKeys } = useAppNav();
+  const { openNest: onSelectNest, manageKeys: onManageKeys, openChannel } = useAppNav();
+  // Team chat (PO-1200): which nests have chat for me, and what waits there.
+  const chatSummary = useChatSummary();
   const { adminStatus, authMode, isAdmin, logoUrl } = useAuth();
   const queryClient = useQueryClient();
   // First-run onboarding (PO-1185): the server decides whether the welcome
@@ -1365,6 +1370,25 @@ export default function NestsPage() {
                               <FileText className="h-3 w-3" />
                               {nest.document_count ?? 0}
                             </span>
+                            {/* One click into this nest's chat, with what waits there. */}
+                            {nestChat(chatSummary.data, nest.id) && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openChannel(nest.id, nest.name);
+                                }}
+                                onKeyDown={(e) => e.stopPropagation()}
+                                className="inline-flex items-center gap-1 rounded px-1 -mx-1 py-0.5 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                title={`Open chat in ${nest.name}`}
+                                aria-label={`Open chat in ${nest.name}`}
+                                data-testid="nest-card-chat"
+                              >
+                                <MessagesSquare className="h-3 w-3" aria-hidden />
+                                Chat
+                                <ChatCount counts={nestChat(chatSummary.data, nest.id)} className="min-w-4 px-1 text-[10px] leading-4" />
+                              </button>
+                            )}
                             {/* WHO, not just counts: shared-with (plain chips)
                             and stewards (shield-tinted chips), initials with
                             the email on hover. */}

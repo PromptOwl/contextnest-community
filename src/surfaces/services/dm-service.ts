@@ -37,7 +37,7 @@ import { SettingsError, type SurfaceSettings } from "../core/settings.js";
 export const DM_NOTICE_EVERY_MS = 7 * 24 * 3600_000;
 export const DM_OFF_NOTE =
   "Nest isn't keeping anything from direct messages here: DM capture is off for this workspace. A server administrator can turn it on in Surfaces settings. Nothing from this message was kept.";
-export const DM_PERSONAL_OFF_NOTE = "Your DM capture is off, so Nest didn't keep this. Turn it back on from Nest's Home tab or with `/nest dm on`.";
+export const DM_PERSONAL_OFF_NOTE = "Your DM capture is off, so Nest didn't keep this. Turn it back on from this app's Home tab.";
 export const dmIntro = (nest: string) => `I made you a private nest, ${nest}, for what you ask me to remember here. ${PRIVATE_NEST_DISCLOSURE}`;
 export const dmLinkNote = (url: string) => `To keep things from our DMs, link your ContextNest account first (the link works once, for 15 minutes): <${url}|Link my account>. Nothing from this message was kept.`;
 

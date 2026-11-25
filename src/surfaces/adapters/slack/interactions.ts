@@ -236,7 +236,7 @@ export async function startBoot(install: InstallRow, binding: BindingRow, user: 
     return;
   }
   const meta = signMeta({ k: "boot", b: binding.id, u: user, t: install.team_id, x: Date.now() + 30 * 60_000 });
-  if (!meta || !(await openView(install, triggerId, renderBootModal(meta, binding.conversation_name)))) await note("Couldn't open the dialog. Try `/nest leave` again.");
+  if (!meta || !(await openView(install, triggerId, renderBootModal(meta, binding.conversation_name)))) await note("Couldn't open the dialog. Try again.");
 }
 
 async function onBlockAction(install: InstallRow, p: Record<string, any>): Promise<void> {
@@ -499,5 +499,8 @@ export async function handleCommand(install: InstallRow, raw: string): Promise<H
     await setPersonalDm(install, user, text === "dm on");
     return say(text === "dm on" ? "Your DM capture is on again." : "Your DM capture is off. Anything Nest was holding from our DMs was deleted, and DM proposals waiting for you were withdrawn.");
   }
-  return say("Try `/nest leave` (remove Nest from this conversation), `/nest invite` (bring it back after a member removed it), or `/nest dm off` / `/nest dm on`.");
+  // The command is whatever this Slack app registered (a dev app may not own /nest).
+  const sent = f.get("command") ?? "";
+  const cmd = /^\/[^\s`<>&]{1,31}$/.test(sent) ? sent : "/nest";
+  return say(`Try \`${cmd} leave\` (remove Nest from this conversation), \`${cmd} invite\` (bring it back after a member removed it), or \`${cmd} dm off\` / \`${cmd} dm on\`.`);
 }

@@ -42,7 +42,7 @@ export function waitingOnMeCount(
 ): number {
   return (
     (work?.waiting_on_me_total ?? work?.pagination?.total ?? 0) +
-    (work?.assigned?.length ?? 0) +
+    (work?.assigned?.filter((a) => !a.done).length ?? 0) +
     (work?.notifications?.length ?? 0)
   );
 }
@@ -54,7 +54,11 @@ export function nothingWaitingOnMe(work: {
   assigned?: AssignedItem[];
   mentions?: MentionItem[];
 }): boolean {
-  return work.items.length === 0 && (work.assigned?.length ?? 0) === 0 && (work.mentions?.length ?? 0) === 0;
+  return (
+    work.items.length === 0 &&
+    (work.assigned?.filter((a) => !a.done).length ?? 0) === 0 &&
+    (work.mentions?.length ?? 0) === 0
+  );
 }
 
 /**
@@ -69,7 +73,7 @@ export function urgentOnMeCount(
   today: string = localToday(),
 ): number {
   const tasks = (work?.assigned ?? []).filter(
-    (a) => a.priority === "urgent" || (!!a.due && dueState(a.due, today) === "overdue"),
+    (a) => !a.done && (a.priority === "urgent" || (!!a.due && dueState(a.due, today) === "overdue")),
   ).length;
   return (work?.urgent_reviews_total ?? 0) + tasks;
 }

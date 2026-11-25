@@ -27,6 +27,10 @@ import {
   previewBinding,
   recheckBinding,
   removeBinding,
+  pauseBinding,
+  bindingHistory,
+  bindingActivity,
+  requireReason,
   resumeBinding,
   updateBinding,
   bindingView,
@@ -43,6 +47,9 @@ import {
   revokeLink,
 } from "./services/identity-service.js";
 import { listInstalls } from "./services/install-store.js";
+import { bufferKeyConfigured } from "./services/buffer-crypto.js";
+import { publicUrlProblem, slackUrls } from "./adapters/slack/manifest.js";
+import { resolveModelCredential } from "../shared/model-credential.js";
 import { createBindingWithListener } from "./services/listener-service.js";
 
 type C = Context<AuthEnv>;
@@ -135,6 +142,18 @@ surfacesRoutes.get("/status", async (c) => {
       org_name: config.SURFACES_ORG_NAME ?? null,
       slack_hosted: hostedEnabled(),
       disclosure: SERVER_ADMIN_DISCLOSURE,
+      // po-1444: what Slack setup needs from this server, for the admin's
+      // checklist. Booleans and the public URL only, never a secret.
+      ...(orgAdmin
+        ? {
+            readiness: {
+              public_url: publicUrlProblem(config.PUBLIC_BASE_URL),
+              redirect_url: config.PUBLIC_BASE_URL ? slackUrls(config.PUBLIC_BASE_URL, "hosted").redirect : null,
+              buffer_key: bufferKeyConfigured(),
+              model_key: resolveModelCredential({}) !== null,
+            },
+          }
+        : {}),
     });
   } catch (err) {
     return handleError(c, err);
@@ -152,6 +171,7 @@ function bindInput(c: C, b: Record<string, unknown>) {
     nestId,
     explicitPublicBind: bool(b.explicit_public_bind, "explicit_public_bind"),
     extCaptureEnabled: bool(b.ext_capture_enabled, "ext_capture_enabled"),
+    reason: typeof b.reason === "string" ? b.reason : null,
   };
 }
 
@@ -218,7 +238,9 @@ surfacesRoutes.patch("/bindings/:id", async (c) => {
 surfacesRoutes.delete("/bindings/:id", async (c) => {
   try {
     await scopedRow(c, c.req.param("id"));
-    return c.json(await removeBinding(c.req.param("id"), c.get("userId")));
+    const b = await readBody(c);
+    const movedToNestId = typeof b.moved_to_nest_id === "string" && b.moved_to_nest_id.trim() ? b.moved_to_nest_id.trim() : null;
+    return c.json(await removeBinding(c.req.param("id"), c.get("userId"), requireReason(b.reason), movedToNestId));
   } catch (err) {
     return handleError(c, err);
   }
@@ -234,10 +256,40 @@ surfacesRoutes.post("/bindings/:id/recheck", async (c) => {
   }
 });
 
+/** po-1446: counts of what Nest did in this channel lately (nest owner/admin). */
+surfacesRoutes.get("/bindings/:id/activity", async (c) => {
+  try {
+    await scopedRow(c, c.req.param("id"));
+    return c.json(await bindingActivity(c.req.param("id"), c.get("userId")));
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
+/** po-1437: who started, paused, resumed, moved or removed it, when and why (nest owner/admin). */
+surfacesRoutes.get("/bindings/:id/history", async (c) => {
+  try {
+    await scopedRow(c, c.req.param("id"));
+    return c.json(await bindingHistory(c.req.param("id"), c.get("userId")));
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
+/** po-1437: a nest admin pauses listening; Resume (below) re-runs the guard. */
+surfacesRoutes.post("/bindings/:id/pause", async (c) => {
+  try {
+    await scopedRow(c, c.req.param("id"));
+    return c.json(await pauseBinding(c.req.param("id"), c.get("userId"), requireReason((await readBody(c)).reason)));
+  } catch (err) {
+    return handleError(c, err);
+  }
+});
+
 surfacesRoutes.post("/bindings/:id/resume", async (c) => {
   try {
     await scopedRow(c, c.req.param("id"));
-    return c.json(await resumeBinding(c.req.param("id"), c.get("userId")));
+    return c.json(await resumeBinding(c.req.param("id"), c.get("userId"), requireReason((await readBody(c)).reason)));
   } catch (err) {
     // AC-BOOT-04: refused while the booting member is still there without
     // consent — send them the one-tap "Allow Nest back" prompt.
@@ -530,8 +582,8 @@ surfacesRoutes.delete("/installs/:id", async (c) => {
     if (!(await isOrgAdmin(c.get("userId")))) throw new ForbiddenError("Only a server administrator can disconnect a workspace.");
     const i = await getInstall(c.req.param("id"));
     if (!i) throw new NotFoundError("Install not found");
-    const out = await disconnectInstall(i.id);
-    return c.json({ disconnected: true, withdrawn: out.withdrawn, kept: ["approved nodes", "surface_commits", "audit history"] });
+    const out = await disconnectInstall(i.id, c.get("userId"));
+    return c.json({ disconnected: true, withdrawn: out.withdrawn, told: out.told, kept: ["approved nodes", "surface_commits", "audit history"] });
   } catch (err) {
     return handleError(c, err);
   }
@@ -652,13 +704,17 @@ surfacesRoutes.get("/seeds", async (c) => {
 // GET /surfaces/cold-start?nest_id=   one seeded nest, or every seeded nest the
 // caller administers (all for a server admin). Read-only, counts only; MCP twin
 // context_surfaces_cold_start; same zod query (src/surfaces/cold-start-schema.ts).
+// The REST route serves the Control room page, so it is superadmin-only since
+// po-1406 (nest-scoped keys never reach /surfaces); the MCP twin is unchanged.
 
 import { coldStart, coldStartAll } from "./services/cold-start-service.js";
 import { ColdStartQuery } from "./cold-start-schema.js";
+import { assertControlRoomReader } from "../governance/control-room-access.js";
 import { parseOr422 } from "../workflow/agent-event-schema.js";
 
 surfacesRoutes.get("/cold-start", async (c) => {
   try {
+    await assertControlRoomReader(c);
     const q = parseOr422(ColdStartQuery, c.req.query());
     const scope = c.get("nestScope");
     const nestId = q.nest_id ?? scope ?? undefined;

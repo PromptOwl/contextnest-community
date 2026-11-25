@@ -135,6 +135,10 @@ beforeAll(async () => {
   const wh = await jsonRequest(app, "PUT", `/nests/${nestId}/agent-webhooks/builder`, { url: RUNNER }, owner.apiKey);
   expect(wh.status, JSON.stringify(wh.data)).toBeLessThan(300);
   secret = wh.data.secret;
+  // What a paired hire records: the handle's own key is the one this login holds.
+  const { getDb } = await import("../src/db/client.js");
+  const key = (await getDb().get("SELECT id FROM api_keys WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", [builder.userId])) as { id: string };
+  await getDb().run("INSERT INTO hired_agents (nest_id, kind, handle, hired_by, created_at, ref) VALUES (?, 'key', 'builder', ?, ?, ?)", [nestId, OWNER_EMAIL, new Date().toISOString(), key.id]);
 });
 
 afterEach(() => {
@@ -313,5 +317,89 @@ describe("AC-G5/6: internal runner targets, by operator allowlist only", () => {
     await open(alice, "@inner are you there");
     await settle();
     expect(sent).toHaveLength(0);
+  });
+});
+
+describe("A5: only the agent itself names the handle a decision wakes", () => {
+  it("a member declaring client.agent: builder files a card that wakes nobody", async () => {
+    const t = await open(alice, "please plan this");
+    const r = await callTool(owner.apiKey, "context_propose", { thread: t.id, title: "Plan: spoofed", content: "x", client: { agent: "mallory" } });
+    expect(r.isError, r.text).toBe(false);
+    expect(r.data.proposal.proposed_by).toBeNull();
+    captureWakes();
+    const carol = builder; // the agent's own login, under another agent's name
+    const r2 = await callTool(carol.apiKey, "context_propose", { thread: t.id, title: "Plan: someone else's name", content: "x", client: { agent: "grok" } });
+    expect(r2.data.proposal.proposed_by).toBeNull();
+    const a = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${r2.data.proposal.node_id}/approve`, {}, alice.apiKey);
+    expect(a.status).toBe(200);
+    await settle();
+    expect(decided()).toEqual([]);
+  });
+
+  it("a member who labels their own key with the handle can't name it either", async () => {
+    const k = await jsonRequest(app, "POST", "/auth/keys", { label: "builder" }, alice.apiKey);
+    const key = k.data.key ?? k.data.apiKey ?? k.data.api_key;
+    expect(key).toBeTruthy();
+    const t = await open(owner, "@builder plan");
+    const r = await jsonRequest(app, "POST", `/nests/${nestId}/threads/${t.id}/propose`, { title: "Plan: labelled", content: "x", client: { agent: "builder" } }, key);
+    expect(r.status, JSON.stringify(r.data)).toBe(201);
+    expect(r.data.proposal.proposed_by).toBeNull();
+  });
+
+  it("the login that set up the webhook may speak for its handle", async () => {
+    const t = await open(alice, "@builder plan");
+    const r = await callTool(owner.apiKey, "context_propose", { thread: t.id, title: "Plan: by the webhook's owner", content: "x", client: { agent: "builder" } });
+    expect(r.data.proposal.proposed_by).toBe("builder");
+  });
+});
+
+describe("A6: a decision that beats the card still wakes the agent, once", () => {
+  it("approved between the review and the card", async () => {
+    const t = await open(alice, "@builder race");
+    captureWakes();
+    const proposals = await import("../src/agents/agent-proposals.js");
+    proposals._setBeforeCard(async (nodeId: string) => {
+      const a = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${nodeId}/approve`, {}, alice.apiKey);
+      expect(a.status, JSON.stringify(a.data)).toBe(200);
+      await settle();
+      expect(decided()).toEqual([]);
+    });
+    try {
+      await propose(t.id, "Plan: race");
+    } finally {
+      proposals._setBeforeCard(null);
+    }
+    await vi.waitFor(() => expect(decided().length).toBe(1), { timeout: 2000, interval: 10 });
+    await settle();
+    expect(decided().length).toBe(1);
+  });
+
+  it("a card that can't be written leaves no review waiting", async () => {
+    const t = await open(alice, "@builder broken");
+    const proposals = await import("../src/agents/agent-proposals.js");
+    let node = "";
+    proposals._setBeforeCard(async (nodeId: string) => {
+      node = nodeId;
+      throw new Error("disk full");
+    });
+    try {
+      const r = await callTool(builder.apiKey, "context_propose", { thread: t.id, title: "Plan: broken", content: "x", client: { agent: "builder" } });
+      expect(r.isError || !!r.rpcError).toBe(true);
+    } finally {
+      proposals._setBeforeCard(null);
+    }
+    const { getDb } = await import("../src/db/client.js");
+    const pending = await getDb().get("SELECT id FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending'", [nestId, node]);
+    expect(pending).toBeFalsy();
+  });
+});
+
+describe("the private-network transport is for operator-named hosts only", () => {
+  it("every other URL takes the guarded transport", () => {
+    process.env.AGENT_WEBHOOK_INTERNAL_HOSTS = "runner";
+    expect(wake.usesInternalTransport("http://runner:8787/wake")).toBe(true);
+    for (const u of ["http://10.0.0.5/wake", "http://127.0.0.1/", "http://localhost/", "http://runner.evil.test/", "http://a:b@runner/", "https://example.com/", "http://169.254.169.254/"]) {
+      expect(wake.usesInternalTransport(u), u).toBe(false);
+    }
   });
 });

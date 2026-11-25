@@ -13,6 +13,7 @@
  */
 
 import logger from '../../helper/logger/logger.js';
+import { openMoreActions } from '../../lib/more_actions_menu.js';
 
 class NestDocumentsPage {
   /**
@@ -29,8 +30,10 @@ class NestDocumentsPage {
     this.typeFilter = this.main.locator('button[title="Filter by type"]');
     this.statusFilter = this.main.getByRole('combobox').filter({ hasText: /^(All Status|Draft|Pending|Published|Rejected)$/ });
     this.sortSelect = this.main.locator('button[title="Sort documents"]');
-    this.listViewButton = this.main.locator('button[title="List view"]');
-    this.cardViewButton = this.main.locator('button[title="Card view"]');
+    // The list/grid switch lives in the header's ⋯ menu (po-1213). It offers
+    // the other view: "Show as grid" in list view, "Show as list" in grid view.
+    this.showAsGrid = page.getByTestId('nest-view-grid');
+    this.showAsList = page.getByTestId('nest-view-list');
 
     // ── Active filters, saved filters, tag bar ────────────────────────────
     this.removeFilterButtons = this.main.locator('button[title="Remove this filter"]');
@@ -84,6 +87,23 @@ class NestDocumentsPage {
   }
 
   // ── Toolbar ─────────────────────────────────────────────────────────────
+
+  /** The view the list is in, read from what the ⋯ menu offers: 'list' or 'cards'. */
+  async viewMode() {
+    await openMoreActions(this.page, this.showAsGrid.or(this.showAsList).first());
+    const mode = (await this.showAsGrid.isVisible()) ? 'list' : 'cards';
+    await this.page.keyboard.press('Escape');
+    await this.showAsGrid.or(this.showAsList).first().waitFor({ state: 'hidden' });
+    return mode;
+  }
+
+  /** ⋯ → "Show as grid" ('cards') or "Show as list" ('list'). */
+  async switchView(mode) {
+    this._log(`Switching to the ${mode} view`);
+    const item = mode === 'cards' ? this.showAsGrid : this.showAsList;
+    await openMoreActions(this.page, item);
+    await item.click();
+  }
 
   /** Open a select (type, status, sort) and pick an option by its label. */
   async choose(trigger, option) {

@@ -188,3 +188,25 @@ export function surfacesS1Ddl(now: string): string {
     CREATE INDEX IF NOT EXISTS idx_surface_notices_kind ON surface_notices(kind, created_at);
   `;
 }
+
+/**
+ * po-1437: who started, paused, resumed, moved or removed a channel binding,
+ * when, and why. Append-only, so the full history is kept; the person's email
+ * is copied at the time, so a later rename or deletion doesn't lose who it was.
+ * actor_user_id NULL = Nest itself (a guard pause, a member's boot).
+ */
+export function surfacesBindingHistoryDdl(now: string): string {
+  return `
+    CREATE TABLE IF NOT EXISTS surface_binding_history (
+      id TEXT PRIMARY KEY,
+      binding_id TEXT NOT NULL,
+      nest_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      reason TEXT,
+      actor_user_id TEXT,
+      actor_email TEXT,
+      created_at TEXT NOT NULL DEFAULT ${now}
+    );
+    CREATE INDEX IF NOT EXISTS idx_surface_binding_history ON surface_binding_history(binding_id, created_at);
+  `;
+}

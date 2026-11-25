@@ -31,6 +31,12 @@ describe("newTaskPayload", () => {
     expect(newTaskPayload({ title: "A", content: "", surfaceTag: "" })).toEqual({ title: "A", content: "" });
   });
 
+  it("po-1207: carries the folder picked, the nest root included; left out it stays the column's", () => {
+    expect(newTaskPayload({ title: "A", content: "", folder: "gtm/deals" })).toMatchObject({ folder: "gtm/deals" });
+    expect(newTaskPayload({ title: "A", content: "", folder: "" })).toMatchObject({ folder: "" });
+    expect(newTaskPayload({ title: "A", content: "" })).not.toHaveProperty("folder");
+  });
+
   it("refuses a blank title", () => {
     expect(newTaskPayload({ title: "   ", content: "notes" })).toBeNull();
   });

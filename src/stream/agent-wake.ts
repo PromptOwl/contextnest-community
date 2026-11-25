@@ -136,9 +136,14 @@ export function setAgentWakeFetch(fn: WebhookFetch | null): void {
   override = fn;
 }
 
+/** Whether this URL may take the transport that reaches private addresses. */
+export function usesInternalTransport(url: string): boolean {
+  return isInternalAgentWebhookUrl(url);
+}
+
 function transportFor(url: string): WebhookFetch {
   if (override) return override;
-  return isInternalAgentWebhookUrl(url) ? internalFetch : defaultFetch;
+  return usesInternalTransport(url) ? internalFetch : defaultFetch;
 }
 
 let backoff: readonly number[] = WAKE_RETRY_BACKOFF_MS;
@@ -619,6 +624,15 @@ export type DecidedOutcome = "sent" | "none" | "skipped";
  * target passes the same fence as a mention at use time; one delivery per
  * (review, handle), so a decision dispatched twice sends once. Never throws.
  */
+/** The thread a plan was filed from (its metadata.source_thread), or null. */
+async function planThread(nestId: string, nodeId: string): Promise<string | null> {
+  const { engineCache } = await import("../nodes/engine.js");
+  const { storage } = await engineCache.get(nestId);
+  const doc = await storage.readDocument(nodeId).catch(() => null);
+  const st = (doc?.frontmatter?.metadata as { source_thread?: { thread_id?: unknown } } | undefined)?.source_thread;
+  return typeof st?.thread_id === "string" && st.thread_id ? st.thread_id : null;
+}
+
 export async function wakeOnProposalDecided(params: {
   nestId: string;
   nodeId: string;
@@ -634,14 +648,16 @@ export async function wakeOnProposalDecided(params: {
       | { id: string; node_id: string; version: number; requested_by: string }
       | undefined;
     if (!review || review.node_id !== nodeId) return "none";
-    // The card: the message in this nest whose stored proposal names this
-    // review. Narrowed by the review id inside the JSON before parsing.
+    // The card is in the thread the plan came from, so only that thread's
+    // messages are read: most approvals have no such thread and stop here.
+    const source = await planThread(nestId, nodeId);
+    if (!source) return "none";
     const rows = (await db.all(
       `SELECT c.id, c.thread_id, c.author, c.client_json, t.node_id AS thread_node
          FROM annotation_comments c
          JOIN annotation_threads t ON t.id = c.thread_id
-        WHERE t.nest_id = ? AND c.client_json LIKE ?`,
-      [nestId, `%"review_id":"${reviewId.replace(/[^0-9A-Za-z-]/g, "")}"%`],
+        WHERE t.id = ? AND t.nest_id = ? AND c.client_json LIKE ?`,
+      [source, nestId, `%"review_id":"${reviewId.replace(/[^0-9A-Za-z-]/g, "")}"%`],
     )) as Array<{ id: string; thread_id: string; author: string; client_json: string | null; thread_node: string }>;
     let card: { id: string; thread_id: string; author: string; thread_node: string; handle: string } | null = null;
     for (const r of rows) {

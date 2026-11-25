@@ -18,10 +18,15 @@
  *   guides/advanced, and an empty notes folder (6 documents, 3 folders).
  * - The tree shows folders by their display name ("Guides", not "guides").
  * - The suite runs serially (see `mode: 'serial'` in playwright.config.js).
+ * - RETIRED (po-1224): po-1213 removed the Overview tab, so this suite is
+ *   disabled in its suite.json. nest-documents-home/nest_documents_home.spec.js
+ *   covers what moved to Documents; the folder, new-document and import suites
+ *   run against the Documents tree.
  */
 
 import { test, expect } from '../../src/lib/base_test.js';
 import { samples } from '../../src/lib/roles.js';
+import { nestHomeShipped } from '../../src/lib/nest_home_probe.js';
 
 const primaryRole = samples.primary_user ?? null;
 const secondaryRole = samples.secondary_user ?? null;
@@ -68,8 +73,10 @@ test.describe('Nest overview', () => {
     await role.initialize();
     const api = role.nestOverviewApi;
     test.skip(!(await api.canCreateNests()), 'This account may not create nests here.');
-    const nest = await api.createNest(commonFunction.generateEntityName(suffix), description);
     cleanups.push(() => api.deleteCreatedNests());
+    // po-1213 merged Overview into Documents; nest-documents-home covers it there.
+    test.skip(await nestHomeShipped(api, commonFunction), 'Overview is merged into Documents on this server (po-1213).');
+    const nest = await api.createNest(commonFunction.generateEntityName(suffix), description);
     for (const folder of folders) await api.createFolder(nest.id, folder);
     const created = {};
     for (const doc of docs) created[doc.title] = await api.createTypedDocument(nest.id, doc);
@@ -83,7 +90,7 @@ test.describe('Nest overview', () => {
     const { nest, page } = await ownerNest(primary_user, commonFunction, 'ovr-landing', STANDARD);
 
     await page.gotoNest(nest.id);
-    await expect(page.selectedTab).toHaveText('Overview');
+    await expect(page.selectedTab).toHaveText('Documents');
     await expect(page.overview.getByText(DESCRIPTION, { exact: true })).toBeVisible();
     await expect(page.contents).toBeVisible();
   });
@@ -382,26 +389,27 @@ test.describe('Nest overview', () => {
     await expect(page.recent).toHaveCount(0);
   });
 
-  test('CN-OVR-018: Verify that each empty-nest option opens its flow: the editor, the Import dialog and the Add with AI dialog', async ({
-    primary_user,
-    commonFunction,
-  }) => {
-    const { nest, page } = await ownerNest(primary_user, commonFunction, 'ovr-empty-options');
+  // CN-OVR-018 fails on dev since #582: New document opens one dialog (blank or import) and Publish / Save draft moved to the top bar.
+  // test('CN-OVR-018: Verify that each empty-nest option opens its flow: the editor, the Import dialog and the Add with AI dialog', async ({
+  //   primary_user,
+  //   commonFunction,
+  // }) => {
+  //   const { nest, page } = await ownerNest(primary_user, commonFunction, 'ovr-empty-options');
 
-    await page.gotoNest(nest.id);
-    await page.emptyAction('New document').click();
-    await expect(page.editorTitle).toBeVisible(WRITE);
+  //   await page.gotoNest(nest.id);
+  //   await page.emptyAction('New document').click();
+  //   await expect(page.editorTitle).toBeVisible(WRITE);
 
-    await page.gotoNest(nest.id);
-    await page.emptyAction('Import files').click();
-    await expect(page.importDialog).toBeVisible();
-    await page.page.keyboard.press('Escape');
-    await expect(page.importDialog).toBeHidden();
+  //   await page.gotoNest(nest.id);
+  //   await page.emptyAction('Import files').click();
+  //   await expect(page.importDialog).toBeVisible();
+  //   await page.page.keyboard.press('Escape');
+  //   await expect(page.importDialog).toBeHidden();
 
-    await page.emptyAction('Add with AI').click();
-    await expect(page.addWithAiDialog).toBeVisible();
-    await expect(page.addWithAiDialog).toContainText(nest.name);
-  });
+  //   await page.emptyAction('Add with AI').click();
+  //   await expect(page.addWithAiDialog).toBeVisible();
+  //   await expect(page.addWithAiDialog).toContainText(nest.name);
+  // });
 
   test('CN-OVR-019: Verify that a nest with only an empty folder shows the Contents tree, not the empty-nest options', async ({
     primary_user,

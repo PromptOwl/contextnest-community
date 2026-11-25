@@ -41,9 +41,6 @@ import { NestVisibilityControl } from "./NestVisibilityControl";
 import { PdfDocumentPanel } from "./PdfDocumentPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Dialog,
@@ -113,7 +110,8 @@ import { tableDiffSides } from "../lib/csv-table";
 import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { CodeHighlight } from "./CodeHighlight";
-import { prettyFolder, prettyFolderPath } from "./FolderTree";
+import { prettyFolder } from "./FolderTree";
+import { FolderSelect } from "./FolderSelect";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { PublishDialog } from "./PublishDialog";
 import { shareDocumentLink } from "../lib/share-link";
@@ -2214,6 +2212,8 @@ export function DocumentEditor({
       // Owner / nest admin (or server admin) — the people GET /activity-log
       // lets in; the server refuses everyone else regardless.
       canSeeActivity: isAdmin || canSeeActivityLog(permission),
+      // A document that failed to load has no title to name either.
+      isLoading: loading || loadFailed,
     }).map((a) => {
       const base = {
         label: a.label,
@@ -2409,22 +2409,7 @@ export function DocumentEditor({
             Move <strong>{title || nodeId}</strong> to another folder. Version
             history, review state, and [[wiki links]] follow the document.
           </p>
-          <Select
-            value={moveTo === "" ? "__root__" : (moveTo ?? "__root__")}
-            onValueChange={(v) => setMoveTo(v === "__root__" ? "" : v)}
-          >
-            <SelectTrigger data-testid="document-editor-move-select">
-              <SelectValue placeholder="Choose a folder" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__root__">Nest root</SelectItem>
-              {folderOptions.map((f) => (
-                <SelectItem key={f} value={f}>
-                  {prettyFolderPath(f)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <FolderSelect value={moveTo ?? ""} onChange={setMoveTo} folders={folderOptions} testId="document-editor-move-select" />
           <DialogFooter>
             <Button variant="ghost" disabled={moving} onClick={() => setMoveTo(null)}>
               Cancel
@@ -4595,10 +4580,12 @@ export function DocumentEditor({
                           className="h-8 text-muted-foreground"
                           disabled={discarding}
                           onClick={() => setConfirmDiscard(true)}
+                          aria-label="Discard draft"
+                          title="Discard draft"
                           data-testid="document-editor-discard"
                         >
                           <Undo2 className="h-4 w-4 sm:mr-1.5" />
-                          <span className="hidden sm:inline">{discarding ? "Discarding…" : "Discard draft"}</span>
+                          <span className="hidden sm:inline bar-max-xl:hidden">{discarding ? "Discarding…" : "Discard draft"}</span>
                         </Button>
                       )}
                     {showSubmit && (
@@ -4607,11 +4594,12 @@ export function DocumentEditor({
                         size="sm"
                         className="h-8"
                         onClick={() => setShowSubmitModal(true)}
+                        aria-label="Submit for review"
                         data-testid="document-editor-submit"
                         title="Saves your changes and sends them to a steward for approval."
                       >
                         <Send className="h-4 w-4 sm:mr-1.5" />
-                        <span className="hidden sm:inline">Submit for review</span>
+                        <span className="hidden sm:inline bar-max-xl:hidden">Submit for review</span>
                       </Button>
                     )}
                     {/* Own pending submission auto-saves — a status line, not a Save button. */}
