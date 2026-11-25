@@ -2212,14 +2212,28 @@ export default function App() {
               onReviewed={doc.returnTo ? () => setView(doc.returnTo!) : undefined}
               onOpenReviewPane={() => appNav.openReviewPane(doc.nestId, doc.nestName, doc.nodeId)}
               onOpenNestSettings={() => openNest({ openSettings: true })}
-              onSaved={(_id, info) => {
-                // New doc → the nest; a published draft → where it was opened
+              onSaved={(savedId, info) => {
+                // New doc → itself; a published draft → where it was opened
                 // from (Board, review queue); otherwise stay (see saveDestination).
                 const dest = saveDestination(doc.nodeId, {
                   publishedDraft: info?.publishedDraft,
                   hasReturnTo: !!doc.returnTo,
+                  savedId,
                 });
-                if (dest === "nest") openNest();
+                if (dest === "document") {
+                  // In place of the empty form, so Back never returns to it.
+                  replaceNextRef.current = true;
+                  setView({
+                    page: "document",
+                    nestId: doc.nestId,
+                    nestName: doc.nestName,
+                    nodeId: savedId,
+                    isOwner: doc.isOwner,
+                    isAnonOwned: doc.isAnonOwned,
+                    breadcrumb: doc.breadcrumb,
+                    returnTo: doc.returnTo,
+                  });
+                } else if (dest === "nest") openNest();
                 else if (dest === "return") setView(doc.returnTo!);
               }}
               onNavigateDocument={(linkNestId, linkNodeId, currentTitle) => {
