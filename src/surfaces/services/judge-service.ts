@@ -31,7 +31,7 @@ import { config } from "../../config.js";
 import { createTurn } from "../../metacognition/model.js";
 import { TOOLS, runTool, defang, attr, metacognitionHoldFor, type ToolContext } from "../../metacognition/tools.js";
 import { McpPool } from "../../metacognition/mcp-client.js";
-import { resolveModelCredential, resolveGatewayModel, hootieModel } from "../../shared/model-credential.js";
+import { credentialLabel, resolveModelCall, resolveModelCredential, hootieModel } from "../../shared/model-credential.js";
 import { resolveNestPermission, permissionLevel } from "../../shared/access.js";
 import { storedEnvValues } from "../../workflow/env-routes.js";
 import { listNodesForCaller, derivedNodeId } from "../../nodes/service.js";
@@ -225,6 +225,8 @@ interface JudgeProgress {
   agentNode: string | null;
   model: string | null;
   cost: number;
+  /** Whose key the call runs on. */
+  billing?: "own_key" | "promptowl_credits";
   startedAt: number;
   usage: JudgeUsage;
   /** The window's text, in memory only: what an error message is cleaned against. */
@@ -573,16 +575,18 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
     await alertNoTargetFolder(binding);
     return;
   }
-  const credential = resolveModelCredential(await storedEnvValues(binding.nest_id));
-  if (!credential) {
+  const baseCredential = resolveModelCredential(await storedEnvValues(binding.nest_id));
+  if (!baseCredential) {
     await end({ status: "judged", verdict: "error", reason_code: "no_model" });
     return;
   }
   // The listener's own settings come first, then the server's judge model.
   const tuning = readJudgeTuning(listener.config);
   const maxOutput = tuning.max_output_tokens ?? MAX_OUTPUT_TOKENS;
-  const model = await resolveGatewayModel(credential, tuning.model || config.SURFACES_JUDGE_MODEL || hootieModel(credential));
+  const { credential, model } = await resolveModelCall(baseCredential, tuning.model || config.SURFACES_JUDGE_MODEL || hootieModel(baseCredential));
   progress.model = model;
+  progress.billing = credential.source === "own" ? "own_key" : "promptowl_credits";
+  console.log(`[surfaces] judging window ${w.id} model=${model} ${credentialLabel(credential)}`);
   progress.stage = "nest";
   const nv = await nestView(binding.nest_id, owner.userId, { folders, thesisNodeId });
   progress.stage = "setup";
@@ -840,6 +844,7 @@ async function recordRun(
   const base = {
     kind: "surfaces_judge",
     model: p.model,
+    ...(p.billing ? { billing: p.billing } : {}),
     prompt_version: PROMPT_VERSION,
     est_cost_usd: Math.round(p.cost) / 1_000_000,
     usage: {

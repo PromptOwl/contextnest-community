@@ -695,9 +695,9 @@ export async function getAdminLicense() {
 }
 
 /** Models this server's credential can reach (admin), and the one Hootie uses now. */
-export async function getAdminModels() {
+export async function getAdminModels(nestId?: string | null) {
   return request<{ models: string[]; current: string; source: "own" | "promptowl" | null; own_models?: string[]; providers?: Record<string, string>; error?: string }>(
-    "/admin/models",
+    `/admin/models${nestId ? `?nest_id=${encodeURIComponent(nestId)}` : ""}`,
   );
 }
 

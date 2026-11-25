@@ -1176,7 +1176,9 @@ export function createApp(): Hono<AuthEnv> {
   app.get("/admin/models", async (c) => {
     if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
-    const credential = resolveModelCredential();
+    // With a nest, what that nest's calls can reach: its own key comes first.
+    const forNest = c.req.query("nest_id");
+    const credential = resolveModelCredential(forNest ? await (await import("./workflow/env-routes.js")).storedEnvValues(forNest) : {});
     const current = hootieModel(credential);
     // On the server's own gateway every call stays there, so PromptOwl-held
     // own-provider models aren't offered.

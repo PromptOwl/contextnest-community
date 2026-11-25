@@ -3,6 +3,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { ModelPicker } from "@/components/ModelPicker";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -99,6 +100,18 @@ export function ListenerSettings({ nodeId, nestId, onSaved }: { nodeId: string; 
             {FIELDS.map((f) => (
               <div key={f.key} className="space-y-1">
                 <Label htmlFor={`listener-${f.key}`}>{f.label}</Label>
+                {f.key === "model" ? (
+                  <ModelPicker
+                    id="listener-model"
+                    testId="listener-model"
+                    value={form.model}
+                    onChange={(v) => setForm((x) => ({ ...x, model: v }))}
+                    disabled={busy}
+                    nestId={binding?.nest_id}
+                    hint={(n) => `${n ? f.hint : `${f.hint}. The list couldn't be loaded, so type its name`}${defaults?.model ? `. Default: ${defaults.model}` : ""}`}
+                  />
+                ) : (
+                  <>
                 <Input
                   id={`listener-${f.key}`}
                   value={form[f.key]}
@@ -110,6 +123,8 @@ export function ListenerSettings({ nodeId, nestId, onSaved }: { nodeId: string; 
                   {f.hint}
                   {defaults?.[f.key] != null && `. Default: ${defaults[f.key]}`}
                 </p>
+                  </>
+                )}
               </div>
             ))}
             {all.length > 0 && (

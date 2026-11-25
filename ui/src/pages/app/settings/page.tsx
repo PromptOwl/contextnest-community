@@ -51,10 +51,9 @@ import {
 } from "../../../lib/api";
 import { reads } from "../../../lib/queries";
 import { CopyButton } from "@/components/ui/copy-button";
-import { getAdminModels, getAdminSettings, updateAdminSettings } from "../../../lib/api";
+import { getAdminSettings, updateAdminSettings } from "../../../lib/api";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { SearchableSelect } from "@/components/SearchableSelect";
-import { modelOptions } from "@/lib/model-options";
+import { ModelPicker } from "@/components/ModelPicker";
 import { useAuth } from "../../../auth/AuthContext";
 import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
@@ -350,55 +349,22 @@ function HootieModelField({
   /** Changes when the own-provider keys change, so the list is fetched again. */
   reloadKey?: string;
 }) {
-  const [models, setModels] = useState<string[] | null>(null);
-  const [own, setOwn] = useState<string[]>([]);
-  const [providers, setProviders] = useState<Record<string, string>>({});
-  useEffect(() => {
-    getAdminModels()
-      .then((r) => {
-        setModels(r.models);
-        setOwn(r.own_models ?? []);
-        setProviders(r.providers ?? {});
-      })
-      .catch(() => setModels([]));
-  }, [reloadKey]);
-  const options = useMemo(
-    () => modelOptions(models ?? [], own, providers, value),
-    [models, own, providers, value],
-  );
   return (
     <div className="space-y-1.5">
       <Label htmlFor="hootie-model">Model</Label>
-      {models === null ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground h-9">
-          <Loader2 className="h-4 w-4 animate-spin" /> Loading models…
-        </div>
-      ) : models.length > 0 ? (
-        <SearchableSelect
-          id="hootie-model"
-          testId="settings-hootie-model"
-          value={value}
-          onChange={onChange}
-          options={options}
-          placeholder="Pick a model"
-          searchPlaceholder="Search models…"
-          emptyText="No model matches."
-        />
-      ) : (
-        <TextField
-          error={error}
-          id="hootie-model"
-          value={value}
-          placeholder="claude-sonnet-5"
-          onChange={onChange}
-        />
-      )}
-      {error && models && models.length > 0 && <p className="text-xs text-destructive">{error}</p>}
-      <p className="text-xs text-muted-foreground">
-        {models && models.length > 0
-          ? `The model Hootie answers with — ${models.length} available on this server.`
-          : "The model Hootie answers with. The list of available models couldn't be loaded, so type its name (through a gateway, the gateway's name for it)."}
-      </p>
+      <ModelPicker
+        id="hootie-model"
+        testId="settings-hootie-model"
+        value={value}
+        onChange={onChange}
+        error={error}
+        reloadKey={reloadKey}
+        hint={(n) =>
+          n
+            ? `The model Hootie answers with — ${n} available on this server.`
+            : "The model Hootie answers with. The list of available models couldn't be loaded, so type its name (through a gateway, the gateway's name for it)."
+        }
+      />
     </div>
   );
 }

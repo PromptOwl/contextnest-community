@@ -978,6 +978,8 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     const ok = await judgeOnce("C423", () => submit(noop()));
     expect(ok.run).toMatchObject({ status: "succeeded", verdict: "no_op" });
     expect(ok.trace.error).toBeUndefined();
+    // Whose key paid, as a metacognition run records it.
+    expect(["own_key", "promptowl_credits"]).toContain(ok.trace.billing);
   });
 
   it("EX-4, EX-5: an error with no fixed explanation shows the provider's own words, without secrets or chat text", async () => {
