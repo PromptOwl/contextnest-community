@@ -50,7 +50,8 @@ export function provenanceRows(input: {
   const submitted = [input.requestedBy, when(input.requestedAt)].filter(Boolean).join(" · ");
   if (submitted) rows.push({ label: "Submitted by", value: submitted });
   if (lastEdit) {
-    const who = lastEdit.edited_by_system ? `${lastEdit.edited_by} via ${lastEdit.edited_by_system}` : lastEdit.edited_by;
+    const agentOnly = lastEdit.edited_by.toLowerCase().endsWith("@agents.invalid");
+    const who = !lastEdit.edited_by_system ? lastEdit.edited_by : agentOnly ? lastEdit.edited_by_system : `${lastEdit.edited_by} via ${lastEdit.edited_by_system}`;
     rows.push({ label: "Last edit", value: [`v${lastEdit.version}`, who, when(lastEdit.edited_at)].filter(Boolean).join(" · ") });
   }
   return rows;

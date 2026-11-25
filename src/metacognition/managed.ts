@@ -50,6 +50,35 @@ export async function managedAgents(nestId: string): Promise<Map<string, Managed
   );
 }
 
+const PERSONA_DOMAIN = "@agents.invalid";
+export const isPersonaEmail = (email: string | null | undefined): email is string => !!email?.toLowerCase().endsWith(PERSONA_DOMAIN);
+
+/**
+ * What people call the agents behind these addresses. A persona signs its work
+ * with an internal address (metacognition/store.ts) that means nothing to a
+ * reader. No query when there is no persona in the list.
+ */
+export async function personaNames(emails: Array<string | null | undefined>): Promise<Map<string, string>> {
+  const wanted = [...new Set(emails.filter(isPersonaEmail))];
+  const out = new Map<string, string>();
+  for (let i = 0; i < wanted.length; i += 500) {
+    const chunk = wanted.slice(i, i + 500);
+    const rows = (await getDb().all(
+      `SELECT u.email, u.name, m.node_id, b.conversation_name, b.conversation_kind
+         FROM users u
+         LEFT JOIN metacognition_agents m ON m.persona_user_id = u.id
+         LEFT JOIN surface_bindings b ON b.nest_id = m.nest_id AND b.listener_agent_node_id = m.node_id AND b.status <> 'removed'
+        WHERE u.is_service = 1 AND u.email IN (${chunk.map(() => "?").join(",")})`,
+      chunk,
+    )) as Array<{ email: string; name: string | null; node_id: string | null; conversation_name: string | null; conversation_kind: string | null }>;
+    for (const r of rows) {
+      const name = (r.node_id && r.conversation_kind ? listenerName(r.name, r.conversation_kind === "dm" ? null : r.conversation_name, r.node_id) : null) ?? r.name;
+      if (name) out.set(r.email, name);
+    }
+  }
+  return out;
+}
+
 export async function assertNotManaged(nestId: string, nodeId: string): Promise<void> {
   if ((await managedAgents(nestId)).has(nodeId)) throw new ConflictError(MANAGED_BY_SLACK);
 }

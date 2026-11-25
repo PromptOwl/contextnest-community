@@ -3,6 +3,7 @@
  * disk + DB stay in lockstep across both surfaces. Handlers stay thin
  * (auth, parse, response shape); this module owns create/update/list.
  */
+import { personaNames } from "../metacognition/managed.js";
 import { adminFolderRefusal, adminFolderPathRefusal } from "../surfaces/admin-folders.js";
 import { surfaceEditsHiddenFor, isHidden as isSurfaceHidden, HIDE_ALL as SURFACE_HIDE_ALL } from "../surfaces/draft-visibility.js";
 import { approvedReadableBody } from "./readable-body.js";
@@ -547,6 +548,8 @@ export interface NodeResponse extends TaskFields {
   /** Creator email — frontmatter author when present, else the author of the
    *  node's first version. Null for old imported docs with neither. */
   author?: string | null;
+  /** The creator's name when it is an agent (its address means nothing to a reader). */
+  author_name?: string;
   /** Everyone else with a hand in the doc: distinct node_versions authors
    *  UNION document-scope grant holders, minus the author, sorted. */
   collaborators?: string[];
@@ -1358,6 +1361,7 @@ export async function listNodesForCaller(
         frontmatterAuthor: d.frontmatter.author ?? null,
       })),
     );
+  const agentNames = await personaNames([...(authorship?.values() ?? [])].map((a) => a.author));
   // Who last edited each row — the human and the agent — for the Documents
   // rows and context_list (po-1213). One query for the list. Same gate as the
   // roster, plus headless keys: an access key reads content, not people.
@@ -1380,6 +1384,7 @@ export async function listNodesForCaller(
       const people = authorship?.get(doc.id);
       if (people) {
         r.author = people.author;
+        if (people.author && agentNames.has(people.author)) r.author_name = agentNames.get(people.author);
         r.collaborators = people.collaborators;
       }
       const last = lastEdits?.get(doc.id);

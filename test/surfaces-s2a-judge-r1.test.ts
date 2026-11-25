@@ -1055,6 +1055,16 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     expect(r.calls[0].system).toContain('target_folder must be one of: "inbox/"');
     expect(JSON.parse(r.w.blocked)).toEqual({ over_limit: 1 });
     expect(r.w.item_count).toBe(1);
+    // EX-22: the draft names the listener as creator, editor and requester, never its internal address.
+    const made = await one("SELECT i.node_id FROM surface_proposal_items i JOIN surface_proposals p ON p.id = i.proposal_id WHERE p.window_id = ?", [r.w.id]);
+    const doc = await jsonRequest(app, "GET", `/nests/${F}/nodes/${made.node_id}`, undefined, alice.apiKey);
+    expect(doc.status).toBe(200);
+    const shown = doc.data.node ?? doc.data;
+    expect(shown.author_name).toBe("General ears");
+    expect(shown.last_edit.edited_by_system).toBe("General ears");
+    const queue = await jsonRequest(app, "GET", `/nests/${F}/review-queue`, undefined, alice.apiKey);
+    expect(queue.status).toBe(200);
+    expect((queue.data.requests ?? []).find((x: any) => x.nodeId === made.node_id)?.requestedByName).toBe("General ears");
     const tr = await jsonRequest(app, "GET", `/ledger/win_${r.w.id}`, undefined, root.apiKey);
     expect(tr.data.entry.agent.name).toBe("General ears");
     const roll = await jsonRequest(app, "GET", `/nests/${F}/rollups?${new URLSearchParams({ ...range(), by: "agent", grain: "week" })}`, undefined, root.apiKey);

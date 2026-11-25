@@ -5,6 +5,7 @@
  * Conflict detection via X-Base-Version header (optimistic concurrency).
  */
 
+import { personaNames } from "../metacognition/managed.js";
 import { createHash } from "crypto";
 import { getDb } from "../db/client.js";
 import type { Querier } from "../db/adapter.js";
@@ -163,7 +164,7 @@ export async function getVersions(
     [nestId, nodeId],
   )) as any[];
 
-  return rows.map(rowToVersion);
+  return namePersonas(rows.map(rowToVersion));
 }
 
 export async function getVersion(
@@ -207,7 +208,7 @@ export async function getVersionAttribution(
       ? [nestId, nodeId, SYSTEM_AUTHOR_LIKE]
       : [nestId, nodeId, SYSTEM_AUTHOR_LIKE, version],
   )) as any;
-  return row ? rowToVersion(row) : null;
+  return row ? (await namePersonas([rowToVersion(row)]))[0] : null;
 }
 
 /** Binds getLatestVersionAttributions spends once per query: nest_id twice
@@ -271,6 +272,7 @@ export async function getLatestVersionAttributions(
     )) as any[];
     for (const row of rows) out.set(row.node_id, rowToVersion(row));
   }
+  await namePersonas([...out.values()]);
   return out;
 }
 
@@ -898,6 +900,13 @@ export async function listMyDrafts(params: {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
+
+/** An agent's persona is named as a system account is: by its name, never its internal address. */
+async function namePersonas(list: DocumentVersion[]): Promise<DocumentVersion[]> {
+  const names = await personaNames(list.map((v) => v.editedBy));
+  for (const v of list) v.editedBySystem ??= names.get(v.editedBy);
+  return list;
+}
 
 function rowToVersion(row: any): DocumentVersion {
   return {

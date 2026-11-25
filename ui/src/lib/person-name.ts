@@ -5,5 +5,6 @@ export function displayNameFor(
   people: Array<{ email: string; name?: string | null }> = [],
 ): string {
   const lower = email.toLowerCase();
-  return people.find((p) => p.email.toLowerCase() === lower)?.name || email;
+  // An agent's internal address means nothing to a reader: where the server sent no name, say what it is.
+  return people.find((p) => p.email.toLowerCase() === lower)?.name || (lower.endsWith("@agents.invalid") ? "Agent" : email);
 }
