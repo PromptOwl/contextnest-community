@@ -4,6 +4,7 @@
  * the same from either door. The nest comes from the row, so this works across
  * nests.
  */
+import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
@@ -20,6 +21,8 @@ export function MyWorkReviewPane({
   onSkip,
   onOpenDocument,
   onClose,
+  nestName,
+  panel,
 }: {
   nestId: string;
   nodeId: string;
@@ -30,6 +33,9 @@ export function MyWorkReviewPane({
   onSkip?: () => void;
   onOpenDocument: (nodeId: string) => void;
   onClose: () => void;
+  nestName?: string;
+  /** Replaces the decision: your own submission has Withdraw instead. */
+  panel?: ReactNode;
 }) {
   const queue = useQuery(reads.reviewQueue(nestId));
   const settings = useNestSettings(nestId);
@@ -93,6 +99,9 @@ export function MyWorkReviewPane({
       onEditDraft={() => onOpenDocument(nodeId)}
       onOpenDocument={onOpenDocument}
       onClose={onClose}
+      layout="workspace"
+      nestName={nestName}
+      panel={panel}
     />
   );
 }

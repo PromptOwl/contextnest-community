@@ -1897,6 +1897,9 @@ Comment items on **resolved** threads are left out (and out of `counts.comments`
 
 `counts` always carries both per-type totals regardless of `filter`; the UI tab badge binds to `counts.changes` (actionable items), not the feed length. The UI deep-links a comment item to its document with the thread focused via `?nest=<id>&doc=<nodeId>&thread=<threadId>`.
 
+### Review rows (`GET /me/work` → `items`, `waiting`)
+A `type: "review"` row carries `up_to_date`: `false` when the document has a newer version than the one under review. The My Work page leaves those out of "Select all up-to-date". `context_my_work` returns the same field.
+
 ### Assigned rows (`GET /me/work` → `assigned`)
 
 Open board tasks and cards whose `assignee` is the caller, across every nest they can see. Each row carries `nest_id`, `nest_name`, `node_id`, `title`, `type`, `due`, `priority`, `assigned_at`, and `open_blockers` when non-zero. Completed cards (`completed_at` set) drop out, and so does anything the caller can't read. The assignee match ignores case, so `Ann@Acme.com` written by a file sync or import still lists for `ann@acme.com`. Rows are sorted soonest-due first (no due date last), then most recently assigned, and capped at 100.

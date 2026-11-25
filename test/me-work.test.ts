@@ -14,6 +14,7 @@ import {
   setupTestEnv,
   createTestApp,
   registerUser,
+  resetAuthRateLimit,
   jsonRequest,
 } from "./helpers.js";
 
@@ -308,4 +309,27 @@ it("urgent_reviews_total counts urgent reviews the caller can decide, not the ca
   expect(sub.status, JSON.stringify(sub.data)).toBeLessThan(300);
   expect((await jsonRequest(app, "GET", "/me/work", undefined, bob.apiKey)).data.urgent_reviews_total).toBe(before.bob + 1);
   expect((await jsonRequest(app, "GET", "/me/work", undefined, alice.apiKey)).data.urgent_reviews_total).toBe(before.alice);
+});
+
+it("review items say whether the version under review is still the newest", async () => {
+  await resetAuthRateLimit();
+  const carol = await registerUser(app, "carol-fresh@acme.com", "Carol");
+  const nest = await governedNest(alice, "Fresh Nest");
+  await jsonRequest(app, "POST", `/nests/${nest}/collaborators`, { email: carol.email, permission: "write" }, alice.apiKey);
+  await submitDoc(carol, nest, "fresh");
+  await submitDoc(carol, nest, "stale");
+  const { getDb } = await import("../src/db/client.js");
+  // An out-of-band edit adds a version while the review is pending.
+  const src = (await getDb().get(
+    "SELECT * FROM node_versions WHERE nest_id = ? AND node_id = 'nodes/stale' ORDER BY version DESC LIMIT 1",
+    [nest],
+  )) as any;
+  await getDb().run(
+    "INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status) VALUES (?, ?, ?, ?, ?, 'draft')",
+    [nest, src.node_id, src.version + 1, "x", carol.email],
+  );
+  const { data } = await jsonRequest(app, "GET", "/me/work", undefined, alice.apiKey);
+  const flag = (id: string) => data.items.find((w: any) => w.nest_id === nest && w.node_id === id)?.up_to_date;
+  expect(flag("nodes/fresh")).toBe(true);
+  expect(flag("nodes/stale")).toBe(false);
 });
