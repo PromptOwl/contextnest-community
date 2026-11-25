@@ -58,6 +58,7 @@ import {
   DEFAULT_SETTINGS_COPY,
   activityLines,
   SETUP_STEPS,
+  REUSE_APP_STEPS,
   deriveProgress,
   dryRunSummary,
   dryRunTree,
@@ -603,6 +604,11 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
                 </DialogDescription>
               </DialogHeader>
               <DisconnectChannels bindings={state.bindings} />
+              {inst?.mode === "manifest" && (
+                <Note tone="warn" testId="disconnect-new-address">
+                  Connecting again makes a new connection with a new address. To reuse the same Slack app, you will paste a new manifest into it and save its three values again; until then no Slack messages arrive.
+                </Note>
+              )}
               <DialogFooter>
                 <Button variant="outline" onClick={() => setConfirmOff(false)} disabled={busy}>
                   Cancel
@@ -695,6 +701,19 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
             <p className="mt-2 text-sm text-muted-foreground" data-testid="setup-manifest-note">
               The manifest uses this server&apos;s current address. If that address changes, download it again and update the app&apos;s URLs in Slack.
             </p>
+          )}
+          {!hosted && (
+            <details className="mt-3 text-sm" data-testid="setup-reuse-app">
+              <summary className="cursor-pointer font-medium">Using the same Slack app again after a disconnect?</summary>
+              <p className="mt-1 text-muted-foreground">
+                Each connection has its own id in the app&apos;s addresses. Until the app is updated, Slack keeps sending to the old one and nothing arrives here.
+              </p>
+              <ol className="mt-1 list-decimal space-y-1 pl-5">
+                {REUSE_APP_STEPS.map((s) => (
+                  <li key={s}>{s}</li>
+                ))}
+              </ol>
+            </details>
           )}
         </div>
       )}

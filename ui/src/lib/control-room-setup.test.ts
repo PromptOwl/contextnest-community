@@ -422,6 +422,7 @@ describe("po-1446: channel activity in plain words", () => {
     expect(lines).toContain("No thread judged yet.");
     expect(lines[lines.length - 1]).toMatch(/Nothing arrived from Slack.*message\.groups.*app_mention.*reaction_added.*reinstall/);
     expect(lines[lines.length - 1]).not.toMatch(/buffer key/);
+    expect(lines[lines.length - 1]).toMatch(/disconnected and set up again.*old address/);
     expect(activityLines({ ...base, received: 1, skipped: { too_short: 1 } }, 20).join(" ")).not.toMatch(/Nothing arrived/);
   });
 });

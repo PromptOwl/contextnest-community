@@ -320,6 +320,18 @@ export function hostedSlackUrls(baseUrl: string | null | undefined): { redirect:
   };
 }
 
+/**
+ * Using your own Slack app again after a disconnect: each connection has its own
+ * id in the app's URLs, so the old ones go nowhere until the app is updated.
+ */
+export const REUSE_APP_STEPS: readonly string[] = [
+  "Download the manifest here. It carries the new connection's addresses.",
+  "At api.slack.com/apps → your app → App Manifest, paste it over the old one and save. Keep your own app name and slash command if you changed them.",
+  "Paste the app's Client ID, Client secret and Signing secret here again and click Save values. They are the same as before, but a disconnect deletes them.",
+  "In the app's Event Subscriptions, click Retry until the Request URL is verified.",
+  "Click Open Slack to approve.",
+];
+
 /** What the hosted Slack app must ask for. Same lists as the server's manifest (BOT_SCOPES, BOT_EVENTS). */
 export const SLACK_BOT_SCOPES: readonly string[] = [
   "channels:history",
@@ -395,7 +407,7 @@ export function activityLines(a: SurfacesBindingActivity, quietMinutes: number):
   // A missing buffer key shows as skipped messages, so nothing at all means Slack's events don't get here.
   if (!a.received)
     lines.push(
-      "Nothing arrived from Slack. At api.slack.com/apps → your app → Event Subscriptions, check that the Request URL is verified and the bot events include message.channels (public channels), message.groups (private channels), app_mention (mentions) and reaction_added (🧠), then reinstall the app. Also check that the app is in this channel and its signing secret is the one saved here.",
+      "Nothing arrived from Slack. At api.slack.com/apps → your app → Event Subscriptions, check that the Request URL is verified and the bot events include message.channels (public channels), message.groups (private channels), app_mention (mentions) and reaction_added (🧠), then reinstall the app. If Slack was disconnected and set up again with your own app, the app still has the old address: Setup → Connect Slack says how to update it. Also check that the app is in this channel and its signing secret is the one saved here.",
     );
   return lines;
 }
