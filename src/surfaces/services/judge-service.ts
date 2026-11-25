@@ -58,6 +58,7 @@ import { guardKey } from "./window-guard-key.js";
 import { buildWindowGuard } from "./edit-guard.js";
 import { getConnector } from "../registry.js";
 import { describeJudgeFailure, judgeFailureLogLine, judgeFailureText, ruleText, JudgeRunError, type JudgeFailure, type JudgeStage, type JudgeUsage } from "./judge-failure.js";
+import { assess, mayRepairInvalid, repairPrompt } from "../core/judge-repair.js";
 import { DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT_SECONDS, readJudgeTuning } from "./judge-tuning.js";
 
 export { JudgeRunError } from "./judge-failure.js";
@@ -252,6 +253,8 @@ interface JudgeProgress {
   cost: number;
   /** Whose key the call runs on. */
   billing?: "own_key" | "promptowl_credits";
+  /** The answer was sent back once: did that help? */
+  repair?: "fixed" | "not_fixed";
   startedAt: number;
   usage: JudgeUsage;
   /** The window's text, in memory only: what an error message is cleaned against. */
@@ -676,17 +679,33 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
   let cost = 0;
   let verdict: Verdict | null = null;
   let failure: JudgeFailure | null = null;
+  // The bar's facts that don't depend on the item (dedup is per item, below).
+  const bar = {
+    forced,
+    threshold: settings.propose_threshold,
+    window: view,
+    otherNodeTexts: (target: string | null) => nv.texts.filter((t) => t.id !== target).map((t) => t.text),
+    folderExists: (f: string) => folders.includes(f),
+    peopleFolders: people,
+    neverPropose: [...neverPropose, ...neverTerms],
+  };
+  let repair: string | null = null;
+  let firstPassing = -1;
   try {
-    for (let attempt = 0; attempt < (forced ? 2 : 1) && !verdict; attempt++) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      // A second call: to repair the first answer, or (an ask) because there was none.
+      if (attempt > 0 && !repair && !(forced && !verdict)) break;
       const estimate = reservationMicros(model, maxOutput);
       if (!(await reserve(binding.nest_id, estimate, forced, nowMs))) {
+        // No budget to repair: keep what the first answer gave.
+        if (repair) break;
         await end({ status: "judged", verdict: "budget_exhausted", reason_code: null, model, cost_micros: cost });
         return;
       }
       let run: RunResult;
       progress.stage = "model";
       try {
-        run = await runJudge(ctx, model, credential, SYSTEM(nv.nestName, folders, { neverPropose, domainTags }), user, folders, maxOutput, tuning.temperature ?? 0, tuning.max_turns ?? MAX_TURNS);
+        run = await runJudge(ctx, model, credential, SYSTEM(nv.nestName, folders, { neverPropose, domainTags }), repair ? `${user}\n\n${repair}` : user, folders, maxOutput, tuning.temperature ?? 0, tuning.max_turns ?? MAX_TURNS);
       } catch (err) {
         // Settle what was actually spent, never 0 (round 2, L1).
         const u = err instanceof JudgeRunError ? err.usage : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -695,6 +714,12 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
         cost += spent;
         progress.cost = cost;
         await settle(binding.nest_id, estimate, spent, nowMs);
+        if (repair) {
+          // The repair call failed (a timeout, say): the first answer still counts.
+          progress.stage = "setup";
+          console.error(judgeFailureLogLine(w.id, describeJudgeFailure(err, "model", progress.chat), { step: "repair", ...runFacts(w, progress) }));
+          break;
+        }
         throw err;
       }
       addUsage(progress.usage, run.usage);
@@ -710,8 +735,22 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
         domainTags,
         adminFolders,
       });
-      if (v.ok) verdict = v.verdict;
-      else {
+      const how = v.ok && v.verdict.verdict === "propose" ? assess(v.verdict, bar) : null;
+      if (v.ok && !verdict) {
+        verdict = v.verdict;
+        firstPassing = how?.passing ?? 0;
+        if (repair) progress.repair = "fixed";
+      } else if (v.ok && how && !how.hard && how.passing > firstPassing) {
+        // Only a repair that gets more through replaces the first answer.
+        verdict = v.verdict;
+        progress.repair = "fixed";
+      }
+      if (attempt === 0) {
+        if (how && !how.hard && how.problems.length) repair = repairPrompt(run.raw, how.problems, folders, fence, neutralise);
+        else if (!v.ok && run.submitted && run.stop !== "max_tokens" && mayRepairInvalid(run.raw, bar.neverPropose)) repair = repairPrompt(run.raw, [ruleText(v.error)], folders, fence, neutralise);
+        if (repair) progress.repair = "not_fixed";
+      }
+      if (!v.ok) {
         failure = unusable(run, v.error);
         console.error(judgeFailureLogLine(w.id, failure, { rule: JSON.stringify(v.error), attempt: attempt + 1, max_output_tokens: maxOutput, ...runFacts(w, progress) }));
       }
@@ -720,6 +759,7 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
   } finally {
     clearTimeout(timer);
   }
+  if (progress.repair) console.log(`[surfaces] judging window ${w.id} repair=${progress.repair}`);
   await recordRun(binding.nest_id, listener.node_id, progress, verdict, w.id, verdict ? null : failure);
   progress.stage = "commit";
   if (!verdict) {
@@ -761,13 +801,7 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
       continue;
     }
     const r = applyBar(item, {
-      forced,
-      threshold: settings.propose_threshold,
-      window: view,
-      otherNodeTexts: (target) => nv.texts.filter((t) => t.id !== target).map((t) => t.text),
-      folderExists: (f) => folders.includes(f),
-      peopleFolders: people,
-      neverPropose: [...neverPropose, ...neverTerms],
+      ...bar,
       duplicate: dup,
     });
     if (r.pass) passing.push({ item, heldOn: r.previously_held_on ?? (dup && forced ? (dup.held_on ?? iso(nowMs).slice(0, 10)) : null) });
@@ -872,6 +906,7 @@ async function recordRun(
     kind: "surfaces_judge",
     model: p.model,
     ...(p.billing ? { billing: p.billing } : {}),
+    ...(p.repair ? { repair: p.repair } : {}),
     prompt_version: PROMPT_VERSION,
     est_cost_usd: Math.round(p.cost) / 1_000_000,
     usage: {

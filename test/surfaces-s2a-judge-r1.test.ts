@@ -1010,6 +1010,47 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     expect(slack.posted.filter((p) => p.channel === "C429").length).toBe(1);
   });
 
+  describe("EX-35: an answer that breaks a fixable rule is sent back once", () => {
+    const asks = (calls: any[]) => calls.filter((c) => JSON.stringify(c.messages).includes("previous answer could not be used"));
+    /** First answer, then (only when sent back) the second. */
+    const twice = (first: Record<string, unknown>, second: Record<string, unknown>) => (req: any) =>
+      propose(req, JSON.stringify(req.messages).includes("previous answer could not be used") ? second : first);
+    const good = { target_folder: "inbox/", owner: null, due_date: null };
+
+    it("an owner who isn't there: the note is kept without one", async () => {
+      const r = await judgeOnce("C440", twice({ ...good, owner: "The platform team" }, good));
+      expect(r.w.verdict).toBe("proposed");
+      expect(asks(r.calls)).toHaveLength(1);
+      expect(JSON.stringify(asks(r.calls)[0].messages)).toMatch(/owner to null/);
+      expect(r.trace).toMatchObject({ verdict: "propose", repair: "fixed" });
+    });
+    it("a title that is too long is shortened", async () => {
+      const r = await judgeOnce("C441", twice({ ...good, title: "x".repeat(81) }, { ...good, title: "Invoices go out monthly" }));
+      expect(r.w.verdict).toBe("proposed");
+      expect(r.run).toMatchObject({ status: "succeeded", verdict: "propose" });
+      expect(r.trace.repair).toBe("fixed");
+    });
+    it("still broken the second time: blocked as before, after exactly two calls", async () => {
+      const r = await judgeOnce("C442", twice({ ...good, owner: "The platform team" }, { ...good, owner: "Another team" }));
+      expect(r.w).toMatchObject({ verdict: "filtered", reason_code: "owner" });
+      expect(asks(r.calls)).toHaveLength(1);
+      expect(r.trace.repair).toBe("not_fixed");
+    });
+    it("a repair call that fails leaves the first answer's result", async () => {
+      const r = await judgeOnce("C443", (req) => {
+        if (JSON.stringify(req.messages).includes("previous answer could not be used")) throw Object.assign(new Error("slow"), { name: "APIConnectionTimeoutError" });
+        return propose(req, { ...good, owner: "The platform team" });
+      });
+      expect(r.w).toMatchObject({ status: "judged", verdict: "filtered", reason_code: "owner" });
+      expect(r.trace.repair).toBe("not_fixed");
+    });
+    it("something sensitive is never sent back", async () => {
+      const r = await judgeOnce("C444", (req) => propose(req, { ...good, owner: "The platform team", body: "Her salary is 90000 per year." }));
+      expect(r.w).toMatchObject({ verdict: "filtered", reason_code: "sensitive" });
+      expect(asks(r.calls)).toHaveLength(0);
+    });
+  });
+
   it("EX-6: a valid no_op is still a succeeded run", async () => {
     const ok = await judgeOnce("C423", () => submit(noop()));
     expect(ok.run).toMatchObject({ status: "succeeded", verdict: "no_op" });
