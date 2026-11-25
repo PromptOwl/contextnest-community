@@ -7,6 +7,7 @@
  * nest 'write' to invite (escalation-capped here); the MCP tool checks the
  * caller's effective roles.
  */
+import { agentPrincipalOf } from "../agents/principals.js";
 import { isSystemUser } from "../auth/systems.js";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
@@ -99,6 +100,11 @@ export async function addCollaborator(params: {
     throw new ValidationError(
       "That is a system, not a person. Add it to this nest from its system settings (POST /systems/:id/nests).",
     );
+  }
+  // An agent principal joins its one nest only by being hired there
+  // (hire/service.ts), as an editor; never by invite, never elsewhere.
+  if (await agentPrincipalOf(userId)) {
+    throw new ValidationError("That is a hired agent, not a person. Agents join a nest by being hired there (POST /nests/:id/hire).");
   }
 
   // The nest owner already has full access — never add them as a collaborator

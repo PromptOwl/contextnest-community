@@ -365,20 +365,24 @@ describe("AC-C10-05: a key agent is a nest-scoped write key labelled with the ha
     expect(r.data.api_key).toMatch(/^cnst_/);
     expect(r.data.hired).toMatchObject({ kind: "key", handle: "muse", hired_by: writer.email, status: "active" });
     museKey = r.data.api_key;
+    // The key belongs to the agent's own identity (agent principal), not to
+    // the hirer: it is not in the hirer's key list, and the hire names it.
     const mine = await jsonRequest(app, "GET", "/auth/keys", undefined, writer.apiKey);
-    const row = (mine.data.keys ?? mine.data).find((k: any) => k.label === "muse");
-    expect(row).toBeTruthy();
-    expect(row.nest_id).toBe(nestId);
-    expect(row.capability).toBe("write");
+    expect((mine.data.keys ?? mine.data).find((k: any) => k.label === "muse")).toBeUndefined();
+    expect(r.data.hired).toMatchObject({ legacy: false, principal: { owner: writer.email, nest_id: nestId } });
+    const row = await db.get("SELECT nest_id, capability FROM api_keys WHERE user_id = ?", [r.data.hired.principal.id]);
+    expect(row).toMatchObject({ nest_id: nestId, capability: "write" });
     expect((await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, museKey)).status).toBe(200);
     expect((await jsonRequest(app, "GET", `/nests/${sideNestId}`, undefined, museKey)).status).toBe(403);
     const again = await hire(writer, { kind: "key", handle: "muse" });
     expect(again.status).toBe(200);
     expect(again.data.created).toBe(false);
     expect(again.data.api_key).toBeUndefined();
-    // One @handle answers to one agent: hiring @muse as another kind is refused.
-    const clash = await hire(owner, { kind: "webhook", handle: "muse", config: { url: "https://runner.example.com/wake" } });
-    expect(clash.status, JSON.stringify(clash.data)).toBe(409);
+    // One @handle answers to one agent: a key and a webhook pair on it (the
+    // agent's identity and its wake target); any other kind is refused.
+    const pair = await hire(owner, { kind: "webhook", handle: "muse", config: { url: "https://runner.example.com/wake" } });
+    expect(pair.status, JSON.stringify(pair.data)).toBe(201);
+    expect((await letGo(owner, "webhook", "muse")).status).toBe(200);
   });
 
   it("AC-C10-05 a read collaborator may not hire a key agent; a nest-scoped key may not mint another", async () => {

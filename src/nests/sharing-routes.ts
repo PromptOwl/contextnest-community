@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { agentPrincipalOf } from "../agents/principals.js";
 import { dropPersonalPinsIfGone } from "../nodes/doc-pins.js";
 import { isSystemUser } from "../auth/systems.js";
 import { getDb } from "../db/client.js";
@@ -115,6 +116,10 @@ sharingRoutes.patch("/collaborators/:collabId", async (c) => {
   // A system stays a viewer or editor — never a nest admin (CU-wdqcq0538g).
   if (row && body.permission === "admin" && (await isSystemUser(row.user_id))) {
     throw new ValidationError("A system can be a viewer or an editor, never a nest admin.");
+  }
+  // A hired agent (agents/principals.ts) is never a nest admin either.
+  if (row && body.permission === "admin" && (await agentPrincipalOf(row.user_id))) {
+    throw new ValidationError("A hired agent can be a viewer or an editor, never a nest admin.");
   }
   if (row) await assertCanGrant([{ userId: row.user_id, next: permissionClass(body.permission) }]);
   // Scope to the nest in the URL — the guard authorised the caller against

@@ -1,4 +1,5 @@
 import { getDb } from "../db/client.js";
+import { parseAgentPrincipalEmail } from "../agents/principals.js";
 import { isLicenseAdminUserId, isLicenseAdminEmail } from "../auth/license.js";
 import { auditSealedRefusal, sealedNest } from "../surfaces/sealed.js";
 import { isSuperAdmin } from "../governance/access-service.js";
@@ -308,6 +309,18 @@ async function resolveNestAccessRaw(
       permission: row.headless ? "read" : "none",
       isPublicReader: !!row.headless,
     };
+  }
+
+  // 0b. An agent principal (agents/principals.ts): a hired agent's own
+  //     identity. It reaches its HOME nest only, through its collaborator
+  //     row, and never above 'write' — not as owner (even if a nest were
+  //     handed to it), not through a team, a steward row or visibility, and
+  //     nothing at all on any other nest, whatever rows say.
+  const agent = row.caller_is_service ? parseAgentPrincipalEmail(row.caller_email) : null;
+  if (agent) {
+    const home = agent.nestId === String(nestId).toLowerCase();
+    const permission: NestPermission = !home || !row.collab_permission ? "none" : row.collab_permission === "read" ? "read" : "write";
+    return { ...base, isSteward: false, hasGrant: home && base.hasGrant, permission, isPublicReader: false };
   }
 
   // 1. The owner.

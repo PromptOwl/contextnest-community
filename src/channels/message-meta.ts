@@ -166,7 +166,9 @@ export async function knownAgents(nestId: string, only?: Set<string>): Promise<K
   // Handles with a target first, then declared labels newest first, so a
   // burst of made-up labels (anyone who can post can declare one) can't push
   // a real handle out of the list.
-  const handles = new Set<string>(hooks.map((h) => normHandle(h.handle)));
+  // Hired key agents (C10) — each has its own identity now (agents/principals.ts).
+  const { hiredAgentHandles } = await import("../agents/principals.js");
+  const handles = new Set<string>([...hooks.map((h) => normHandle(h.handle)), ...(await hiredAgentHandles(nestId)).map(normHandle)]);
   // `only`: the names a body actually uses — skip the label scan once all are hooks.
   if (!only || [...only].some((h) => !handles.has(h))) {
     const seen = (await db.all(

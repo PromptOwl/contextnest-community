@@ -41,6 +41,7 @@ import { readableChannelThread, type HandoffCaller } from "./handoffs.js";
 import { isContainerMember, isConversationId } from "../chat/containers.js";
 import { isNestMember } from "../channels/channel-service.js";
 import { isReservedHandle } from "./reserved.js";
+import { agentPrincipalOf } from "./principals.js";
 
 export const MAX_PROPOSAL_TITLE = 200;
 export const MAX_PROPOSAL_CONTENT = 20_000;
@@ -164,7 +165,11 @@ export async function proposeInThread(
   }
 
   const client = callerSafeClient(caller.client);
-  const proposedBy = await provenHandle(caller, client);
+  // A hired agent's own identity names the handle the decision wakes — a
+  // declared label can't point the wake at another agent. Anyone else must
+  // prove the handle (provenHandle).
+  const principal = await agentPrincipalOf(caller.userId);
+  const proposedBy = principal ? principal.handle : await provenHandle(caller, client);
   const channel = conversation ? null : (nodeId.split("/").pop() ?? null);
   const note = `Proposed${proposedBy ? ` by @${proposedBy}` : ""} in ${channel ? `#${channel}` : "a conversation"} for approval.`;
 

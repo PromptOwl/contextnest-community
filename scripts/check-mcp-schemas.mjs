@@ -135,7 +135,11 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   twin of POST /nests/:id/threads/:threadId/propose. An agent's approve card over the Community-only comment-thread
 //   store and review queue (the C7 proposal path), behind EXPERIMENTAL_AGENT_STREAM; the engine has no operation to
 //   import a descriptor from. Same maintainer decision 2026-10-24 (Community-only MCP tools ship inline).
-const BASELINE = 133;
+//   133->134 context_agent_identity (agent principal, epic recipes-and-the-central-harness, src/mcp/hire-tools.ts) —
+//   twin of GET /nests/:id/hire/me: who a hired agent's key is (handle, name, nest, owner). It reads this edition's
+//   C10 hire marker, agent webhooks and the agent principal identity, which the engine does not model, so no engine
+//   op exists. Same maintainer decision 2026-10-24 (Community-only MCP tools ship inline).
+const BASELINE = 134;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
