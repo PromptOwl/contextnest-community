@@ -31,7 +31,7 @@ import { PICKABLE_REASONS, type RejectReason } from "../../core/card-model.js";
 import { COMMIT_VERBS, type CommitVerb } from "../../core/identity-rules.js";
 import { ACTION, VIEW, renderBootModal, renderEditModal, renderRejectModal, validateView } from "./blockkit.js";
 import { botToken } from "./connector.js";
-import { slackCall } from "./api.js";
+import { slackCall, slackErrorCode } from "./api.js";
 
 export interface HandlerResult {
   status: number;
@@ -132,12 +132,18 @@ export function readMeta(raw: unknown): Meta | null {
   }
 }
 
+const DIALOG_FAILED_NOTE = "Couldn't open the dialog. Try again.";
+
 async function openView(install: InstallRow, triggerId: string, view: Record<string, any>): Promise<boolean> {
-  if (validateView(view, "modal").length) return false;
+  if (validateView(view, "modal").length) {
+    console.warn(`[surfaces] dialog not opened: code=view_over_limits install=${install.id}`);
+    return false;
+  }
   try {
     await slackCall("views.open", { trigger_id: triggerId, view: JSON.stringify(view) }, { token: await botToken(install.id) });
     return true;
-  } catch {
+  } catch (err) {
+    console.warn(`[surfaces] dialog not opened: code=${slackErrorCode(err)} install=${install.id}`);
     return false;
   }
 }
@@ -205,7 +211,7 @@ async function openDialog(install: InstallRow, p: Record<string, any>, verb: "ed
   const nest = await nestName(a.p.nest_id);
   const target = a.binding.conversation_kind === "dm" ? `${a.items[0]?.target_folder ?? ""} (your private nest)` : (a.items[0]?.target_folder ?? "");
   const view = verb === "edit" ? renderEditModal(await editableItems(a.items), meta, nest, target) : renderRejectModal(meta);
-  await openView(install, String(p.trigger_id ?? ""), view);
+  if (!(await openView(install, String(p.trigger_id ?? ""), view))) await responder(install, p).note(DIALOG_FAILED_NOTE);
 }
 
 async function generalRefusal(install: InstallRow): Promise<string> {
@@ -236,7 +242,7 @@ export async function startBoot(install: InstallRow, binding: BindingRow, user: 
     return;
   }
   const meta = signMeta({ k: "boot", b: binding.id, u: user, t: install.team_id, x: Date.now() + 30 * 60_000 });
-  if (!meta || !(await openView(install, triggerId, renderBootModal(meta, binding.conversation_name)))) await note("Couldn't open the dialog. Try again.");
+  if (!meta || !(await openView(install, triggerId, renderBootModal(meta, binding.conversation_name)))) await note(DIALOG_FAILED_NOTE);
 }
 
 async function onBlockAction(install: InstallRow, p: Record<string, any>): Promise<void> {

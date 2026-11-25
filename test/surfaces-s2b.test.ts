@@ -81,6 +81,7 @@ const slack = {
   deleteFail: false,
   deleted: [] as Array<Record<string, string>>,
   openFail: false,
+  fail: new Map<string, string>(),
   oauth: null as null | Record<string, unknown>,
 };
 const netCalls: string[] = [];
@@ -104,6 +105,8 @@ async function fakeFetch(url: any, init?: any): Promise<Response> {
   const method = u.slice("https://slack.com/api/".length).split("?")[0];
   const params: Record<string, string> = Object.fromEntries(new URLSearchParams(typeof init?.body === "string" ? init.body : ""));
   slack.calls.push({ method, params });
+  const failing = slack.fail.get(method);
+  if (failing) return json({ ok: false, error: failing });
   switch (method) {
     case "oauth.v2.access":
       return json(slack.oauth ?? { ok: false, error: "invalid_code" });
@@ -728,6 +731,27 @@ describe("commit", () => {
     const view = JSON.parse(v.params.view);
     expect(view.callback_id).toBe("nest_edit_modal");
     expect(v.params.trigger_id).toMatch(/^trig-/);
+  });
+
+  it("EX-8, EX-9: Slack refuses the Edit or Reject dialog: a private note, nothing changes, and the log has Slack's code", async () => {
+    const p = await makeProposal("C1");
+    const [it0] = await itemsOf(p.id);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await db().run("UPDATE nest_collaborators SET permission = 'write' WHERE nest_id = ? AND user_id = ?", [N, dana.userId]);
+    slack.fail.set("views.open", "expired_trigger_id");
+    try {
+      for (const a of ["nest_edit", "nest_reject"]) {
+        const from = slack.responses.length;
+        await click("U_DANA", a, p.id);
+        expect(slack.responses.slice(from).map((r) => r.body.text)).toEqual(["Couldn't open the dialog. Try again."]);
+      }
+      expect(warn.mock.calls.flat().join("\n")).toMatch(/dialog not opened: code=expired_trigger_id/);
+      expect((await one("SELECT * FROM surface_proposal_items WHERE id = ?", [it0.id])).state).toBe("pending");
+    } finally {
+      slack.fail.delete("views.open");
+      warn.mockRestore();
+      await db().run("UPDATE nest_collaborators SET permission = 'read' WHERE nest_id = ? AND user_id = ?", [N, dana.userId]);
+    }
   });
 
   it("AC-CMT-07: a tampered private_metadata (other item, nest or folder) or a different submitter is refused with no state change", async () => {
@@ -1781,6 +1805,39 @@ describe("security round", () => {
     // A second post attempt can't take the claim.
     expect(await S.cards.postCard(p.id)).toBe(false);
     await db().run("UPDATE surface_bindings SET surface_ok = 1 WHERE id = ?", [bound.CS4]);
+  });
+
+  it("EX-7, EX-9: a card posting for more than 10 minutes is posted; one posting for 1 minute is left alone; a refused post is logged by Slack's code", async () => {
+    setChannel("CREC", ["U_ALICE", "U_DANA", "U_ERIN", "U_BOB", "U_FRANK", "UBOT"]);
+    await bind("CREC");
+    await db().run("DELETE FROM surface_reviewer_usage");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    slack.fail.set("chat.postMessage", "not_in_channel");
+    let p: any;
+    try {
+      p = await makeProposal("CREC");
+      const log = warn.mock.calls.flat().join("\n");
+      expect(log).toMatch(/card not posted: code=not_in_channel/);
+      expect(log).not.toMatch(/annual billing|Team agrees/);
+    } finally {
+      slack.fail.delete("chat.postMessage");
+      warn.mockRestore();
+    }
+    expect(p.state).toBe("held");
+    expect(p.card_ref).toBeNull();
+    const row = () => one("SELECT * FROM surface_proposals WHERE id = ?", [p.id]);
+    const posting = (min: number) =>
+      db().run("UPDATE surface_proposals SET card_ref = 'posting', updated_at = ? WHERE id = ?", [new Date(Date.now() - min * 60_000).toISOString(), p.id]);
+    await posting(1);
+    await S.routing.routeHeldBacklog();
+    expect((await row()).card_ref).toBe("posting");
+    expect(cardsIn("CREC")).toHaveLength(0);
+    await posting(11);
+    await S.routing.routeHeldBacklog();
+    expect((await row()).state).toBe("posted");
+    expect(cardsIn("CREC")).toHaveLength(1);
+    await S.routing.routeHeldBacklog();
+    expect(cardsIn("CREC")).toHaveLength(1);
   });
 
   it("SEC-M2: a DM arriving while an admin turns DM capture off (or the person opts out) is never buffered or judged: the switch pauses the DM binding in the same transaction", async () => {

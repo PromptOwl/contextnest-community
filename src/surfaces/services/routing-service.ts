@@ -244,8 +244,15 @@ export async function releaseQueue(nowMs = Date.now()): Promise<number> {
   return posted;
 }
 
+/** Posting takes seconds: an older 'posting' claim lost its worker to a restart. */
+export const STUCK_POSTING_MS = 10 * 60_000;
+
 /** Held proposals waiting from S2a (or a restart): route them. */
 export async function routeHeldBacklog(nowMs = Date.now()): Promise<number> {
+  // ponytail: a crash after Slack took the card but before its ref was saved posts it twice; both act on one proposal.
+  await getDb().run("UPDATE surface_proposals SET card_ref = NULL WHERE card_ref = 'posting' AND state IN ('held', 'queued') AND updated_at <= ?", [
+    iso(nowMs - STUCK_POSTING_MS),
+  ]);
   const rows = (await getDb().all("SELECT id FROM surface_proposals WHERE state = 'held' AND hold_reason IS NULL AND card_ref IS NULL", [])) as Array<{ id: string }>;
   let n = 0;
   for (const r of rows) if ((await routeNewProposal(r.id, nowMs)) !== "skipped") n++;
