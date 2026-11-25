@@ -1163,7 +1163,20 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     // EX-29: the person sees the refusal's own words; an internal error stays general.
     const { refusalText } = await import("../src/surfaces/services/commit-service.js");
     expect(refusalText(late)).toMatch(/review was resolved/);
-    expect(refusalText(new Error("No pending review for this node"))).toBe("No pending review for this node");
+    const { ReviewRefusal } = await import("../src/shared/errors.js");
+    const { approve } = await import("../src/governance/review-service.js");
+    const gone = await approve({ nestId: F, nodeId: made.node_id, approvedBy: alice.email }).catch((e: unknown) => e);
+    expect(gone).toBeInstanceOf(ReviewRefusal);
+    expect(refusalText(gone)).toBe("No pending review for this node");
+    // Plain errors are internal, whatever their shape: a file error carries a path.
+    const { readFileSync } = await import("node:fs");
+    let file: unknown;
+    try {
+      readFileSync("/no/such/nest/secret.md");
+    } catch (e) {
+      file = e;
+    }
+    for (const e of [file, new Error("SQLITE_BUSY: database is locked")]) expect(refusalText(e)).toMatch(/the nest refused the change/);
     for (const e of [new TypeError("x of undefined"), new Error("Couldn't publish this document: /data/nests/secret"), "boom"]) expect(refusalText(e)).toMatch(/the nest refused the change/);
     const tr = await jsonRequest(app, "GET", `/ledger/win_${r.w.id}`, undefined, root.apiKey);
     expect(tr.data.entry.agent.name).toBe("General ears");

@@ -48,7 +48,7 @@ import { getItems, getProposal, mentionFor, nestName, updateCardOnce, type ItemR
 import { canReviewAll, eligibleReviewers } from "./routing-service.js";
 import { guardKey } from "./window-guard-key.js";
 import { safeErrorMessage } from "./judge-failure.js";
-import { AppError } from "../../shared/errors.js";
+import { AppError, ReviewRefusal } from "../../shared/errors.js";
 
 const iso = (ms = Date.now()) => new Date(ms).toISOString();
 export const HOLD_MS = 7 * 24 * 3600_000;
@@ -299,12 +299,12 @@ const firstName = (n: string | null, email: string) => (n?.trim().split(/\s+/)[0
 const REFUSED = "the nest refused the change. Try again from the nest.";
 /**
  * Why the nest refused, for the person who clicked: the refusal's own words
- * (an AppError below 500, or approve()'s plain refusals). Anything internal
+ * (an AppError below 500, or a ReviewRefusal). Anything else is internal: it
  * stays general here and is only in the log.
  */
 export function refusalText(err: unknown): string {
   const m = err instanceof Error ? err.message.trim() : "";
-  const said = err instanceof AppError ? err.statusCode < 500 : err instanceof Error && err.constructor === Error && !/^Couldn't publish|^prime$/.test(m);
+  const said = err instanceof ReviewRefusal || (err instanceof AppError && err.statusCode < 500);
   if (err instanceof Error && m === "prime") return "this document can't be edited and approved in one step. Approve or reject it, or edit it in the nest.";
   return said && m ? m : REFUSED;
 }

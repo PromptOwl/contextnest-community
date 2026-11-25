@@ -10,7 +10,7 @@ import { getDb } from "../db/client.js";
 import type { ClientMetadata } from "../shared/client-metadata.js";
 import { personalNestRefusal, surfacesPersonalOwner } from "../surfaces/draft-visibility.js";
 import { adminFolderRefusal } from "../surfaces/admin-folders.js";
-import { ConflictError, ValidationError } from "../shared/errors.js";
+import { ConflictError, ReviewRefusal, ValidationError } from "../shared/errors.js";
 import { assertDeletionRequestable } from "../structure/writes.js";
 import {
   notifyReviewRequested,
@@ -90,7 +90,7 @@ export async function submitForReview(params: {
       )) as { id: string } | undefined;
 
       if (existing) {
-        throw new Error("A review is already pending for this node");
+        throw new ReviewRefusal("A review is already pending for this node");
       }
 
       // Read INSIDE the lock, for the reason approve does: the caller's
@@ -319,18 +319,18 @@ async function approveInner(params: Parameters<typeof approve>[0]): Promise<Revi
     )) as any;
 
     if (!pending) {
-      throw new Error("No pending review for this node");
+      throw new ReviewRefusal("No pending review for this node");
     }
 
     // A Surfaces personal (DM) nest is reviewed by its owner only — no
     // override, not even a super admin's (Misha, 2026-11-01).
     const personal = await surfacesPersonalOwner(params.nestId);
     if (personal && personal.email.toLowerCase() !== params.approvedBy.toLowerCase()) {
-      throw new Error(personalNestRefusal(personal));
+      throw new ReviewRefusal(personalNestRefusal(personal));
     }
     // A seed's admin-only folders: nest admins only, no override (S7-R2 L4).
     const adminOnly = await adminFolderRefusal(params.nestId, params.nodeId, params.approvedBy);
-    if (adminOnly) throw new Error(adminOnly);
+    if (adminOnly) throw new ReviewRefusal(adminOnly);
 
     // Check permissions (unless override by super admin)
     if (!params.override) {
@@ -341,7 +341,7 @@ async function approveInner(params: Parameters<typeof approve>[0]): Promise<Revi
         { requestedBy: pending.requested_by },
       );
       if (!check.allowed) {
-        throw new Error(check.reason);
+        throw new ReviewRefusal(check.reason);
       }
     }
 
@@ -697,7 +697,7 @@ export async function reject(params: {
     )) as any;
 
     if (!pending) {
-      throw new Error("No pending review for this node");
+      throw new ReviewRefusal("No pending review for this node");
     }
 
     const check = await canUserApprove(
@@ -707,7 +707,7 @@ export async function reject(params: {
       { requestedBy: pending.requested_by, ignoreAdminFolders: true },
     );
     if (!check.allowed) {
-      throw new Error(check.reason);
+      throw new ReviewRefusal(check.reason);
     }
 
     await db.run(
