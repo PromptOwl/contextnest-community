@@ -209,7 +209,7 @@ function StepHeading({ title, lede }: { title: string; lede: string }) {
   return (
     <>
       <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
-      <p className="mb-4 mt-1 max-w-2xl text-sm text-foreground/80">{lede}</p>
+      <p className="mb-4 mt-1 text-sm text-foreground/80">{lede}</p>
     </>
   );
 }
@@ -1375,7 +1375,7 @@ function CheckStep({ state, back, toChannels, next }: { state: SetupState; back:
     <>
       <StepHeading
         title="Check who can read"
-        lede="A channel can only save into a nest if everyone who can read that nest is in the channel. Otherwise people who were never in the conversation could read what was said in it."
+        lede="A privacy check before anything is saved. Everyone who can read the nest must already be in the channel; otherwise people who were never in the conversation could read what was said in it. Green means it passed, and why is listed under each channel."
       />
       {state.bindings.length > 0 && on.length === 0 && (
         <div className="mb-3">
@@ -1428,8 +1428,26 @@ function CheckStep({ state, back, toChannels, next }: { state: SetupState; back:
           <Note tone="ok" icon="check" testId="setup-check-ok">
             <b>
               {okList.length} {okList.length === 1 ? "channel" : "channels"} can listen:
-            </b>{" "}
-            {okList.map((p) => `#${p.channelName} → ${nestName(p.nestId)}`).join(", ")}.
+            </b>
+            <ul className="mt-2 space-y-3">
+              {okList.map((p) => {
+                const v = viewFor(p);
+                return (
+                  <li key={p.channelId} data-testid={`check-ok-${p.channelId}`}>
+                    <div className="font-medium">
+                      #{p.channelName} → {nestName(p.nestId)}
+                    </div>
+                    {v && v !== "loading" && !!v.passed?.length && (
+                      <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                        {v.passed.map((t) => (
+                          <li key={t}>{t}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
           </Note>
         )}
       </div>
@@ -1681,7 +1699,7 @@ function ListenStep({ state, back, onDone, onHow }: { state: SetupState; back: (
         title="Turn on listening"
         lede="Each channel gets one notice, now. After that the bot speaks only when it has something worth one reviewer's click. Most days, in most channels, that is never."
       />
-      <div className="max-w-[620px] rounded-lg border p-4 text-sm" data-testid="setup-notice">
+      <div className="rounded-lg border p-4 text-sm" data-testid="setup-notice">
         <div className="mb-2 text-muted-foreground">
           {toBind.length ? `Notice posted to ${toBind.map((p) => `#${p.channelName}`).join(", ")}` : "The notice each channel gets"}
         </div>

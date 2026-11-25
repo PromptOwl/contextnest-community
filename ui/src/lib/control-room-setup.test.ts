@@ -154,9 +154,9 @@ describe("AC-CR-02: a refused pair names the counts and offers the fixes before 
   });
 
   it("AC-CR-02: allowed pairs say whether cards may quote existing records", () => {
-    expect(guardView(preview(), { channel: "a", nest: "Revenue" })).toEqual({ state: "ok", label: "Cards can show existing records", note: null });
+    expect(guardView(preview(), { channel: "a", nest: "Revenue" })).toMatchObject({ state: "ok", label: "Cards can show existing records", note: null });
     const po = guardView(preview({ surface_ok: false, detail: { members_total: 18, members_not_readers: 11 } }), { channel: "revops", nest: "Revenue" });
-    expect(po).toEqual({ state: "proposals_only", label: "Proposals only", note: "11 of the 18 members can't read Revenue, so cards here never quote existing records." });
+    expect(po).toMatchObject({ state: "proposals_only", label: "Proposals only", note: "11 of the 18 members can't read Revenue, so cards here never quote existing records." });
     expect(fixOptions(po)).toEqual([]);
   });
 
@@ -420,7 +420,7 @@ describe("po-1446: channel activity in plain words", () => {
     const { activityLines } = await import("./control-room-setup");
     const lines = activityLines(base, 20);
     expect(lines).toContain("No thread judged yet.");
-    expect(lines[lines.length - 1]).toMatch(/Nothing arrived from Slack.*message\.groups.*reinstall/);
+    expect(lines[lines.length - 1]).toMatch(/Nothing arrived from Slack.*message\.groups.*app_mention.*reaction_added.*reinstall/);
     expect(lines[lines.length - 1]).not.toMatch(/buffer key/);
     expect(activityLines({ ...base, received: 1, skipped: { too_short: 1 } }, 20).join(" ")).not.toMatch(/Nothing arrived/);
   });
@@ -436,5 +436,32 @@ describe("po-1446 review: failed, held and singular wording", () => {
     expect(lines[0]).toBe("1 message received · 1 kept for judging · 0 skipped");
     expect(lines[1]).toBe("1 thread judged: 0 proposed, 0 with nothing worth keeping, 1 failed. The Decision ledger says why for each.");
     expect(lines[2]).toBe("0 cards posted · 1 held (no eligible reviewer in the channel)");
+  });
+});
+
+describe("guardView: a passing check says why, in plain words", () => {
+  const preview = (detail: Record<string, unknown>, surface_ok: boolean) =>
+    ({
+      would_bind: true,
+      is_ext_shared: false,
+      ext_capture_enabled: false,
+      guard: {
+        capture_ok: true,
+        surface_ok,
+        members_known: true,
+        detail: { readers_total: 6, readers_absent: 0, members_total: 10, members_not_readers: 0, guests: 0, externals: 0, non_user_principals: [], universe: false, org_wide: false, ext_shared: false, ...detail },
+      },
+    }) as never;
+  it("everyone can read, some can't, one reader, and a public channel chosen on purpose", async () => {
+    const { guardView } = await import("./control-room-setup");
+    const ctx = { channel: "general", nest: "Ops" };
+    expect(guardView(preview({}, true), ctx).passed).toEqual([
+      "All 6 people who can read Ops are in #general, so nobody outside the channel sees what it saves.",
+      "All 10 channel members can read Ops, so cards in Slack can show its existing notes.",
+      "Server admins can read every nest and aren't counted.",
+    ]);
+    expect(guardView(preview({ members_not_readers: 4 }, false), ctx).passed![1]).toBe("4 of the 10 channel members can't read Ops. They see new suggestions in Slack, never existing notes.");
+    expect(guardView(preview({ readers_total: 1 }, true), ctx).passed![0]).toMatch(/^The 1 person who can read Ops is in #general/);
+    expect(guardView(preview({ readers_absent: 2 }, true), ctx).passed![0]).toMatch(/public channel chosen on purpose/);
   });
 });

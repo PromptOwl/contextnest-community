@@ -124,6 +124,8 @@ export interface GuardView {
   label: string;
   /** One sentence with the counts, or null. */
   note: string | null;
+  /** Why the pair passed, in plain words (step 3). */
+  passed?: string[];
   /** po-1432: channel members who can't read the nest (the "Add to nest" popup). */
   add?: MemberToAdd[];
   /** po-1440: who blocks the pair, one list per reason, under the short note. */
@@ -248,9 +250,21 @@ export function guardView(p: SurfacesBindingPreview, ctx: { channel: string; nes
     else note = `${ctx.nest} is readable by ${plural(d.readers_total, "person", "people")}, and ${d.readers_absent} of them ${d.readers_absent === 1 ? "isn't" : "aren't"} in ${ch}.`;
     return { state: "refused", label: "Can't listen here", note, ...(groups ? { groups } : {}) };
   }
+  const passed = [
+    d.readers_absent === 0
+      ? d.readers_total === 1
+        ? `The 1 person who can read ${ctx.nest} is in ${ch}, so nobody outside the channel sees what it saves.`
+        : `All ${d.readers_total} people who can read ${ctx.nest} are in ${ch}, so nobody outside the channel sees what it saves.`
+      : `${ch} is a public channel chosen on purpose, so its notes may be read by everyone who can read ${ctx.nest}.`,
+    p.guard.surface_ok
+      ? `All ${plural(d.members_total, "channel member")} can read ${ctx.nest}, so cards in Slack can show its existing notes.`
+      : `${d.members_not_readers} of the ${plural(d.members_total, "channel member")} can't read ${ctx.nest}. They see new suggestions in Slack, never existing notes.`,
+    "Server admins can read every nest and aren't counted.",
+  ];
   if (!p.guard.surface_ok) {
     const n = d.members_not_readers;
     return {
+      passed,
       state: "proposals_only",
       label: "Proposals only",
       note:
@@ -259,7 +273,7 @@ export function guardView(p: SurfacesBindingPreview, ctx: { channel: string; nes
           : `Some people here can't read ${ctx.nest}, so cards here never quote existing records.`,
     };
   }
-  return { state: "ok", label: "Cards can show existing records", note: null };
+  return { state: "ok", label: "Cards can show existing records", note: null, passed };
 }
 
 export type FixOption = "create_nest" | "other_nest" | "leave_off" | "ext_only";
@@ -381,7 +395,7 @@ export function activityLines(a: SurfacesBindingActivity, quietMinutes: number):
   // A missing buffer key shows as skipped messages, so nothing at all means Slack's events don't get here.
   if (!a.received)
     lines.push(
-      "Nothing arrived from Slack. At api.slack.com/apps → your app → Event Subscriptions, check that the Request URL is verified and the bot events include message.channels (public channels) and message.groups (private channels), then reinstall the app. Also check that the app is in this channel and its signing secret is the one saved here.",
+      "Nothing arrived from Slack. At api.slack.com/apps → your app → Event Subscriptions, check that the Request URL is verified and the bot events include message.channels (public channels), message.groups (private channels), app_mention (mentions) and reaction_added (🧠), then reinstall the app. Also check that the app is in this channel and its signing secret is the one saved here.",
     );
   return lines;
 }
