@@ -3428,7 +3428,9 @@ export async function updateNode(
       // the edit lands as a new draft version and the open review repoints to
       // it (see repointPendingReview below), so the steward reviews the final
       // edited version without the author having to withdraw and resubmit.
-      const pendingReview = hasStewards
+      // A reviewer's edit always revises an open review, and a Slack suggestion
+      // opens one on a nest with stewardship off too.
+      const pendingReview = hasStewards || opts.reviewerEdit
         ? await getPendingReview(nestId, nodeId)
         : null;
       // A reviewer's approve-with-edits revises the submission the same way.

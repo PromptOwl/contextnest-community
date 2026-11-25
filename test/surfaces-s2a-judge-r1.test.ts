@@ -1067,6 +1067,27 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     const queue = await jsonRequest(app, "GET", `/nests/${F}/review-queue`, undefined, alice.apiKey);
     expect(queue.status).toBe(200);
     expect((queue.data.requests ?? []).find((x: any) => x.nodeId === made.node_id)?.requestedByName).toBe("General ears");
+    // EX-28: an owner edits and approves on a nest with stewardship off; once resolved, a late edit is still refused.
+    const { isStewardshipEnabled, setStewardshipEnabled } = await import("../src/nests/service.js");
+    await setStewardshipEnabled(F, false);
+    // An owner with no reviewer role approves when self-approve is on (Slack checks this before the dialog opens).
+    await db().run("UPDATE nests SET allow_self_approve = 1 WHERE id = ?", [F]);
+    expect(await isStewardshipEnabled(F)).toBe(false);
+    const { updateNode } = await import("../src/nodes/service.js");
+    const reviews = await import("../src/governance/review-service.js");
+    const edited = { title: "Cutover moves to Friday", content: "The cutover is on Friday, as edited." };
+    await updateNode(F, made.node_id, edited, alice.email, { reviewerEdit: true });
+    const ok = await reviews.approve({ nestId: F, nodeId: made.node_id, approvedBy: alice.email, withEdits: true });
+    expect(ok.status).toBe("approved");
+    const live = await jsonRequest(app, "GET", `/nests/${F}/nodes/${made.node_id}`, undefined, alice.apiKey);
+    expect(JSON.stringify(live.data)).toContain("as edited");
+    const late = await updateNode(F, made.node_id, { content: "late" }, alice.email, { reviewerEdit: true }).catch((e: unknown) => e);
+    expect((late as Error).message).toMatch(/review was resolved before your edit/);
+    // EX-29: the person sees the refusal's own words; an internal error stays general.
+    const { refusalText } = await import("../src/surfaces/services/commit-service.js");
+    expect(refusalText(late)).toMatch(/review was resolved/);
+    expect(refusalText(new Error("No pending review for this node"))).toBe("No pending review for this node");
+    for (const e of [new TypeError("x of undefined"), new Error("Couldn't publish this document: /data/nests/secret"), "boom"]) expect(refusalText(e)).toMatch(/the nest refused the change/);
     const tr = await jsonRequest(app, "GET", `/ledger/win_${r.w.id}`, undefined, root.apiKey);
     expect(tr.data.entry.agent.name).toBe("General ears");
     const roll = await jsonRequest(app, "GET", `/nests/${F}/rollups?${new URLSearchParams({ ...range(), by: "agent", grain: "week" })}`, undefined, root.apiKey);

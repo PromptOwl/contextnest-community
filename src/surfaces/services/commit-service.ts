@@ -47,6 +47,8 @@ import { listenerFolders, listenerFor } from "./listener-service.js";
 import { getItems, getProposal, mentionFor, nestName, updateCardOnce, type ItemRow, type ProposalRow } from "./card-service.js";
 import { canReviewAll, eligibleReviewers } from "./routing-service.js";
 import { guardKey } from "./window-guard-key.js";
+import { safeErrorMessage } from "./judge-failure.js";
+import { AppError } from "../../shared/errors.js";
 
 const iso = (ms = Date.now()) => new Date(ms).toISOString();
 export const HOLD_MS = 7 * 24 * 3600_000;
@@ -294,7 +296,28 @@ async function maybeDecided(proposalId: string): Promise<void> {
 
 const firstName = (n: string | null, email: string) => (n?.trim().split(/\s+/)[0] || email.split("@")[0]);
 
-async function approveOne(req: CommitRequest, a: Extract<Authorized, { ok: true }>, item: ItemRow, edit: EditedFields | null): Promise<{ ok: true; version: number | null } | { ok: false; why: string }> {
+const REFUSED = "the nest refused the change. Try again from the nest.";
+/**
+ * Why the nest refused, for the person who clicked: the refusal's own words
+ * (an AppError below 500, or approve()'s plain refusals). Anything internal
+ * stays general here and is only in the log.
+ */
+export function refusalText(err: unknown): string {
+  const m = err instanceof Error ? err.message.trim() : "";
+  const said = err instanceof AppError ? err.statusCode < 500 : err instanceof Error && err.constructor === Error && !/^Couldn't publish|^prime$/.test(m);
+  if (err instanceof Error && m === "prime") return "this document can't be edited and approved in one step. Approve or reject it, or edit it in the nest.";
+  return said && m ? m : REFUSED;
+}
+
+/** One log line per refusal: ids and the reason, with the item's own words masked. */
+function logRefusal(action: string, item: ItemRow, err: unknown, edit?: EditedFields | null): void {
+  const words = [item.title ?? "", item.summary ?? "", edit?.title ?? "", edit?.summary ?? "", edit?.body ?? ""];
+  console.error(
+    `[surfaces] ${action} of item ${item.id} refused: ${err instanceof Error ? err.constructor.name : "error"} nest=${item.nest_id} proposal=${item.proposal_id} detail=${JSON.stringify(safeErrorMessage(err, words) ?? "")}`,
+  );
+}
+
+async function approveOne(req: CommitRequest, a: Extract<Authorized, { ok: true }>, item: ItemRow, edit: EditedFields | null): Promise<{ ok: true; version: number | null } | { ok: false; why: string; reason?: string }> {
   if (!item.node_id) return { ok: false, why: "missing draft" };
   if (!(await claimItem(item.id, edit ? "edit_approve" : req.verb, { surfaceUserId: req.surfaceUserId, userId: a.userId, surface: a.install.surface }))) {
     return { ok: false, why: "already" };
@@ -330,9 +353,10 @@ async function approveOne(req: CommitRequest, a: Extract<Authorized, { ok: true 
       client: clientMeta(req, a, item, !!edit),
       ...(edit ? { withEdits: true } : {}),
     });
-  } catch {
+  } catch (err) {
+    logRefusal(edit ? "edit_approve" : req.verb, item, err, edit);
     await releaseClaim(item.id);
-    return { ok: false, why: "failed" };
+    return { ok: false, why: "failed", reason: refusalText(err) };
   }
   const version = (await getApprovedVersion(item.nest_id, item.node_id).catch(() => null)) ?? null;
   // L6: the item, the audit row and the claim finalise land in ONE
@@ -508,7 +532,8 @@ async function rejectOne(req: CommitRequest, a: Extract<Authorized, { ok: true }
   if (!(await claimItem(item.id, `reject:${reason ?? "none"}`, { surfaceUserId: req.surfaceUserId, userId: a.userId, surface: a.install.surface }))) return false;
   try {
     await reject({ nestId: item.nest_id, nodeId: item.node_id, rejectedBy: a.email, note: reason ? REASON_LABELS[reason] : "Rejected from Slack", baseUrl: config.PUBLIC_BASE_URL || undefined });
-  } catch {
+  } catch (err) {
+    logRefusal("reject", item, err);
     await releaseClaim(item.id);
     return false;
   }
@@ -595,10 +620,12 @@ export async function commit(req: CommitRequest): Promise<CommitResult> {
   const kept: Array<{ path: string; version: number | null }> = [];
   const notKept: string[] = [];
   let already = 0;
+  let refused: string | undefined;
   for (const it of toApprove) {
     const r = await approveOne(req, a, it, req.verb === "edit" ? (req.edits?.[it.id] ?? null) : null);
     if (r.ok) kept.push({ path: nodePath(it.target_folder, it.node_id ?? it.title ?? ""), version: r.version });
     else if (r.why === "already") already++;
+    else refused ??= r.reason;
   }
   const rejected: RejectReason[] = [];
   for (const { item, reason } of toReject) {
@@ -609,7 +636,7 @@ export async function commit(req: CommitRequest): Promise<CommitResult> {
   }
   await maybeDecided(a.p.id);
   if (!kept.length && !notKept.length) {
-    await req.responder.note(already ? await alreadyNote(a.install, await getItems(a.p.id)) : "Nothing was saved: the nest refused the change. Try again from the nest.");
+    await req.responder.note(already ? await alreadyNote(a.install, await getItems(a.p.id)) : `Nothing was saved: ${refused ?? REFUSED}`);
     return { status: "stopped" };
   }
   const editedBy = req.verb === "edit" ? firstName(a.name, a.email) : null;
