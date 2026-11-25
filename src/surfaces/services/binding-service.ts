@@ -8,7 +8,8 @@
  * on every binding (§12 R1).
  */
 import { v4 as uuid } from "uuid";
-import { readJudgeTuning, starterFolders } from "./judge-tuning.js";
+import { DEFAULT_LISTENER_NAME, DEFAULT_MAX_ITEMS, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT_SECONDS, readJudgeTuning, starterFolders, type JudgeTuning } from "./judge-tuning.js";
+import { hootieModel } from "../../shared/model-credential.js";
 import { listenerName } from "../../metacognition/managed.js";
 import { getAgent } from "../../metacognition/store.js";
 import { getDb } from "../../db/client.js";
@@ -244,6 +245,7 @@ export async function bindingView(row: BindingRow) {
   } catch {
     detail = {};
   }
+  const channel = row.conversation_kind === "dm" ? null : row.conversation_name;
   const listener = row.listener_agent_node_id ? await getAgent(row.nest_id, row.listener_agent_node_id) : null;
   return {
     id: row.id,
@@ -257,7 +259,19 @@ export async function bindingView(row: BindingRow) {
     listener_agent_node_id: row.listener_agent_node_id,
     judge: readJudgeTuning(listener?.config),
     listener_folders: starterFolders(listener?.config),
-    listener_name: listener ? listenerName(listener.persona.name, row.conversation_kind === "dm" ? null : row.conversation_name, listener.node_id) : null,
+    listener_name: listener ? listenerName(listener.persona.name, channel, listener.node_id) : null,
+    // What each unset setting means right now, so the dialog can show the values in use.
+    judge_defaults: {
+      name: (listener && listenerName(null, channel, listener.node_id)) ?? DEFAULT_LISTENER_NAME,
+      avatar: null,
+      folders: null,
+      max_turns: DEFAULT_MAX_TURNS,
+      max_items: DEFAULT_MAX_ITEMS,
+      model: config.SURFACES_JUDGE_MODEL || hootieModel(),
+      max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      temperature: 0,
+      timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
+    } satisfies JudgeTuning,
     explicit_public_bind: !!row.explicit_public_bind,
     is_ext_shared: !!row.is_ext_shared,
     ext_capture_enabled: !!row.ext_capture_enabled,

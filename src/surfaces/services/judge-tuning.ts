@@ -24,6 +24,8 @@ export interface JudgeTuning {
 
 export const DEFAULT_MAX_OUTPUT_TOKENS = 1_500;
 export const DEFAULT_TIMEOUT_SECONDS = 120;
+export const DEFAULT_MAX_TURNS = 4;
+export const DEFAULT_MAX_ITEMS = 3;
 
 const RANGES = {
   max_output_tokens: { min: 500, max: 8_000, integer: true },

@@ -1025,6 +1025,12 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     expect((await jsonRequest(app, "PATCH", url, { judge: { temperature: 1 } }, bob.apiKey)).status).toBe(403);
     const unset = { name: null, avatar: null, folders: null, max_turns: null, max_items: null, model: null, max_output_tokens: null, temperature: null, timeout_seconds: null };
     expect((await jsonRequest(app, "GET", url, undefined, alice.apiKey)).data.binding.judge).toEqual(unset);
+    // The values in use, for the dialog: what the judge call above really used.
+    const inUse = (await jsonRequest(app, "GET", url, undefined, alice.apiKey)).data.binding.judge_defaults;
+    expect(inUse).toMatchObject({ max_output_tokens: r.calls[0].max_tokens, temperature: r.calls[0].temperature, max_turns: 4, max_items: 3, timeout_seconds: 120 });
+    // The configured name; the call itself may carry the gateway's provider prefix.
+    expect(inUse.model).toBe(r.calls[0].model.split("/").pop());
+    expect(inUse.name).toMatch(/^c426 nest agent /);
     const mcp = await app.request(`/nests/${F}/mcp`, {
       method: "POST",
       headers: { ...MCP_HEADERS, Authorization: `Bearer ${alice.apiKey}` },

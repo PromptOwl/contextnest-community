@@ -5625,6 +5625,8 @@ export interface SurfacesBinding {
   listener_agent_node_id?: string | null;
   /** The listener's own settings; null = the default. */
   judge?: SurfacesJudgeTuning;
+  /** What each unset setting means right now. */
+  judge_defaults?: SurfacesJudgeTuning;
   /** The folders its starter gave it: what `judge.folders` may narrow. */
   listener_folders?: string[];
   /** What the listener is called; null = no better name than its id. */

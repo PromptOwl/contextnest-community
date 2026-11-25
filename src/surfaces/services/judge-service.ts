@@ -58,14 +58,14 @@ import { guardKey } from "./window-guard-key.js";
 import { buildWindowGuard } from "./edit-guard.js";
 import { getConnector } from "../registry.js";
 import { describeJudgeFailure, judgeFailureLogLine, judgeFailureText, JudgeRunError, type JudgeFailure, type JudgeStage, type JudgeUsage } from "./judge-failure.js";
-import { DEFAULT_TIMEOUT_SECONDS, readJudgeTuning } from "./judge-tuning.js";
+import { DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT_SECONDS, readJudgeTuning } from "./judge-tuning.js";
 
 export { JudgeRunError } from "./judge-failure.js";
 
 export const PROMPT_VERSION = "surfaces-judge-v1";
-export const MAX_TURNS = 4;
+export const MAX_TURNS = DEFAULT_MAX_TURNS;
 export const MAX_INPUT_TOKENS = 16_000;
-export const MAX_OUTPUT_TOKENS = 1_500;
+export const MAX_OUTPUT_TOKENS = DEFAULT_MAX_OUTPUT_TOKENS;
 /** Pre-judge short-circuit (§4.5): organic windows under this are no_op/too_small. */
 export const MIN_WINDOW_MEANINGFUL = 40;
 const READ_TOOLS = new Set(["search_nest", "list_nodes", "read_node"]);
