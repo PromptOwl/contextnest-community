@@ -950,7 +950,11 @@ export function ChannelActivity({ activity, quietMinutes }: { activity: Surfaces
         ))}
       </ul>
       <Note tone="info">
-        <b>Testing?</b> Lower the quiet window to 5 minutes in Server settings → Surfaces, or react 🧠 to a message to have that thread judged right away.
+        <b>Testing?</b> Lower the quiet window to 5 minutes in{" "}
+        <a href="/settings" className="underline underline-offset-2">
+          Server settings
+        </a>{" "}
+        → Surfaces, or react 🧠 to a message to have that thread judged right away.
       </Note>
     </div>
   );

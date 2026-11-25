@@ -341,6 +341,7 @@ describe("/admin/settings — validation", () => {
       surfaces_buffer_key: key,
       surfaces_judge_model: "claude-haiku-5-5",
       surfaces_default_cap_usd: "25",
+      surfaces_quiet_minutes: "5",
       surfaces_org_name: "Acme",
       surfaces_slack_hosted_client_id: "123.456",
       surfaces_slack_hosted_client_secret: "cs-secret-value",
@@ -353,6 +354,7 @@ describe("/admin/settings — validation", () => {
       surfaces_buffer_key_set: true,
       surfaces_judge_model: "claude-haiku-5-5",
       surfaces_default_cap_usd: 25,
+      surfaces_quiet_minutes: 5,
       surfaces_org_name: "Acme",
       surfaces_slack_hosted_client_id: "123.456",
       surfaces_slack_hosted_client_secret_set: true,
@@ -370,20 +372,28 @@ describe("/admin/settings — validation", () => {
       surfaces_buffer_key: "too-short",
       surfaces_judge_model: "two words",
       surfaces_default_cap_usd: "-1",
+      surfaces_quiet_minutes: "4",
       surfaces_slack_hosted_client_id: "has space",
     }, admin.apiKey);
     expect(bad.status).toBe(400);
     expect(Object.keys(bad.data.fieldErrors).sort()).toEqual(
-      ["surfaces_buffer_key", "surfaces_default_cap_usd", "surfaces_judge_model", "surfaces_slack_hosted_client_id"],
+      ["surfaces_buffer_key", "surfaces_default_cap_usd", "surfaces_judge_model", "surfaces_quiet_minutes", "surfaces_slack_hosted_client_id"],
     );
+    for (const v of ["241", "5.5", "five"]) {
+      const r = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_quiet_minutes: v }, admin.apiKey);
+      expect(r.data.fieldErrors, v).toHaveProperty("surfaces_quiet_minutes");
+    }
+    // A refused save left it alone, and it is the setting Surfaces itself uses.
+    expect((await jsonRequest(app, "GET", "/surfaces/settings", undefined, admin.apiKey)).data.settings.quiet_minutes).toBe(5);
 
     // Clearing falls back (nothing stored, defaults reported).
     const cleared = await jsonRequest(app, "PATCH", "/admin/settings", {
       surfaces_buffer_key: null,
       surfaces_default_cap_usd: "",
+      surfaces_quiet_minutes: "",
       surfaces_org_name: "",
     }, admin.apiKey);
-    expect(cleared.data.settings).toMatchObject({ surfaces_buffer_key_set: false, surfaces_default_cap_usd: null, surfaces_org_name: "" });
+    expect(cleared.data.settings).toMatchObject({ surfaces_buffer_key_set: false, surfaces_default_cap_usd: null, surfaces_org_name: "", surfaces_quiet_minutes: 20 });
 
     // Turning Surfaces off disables it live; hosted Slack can't be on without it.
     const off = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_enabled: false }, admin.apiKey);

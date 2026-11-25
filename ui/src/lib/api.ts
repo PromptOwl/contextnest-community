@@ -395,6 +395,8 @@ export interface AdminSettings {
   /** Write-only: the buffer key to set, or null to clear. */
   surfaces_buffer_key?: string | null;
   surfaces_judge_model?: string;
+  /** Minutes a conversation must be quiet before it is judged; empty = built-in default. */
+  surfaces_quiet_minutes?: number | string | null;
   /** Default monthly Surfaces spend cap per nest, in dollars; null = built-in default. */
   surfaces_default_cap_usd?: number | string | null;
   surfaces_org_name?: string;

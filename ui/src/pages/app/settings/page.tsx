@@ -174,6 +174,7 @@ const TABS: {
     keys: [
       "surfaces_buffer_key",
       "surfaces_judge_model",
+      "surfaces_quiet_minutes",
       "surfaces_default_cap_usd",
       "surfaces_org_name",
       "surfaces_slack_hosted_enabled",
@@ -2459,7 +2460,26 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 />
                 <div className="space-y-1.5">
                   <Label htmlFor="surfaces-judge-model">Judge model</Label>
-                  <TextField id="surfaces-judge-model" error={fieldErrors.surfaces_judge_model} value={draft.surfaces_judge_model ?? ""} placeholder="Default: the nest's model" onChange={(v) => set({ surfaces_judge_model: v })} />
+                  <ModelPicker
+                    id="surfaces-judge-model"
+                    testId="settings-judge-model"
+                    value={draft.surfaces_judge_model ?? ""}
+                    onChange={(v) => set({ surfaces_judge_model: v })}
+                    error={fieldErrors.surfaces_judge_model}
+                    hint={(n) => `Judges Slack conversations, unless a listener has its own model. Empty: Hootie's model.${n ? "" : " The list of models couldn't be loaded, so type its name."}`}
+                  />
+                  {!!draft.surfaces_judge_model && (
+                    <Button type="button" variant="ghost" size="sm" onClick={() => set({ surfaces_judge_model: "" })}>
+                      Use Hootie&apos;s model
+                    </Button>
+                  )}
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="surfaces-quiet">Quiet window (minutes)</Label>
+                  <TextField id="surfaces-quiet" error={fieldErrors.surfaces_quiet_minutes} value={draft.surfaces_quiet_minutes == null ? "" : String(draft.surfaces_quiet_minutes)} placeholder="Default: 20" onChange={(v) => set({ surfaces_quiet_minutes: v })} />
+                  <p className="text-xs text-muted-foreground">
+                    A conversation is judged this long after its last message, so it is read as a whole. 5 to 240, for every channel on this server. 🧠 skips the wait.
+                  </p>
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="surfaces-cap">Monthly spend cap per nest (USD)</Label>
