@@ -19,3 +19,10 @@ describe("displayNameFor", () => {
     expect(displayNameFor("ghost@acme.com")).toBe("ghost@acme.com");
   });
 });
+
+describe("displayNameFor: agents", () => {
+  it("never shows an agent's internal address", () => {
+    expect(displayNameFor("persona-73ecb465@agents.invalid")).toBe("Agent");
+    expect(displayNameFor("persona-1@agents.invalid", [{ email: "persona-1@agents.invalid", name: "General ears" }])).toBe("General ears");
+  });
+});

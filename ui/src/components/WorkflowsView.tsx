@@ -37,6 +37,7 @@ import {
   triggerRun,
   cancelRun,
   isQueued,
+  unusableVerdict,
   listNodes,
   listSchedules,
   createSchedule,
@@ -116,8 +117,8 @@ function indentFor(level: number): string {
 
 // The wire status is "running" from creation; a run is only really executing
 // once a runner has claimed it, so show the unclaimed stretch as "queued".
-const runStatus = (r: Pick<RunSummary, "status" | "claimed_by">) =>
-  isQueued(r) ? "queued" : r.status;
+const runStatus = (r: Pick<RunSummary, "status" | "claimed_by" | "trace">) =>
+  isQueued(r) ? "queued" : unusableVerdict(r) ? "failed" : r.status;
 const QUEUED_HINT = "Created — waiting for a runner to claim it";
 
 // The step-log icon mirrors the run-trace prototype's read/branch/write/notify.
@@ -1404,7 +1405,7 @@ function RunTrace({
       <div className="text-xs text-muted-foreground mb-4">
         agent {label(run.agent_node)} · started {timeOf(run.started_at)}
         {run.finished_at ? ` · finished ${timeOf(run.finished_at)}` : ""} ·
-        triggered by {run.triggered_by}
+        triggered by {run.triggered_by === "surfaces:window" ? "Slack" : run.triggered_by}
       </div>
 
       {parent && (

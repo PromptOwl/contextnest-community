@@ -13,6 +13,7 @@ describe("ManagedBySlack", () => {
     expect(h).toContain("Listens in #product");
     expect(h).toContain("decisions/, the top level");
     expect(h).toContain('href="/control-room?section=setup"');
+    expect(h).toContain('href="/control-room?section=agents"');
   });
   it("gives a nest admin who can't open the Control room words, not a dead link", () => {
     expect(html({}, false)).not.toContain("href");

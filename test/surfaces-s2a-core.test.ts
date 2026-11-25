@@ -184,9 +184,10 @@ describe("judge output schema (§4.6)", () => {
     ];
     for (const b of bad) expect(validateVerdict(b, win, nest).ok).toBe(false);
   });
-  it("forced windows need ≥ 1 item unless sensitive", () => {
+  it("a forced window may hold nothing to keep, with a reason; \"proposed\" with no item is refused", () => {
     const forced = { ...win, forced: true };
-    expect(validateVerdict(verdict([]), forced, nest).ok).toBe(false);
+    for (const reason_code of ["chatter", "question_only", "no_agreement", "already_on_record"]) expect(validateVerdict(verdict([], { verdict: "no_op", reason_code }), forced, nest).ok, reason_code).toBe(true);
+    expect(validateVerdict(verdict([], { verdict: "no_op", reason_code: "proposed" }), forced, nest).ok).toBe(false);
     expect(validateVerdict(verdict([], { reason_code: "sensitive" }), forced, nest).ok).toBe(true);
   });
 });

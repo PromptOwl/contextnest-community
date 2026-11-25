@@ -18,6 +18,7 @@ import {
   listRuns,
   type MetacognitionAgent,
   type MetacognitionTrace,
+  unusableVerdict,
   type RunSummary,
 } from "../lib/api";
 import { formatServerDate } from "../lib/dates";
@@ -68,9 +69,15 @@ export function ManagedBySlack({ managed, canOpenSetup }: { managed: NonNullable
         ? `Proposes into ${managed.folders.map((f) => (f === "/" ? "the top level" : f)).join(", ")}.`
         : "It has no folders yet, so it proposes nothing: add starter folders in Slack setup."}{" "}
       {canOpenSetup ? (
-        <a href="/control-room?section=setup" className="text-primary underline underline-offset-2">
-          Change it in Control room → Setup
-        </a>
+        <>
+          <a href="/control-room?section=agents" className="text-primary underline underline-offset-2">
+            Update its settings
+          </a>{" "}
+          ·{" "}
+          <a href="/control-room?section=setup" className="text-primary underline underline-offset-2">
+            Change it in Control room → Setup
+          </a>
+        </>
       ) : (
         "A server admin can change it in Control room → Setup."
       )}
@@ -175,12 +182,13 @@ export function MetacognitionPanel({
       ) : (
         <div className="rounded-lg border divide-y">
           {agents.map((a) => {
-            const last = runs.find((r) => r.agent_node === a.node_id);
+            const found = runs.find((r) => r.agent_node === a.node_id);
+            const last = found && unusableVerdict(found) ? { ...found, status: "failed" as const } : found;
             return (
               <div key={a.node_id} className="px-3 py-2.5 space-y-1" data-testid="metacognition-agent-row">
                 <div className="flex flex-wrap items-center gap-2 text-sm">
                   <Avatar avatar={a.persona.avatar} name={a.persona.name} />
-                  <span className="font-medium truncate shrink-0 max-w-[16rem]">{a.persona.name}</span>
+                  <span className="min-w-0 font-medium [overflow-wrap:anywhere]">{a.persona.name}</span>
                   {a.managed_by ? (
                     <Badge variant="secondary" className="text-[10px] shrink-0">
                       Managed by Slack
@@ -281,6 +289,11 @@ export function MetacognitionPanel({
                       <span className="text-muted-foreground mr-1.5">{formatServerDate(last.started_at)}</span>
                       <RunCost trace={last.trace as MetacognitionTrace | null} />
                     </div>
+                    {last.trace?.error && (
+                      <div className="text-destructive" data-testid="metacognition-run-error">
+                        {last.trace.error}
+                      </div>
+                    )}
                     {(last.trace as MetacognitionTrace | null)?.summary && (
                       <div className="text-muted-foreground line-clamp-2" data-testid="metacognition-run-summary">
                         {(last.trace as MetacognitionTrace).summary}

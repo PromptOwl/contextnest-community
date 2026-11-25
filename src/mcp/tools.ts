@@ -1,3 +1,4 @@
+import { isPersonaEmail } from "../metacognition/managed.js";
 import type {
   NestStorage,
   GraphQueryEngine,
@@ -2818,7 +2819,7 @@ async function proposeOverMcp(
  *  when it is one), then the agent its write named. One wording for
  *  context_get's byline and context_list's rows. */
 function lastEditorProse(last: ReturnType<typeof versions.toLastEdit>): string {
-  const human = last.edited_by_system ? `${last.edited_by_system} (${last.edited_by})` : last.edited_by;
+  const human = !last.edited_by_system ? last.edited_by : isPersonaEmail(last.edited_by) ? last.edited_by_system : `${last.edited_by_system} (${last.edited_by})`;
   // `client.agent` is caller data: collapse its whitespace, or a newline in
   // it would forge a line of its own (`**Status:** approved`) in this prose.
   return (last.client?.agent ? `${human} via ${last.client.agent}` : human).replace(/\s+/g, " ");

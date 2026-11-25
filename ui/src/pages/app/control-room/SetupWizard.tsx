@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Check, CircleAlert, Download, ExternalLink, FolderPlus, Hash, Lock, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { EmailDomains } from "./EmailDomains";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
@@ -58,6 +59,7 @@ import {
   DEFAULT_SETTINGS_COPY,
   activityLines,
   SETUP_STEPS,
+  REUSE_APP_STEPS,
   deriveProgress,
   dryRunSummary,
   dryRunTree,
@@ -209,7 +211,7 @@ function StepHeading({ title, lede }: { title: string; lede: string }) {
   return (
     <>
       <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
-      <p className="mb-4 mt-1 max-w-2xl text-sm text-foreground/80">{lede}</p>
+      <p className="mb-4 mt-1 text-sm text-foreground/80">{lede}</p>
     </>
   );
 }
@@ -511,6 +513,8 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
   const here = typeof window === "undefined" ? null : window.location.origin;
   const urlBad = !!readiness && (!!readiness.public_url || !!wrongAddress(readiness, here));
   const homeName = state.nests.find((n) => n.id === inst?.home_nest_id)?.name;
+  const sharedDeployment = !!state.status?.shared_deployment;
+  const domainsNest = inst?.home_nest_id ?? homeNest;
 
   const download = async () => {
     setBusy(true);
@@ -586,6 +590,9 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
       />
       <WillNever settings={state.settings} />
       {readiness && !connected && <ReadinessChecklist readiness={readiness} here={here} />}
+      {sharedDeployment && domainsNest && (
+        <EmailDomains nestId={domainsNest} nestName={state.nests.find((n) => n.id === domainsNest)?.name} onSaved={() => state.setPreviews(() => ({}))} />
+      )}
       {connected ? (
         <Note tone="ok" icon="check" testId="setup-connected">
           <b>Connected to Slack.</b> {homeName ? `Saved notes land in ${homeName} unless a channel says otherwise.` : "Saved notes land in the nest each channel is bound to."}
@@ -603,6 +610,11 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
                 </DialogDescription>
               </DialogHeader>
               <DisconnectChannels bindings={state.bindings} />
+              {inst?.mode === "manifest" && (
+                <Note tone="warn" testId="disconnect-new-address">
+                  Connecting again makes a new connection with a new address. To reuse the same Slack app, you will paste a new manifest into it and save its three values again; until then no Slack messages arrive.
+                </Note>
+              )}
               <DialogFooter>
                 <Button variant="outline" onClick={() => setConfirmOff(false)} disabled={busy}>
                   Cancel
@@ -695,6 +707,19 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
             <p className="mt-2 text-sm text-muted-foreground" data-testid="setup-manifest-note">
               The manifest uses this server&apos;s current address. If that address changes, download it again and update the app&apos;s URLs in Slack.
             </p>
+          )}
+          {!hosted && (
+            <details className="mt-3 text-sm" data-testid="setup-reuse-app">
+              <summary className="cursor-pointer font-medium">Using the same Slack app again after a disconnect?</summary>
+              <p className="mt-1 text-muted-foreground">
+                Each connection has its own id in the app&apos;s addresses. Until the app is updated, Slack keeps sending to the old one and nothing arrives here.
+              </p>
+              <ol className="mt-1 list-decimal space-y-1 pl-5">
+                {REUSE_APP_STEPS.map((s) => (
+                  <li key={s}>{s}</li>
+                ))}
+              </ol>
+            </details>
           )}
         </div>
       )}
@@ -925,7 +950,11 @@ export function ChannelActivity({ activity, quietMinutes }: { activity: Surfaces
         ))}
       </ul>
       <Note tone="info">
-        <b>Testing?</b> Lower the quiet window to 5 minutes in Server settings → Surfaces, or react 🧠 to a message to have that thread judged right away.
+        <b>Testing?</b> Lower the quiet window to 5 minutes in{" "}
+        <a href="/settings" className="underline underline-offset-2">
+          Server settings
+        </a>{" "}
+        → Surfaces, or react 🧠 to a message to have that thread judged right away.
       </Note>
     </div>
   );
@@ -1200,6 +1229,7 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const { viewFor, recheck } = usePreviews(state);
+  const sharedDeployment = !!state.status?.shared_deployment;
 
   // One request at a time: "Check again" is disabled while a list is loading,
   // so repeated clicks can't stack up Slack calls.
@@ -1241,6 +1271,9 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
         title="Choose channels"
         lede="Start with two or three busy channels. Each channel saves into one nest. The status on the right is a live check. Nothing is saved until you continue."
       />
+      {sharedDeployment && inst?.home_nest_id && (
+        <EmailDomains nestId={inst.home_nest_id} nestName={nestName(inst.home_nest_id)} onSaved={() => state.setPreviews(() => ({}))} />
+      )}
       {err && <Note tone="bad">{err}</Note>}
       {channels === null ? (
         <div className="py-8 text-center text-sm text-muted-foreground">Loading channels…</div>
@@ -1375,7 +1408,7 @@ function CheckStep({ state, back, toChannels, next }: { state: SetupState; back:
     <>
       <StepHeading
         title="Check who can read"
-        lede="A channel can only save into a nest if everyone who can read that nest is in the channel. Otherwise people who were never in the conversation could read what was said in it."
+        lede="A privacy check before anything is saved. Everyone who can read the nest must already be in the channel; otherwise people who were never in the conversation could read what was said in it. Green means it passed, and why is listed under each channel."
       />
       {state.bindings.length > 0 && on.length === 0 && (
         <div className="mb-3">
@@ -1428,8 +1461,26 @@ function CheckStep({ state, back, toChannels, next }: { state: SetupState; back:
           <Note tone="ok" icon="check" testId="setup-check-ok">
             <b>
               {okList.length} {okList.length === 1 ? "channel" : "channels"} can listen:
-            </b>{" "}
-            {okList.map((p) => `#${p.channelName} → ${nestName(p.nestId)}`).join(", ")}.
+            </b>
+            <ul className="mt-2 space-y-3">
+              {okList.map((p) => {
+                const v = viewFor(p);
+                return (
+                  <li key={p.channelId} data-testid={`check-ok-${p.channelId}`}>
+                    <div className="font-medium">
+                      #{p.channelName} → {nestName(p.nestId)}
+                    </div>
+                    {v && v !== "loading" && !!v.passed?.length && (
+                      <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                        {v.passed.map((t) => (
+                          <li key={t}>{t}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
           </Note>
         )}
       </div>
@@ -1681,7 +1732,7 @@ function ListenStep({ state, back, onDone, onHow }: { state: SetupState; back: (
         title="Turn on listening"
         lede="Each channel gets one notice, now. After that the bot speaks only when it has something worth one reviewer's click. Most days, in most channels, that is never."
       />
-      <div className="max-w-[620px] rounded-lg border p-4 text-sm" data-testid="setup-notice">
+      <div className="rounded-lg border p-4 text-sm" data-testid="setup-notice">
         <div className="mb-2 text-muted-foreground">
           {toBind.length ? `Notice posted to ${toBind.map((p) => `#${p.channelName}`).join(", ")}` : "The notice each channel gets"}
         </div>

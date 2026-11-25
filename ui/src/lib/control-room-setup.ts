@@ -124,6 +124,8 @@ export interface GuardView {
   label: string;
   /** One sentence with the counts, or null. */
   note: string | null;
+  /** Why the pair passed, in plain words (step 3). */
+  passed?: string[];
   /** po-1432: channel members who can't read the nest (the "Add to nest" popup). */
   add?: MemberToAdd[];
   /** po-1440: who blocks the pair, one list per reason, under the short note. */
@@ -159,6 +161,9 @@ type Member = NonNullable<SurfacesBindingPreview["people"]>["members_not_readers
 const MATCH_REASON: Record<string, string> = {
   unverified: "their email here is not verified",
   domain: "their email domain is not on this server's sign-in list",
+  org_domain: "this server hosts several organizations, and their email domain is not on this Slack connection's list. Add it under Email domains",
+  no_match: "no account here has the email Slack has for them",
+  no_profile: "Slack did not return their profile. Check again in a minute",
   ambiguous: "their account is already linked to another Slack user, or more than one account has this email",
   email_unconfirmed: "Slack has not confirmed their email",
   home_team: "their Slack user is from another workspace",
@@ -176,7 +181,7 @@ function absentGroups(absent: AbsentReader[], members: Member[], ch: string): Pe
   const notLinked = absent.filter((r) => r.reason === "not_linked");
   add(
     `In ${ch} with the same email, but not linked to their account:`,
-    notLinked.map((r) => `${r.name ?? r.email ?? "Someone"}: ${MATCH_REASON[r.match_reason ?? ""] ?? "the link could not be made"}`),
+    notLinked.map((r) => `${r.name ?? r.email ?? "Someone"}: ${r.match_reason ? (MATCH_REASON[r.match_reason] ?? `the link could not be made (${r.match_reason})`) : "they match now. Check again"}`),
   );
   // Those members are explained above; don't list them again as unmatched.
   const linkedEmails = new Set(notLinked.map((r) => (r.email ?? "").toLowerCase()));
@@ -248,9 +253,21 @@ export function guardView(p: SurfacesBindingPreview, ctx: { channel: string; nes
     else note = `${ctx.nest} is readable by ${plural(d.readers_total, "person", "people")}, and ${d.readers_absent} of them ${d.readers_absent === 1 ? "isn't" : "aren't"} in ${ch}.`;
     return { state: "refused", label: "Can't listen here", note, ...(groups ? { groups } : {}) };
   }
+  const passed = [
+    d.readers_absent === 0
+      ? d.readers_total === 1
+        ? `The 1 person who can read ${ctx.nest} is in ${ch}, so nobody outside the channel sees what it saves.`
+        : `All ${d.readers_total} people who can read ${ctx.nest} are in ${ch}, so nobody outside the channel sees what it saves.`
+      : `${ch} is a public channel chosen on purpose, so its notes may be read by everyone who can read ${ctx.nest}.`,
+    p.guard.surface_ok
+      ? `All ${plural(d.members_total, "channel member")} can read ${ctx.nest}, so cards in Slack can show its existing notes.`
+      : `${d.members_not_readers} of the ${plural(d.members_total, "channel member")} can't read ${ctx.nest}. They see new suggestions in Slack, never existing notes.`,
+    "Server admins can read every nest and aren't counted.",
+  ];
   if (!p.guard.surface_ok) {
     const n = d.members_not_readers;
     return {
+      passed,
       state: "proposals_only",
       label: "Proposals only",
       note:
@@ -259,7 +276,7 @@ export function guardView(p: SurfacesBindingPreview, ctx: { channel: string; nes
           : `Some people here can't read ${ctx.nest}, so cards here never quote existing records.`,
     };
   }
-  return { state: "ok", label: "Cards can show existing records", note: null };
+  return { state: "ok", label: "Cards can show existing records", note: null, passed };
 }
 
 export type FixOption = "create_nest" | "other_nest" | "leave_off" | "ext_only";
@@ -306,6 +323,56 @@ export function hostedSlackUrls(baseUrl: string | null | undefined): { redirect:
   };
 }
 
+/**
+ * Using your own Slack app again after a disconnect: each connection has its own
+ * id in the app's URLs, so the old ones go nowhere until the app is updated.
+ */
+export const REUSE_APP_STEPS: readonly string[] = [
+  "Download the manifest here. It carries the new connection's addresses.",
+  "At api.slack.com/apps → your app → App Manifest, paste it over the old one and save. Keep your own app name and slash command if you changed them.",
+  "Paste the app's Client ID, Client secret and Signing secret here again and click Save values. They are the same as before, but a disconnect deletes them.",
+  "In the app's Event Subscriptions, click Retry until the Request URL is verified.",
+  "Click Open Slack to approve.",
+];
+
+/** What the hosted Slack app must ask for. Same lists as the server's manifest (BOT_SCOPES, BOT_EVENTS). */
+export const SLACK_BOT_SCOPES: readonly string[] = [
+  "channels:history",
+  "groups:history",
+  "im:history",
+  "channels:read",
+  "groups:read",
+  "im:read",
+  "im:write",
+  "reactions:read",
+  "users:read",
+  "users:read.email",
+  "chat:write",
+  "app_mentions:read",
+  "commands",
+];
+export const SLACK_BOT_EVENTS: readonly string[] = [
+  "message.channels",
+  "message.groups",
+  "message.im",
+  "app_mention",
+  "reaction_added",
+  "member_joined_channel",
+  "member_left_channel",
+  "channel_left",
+  "group_left",
+  "channel_shared",
+  "channel_unshared",
+  "channel_archive",
+  "group_archive",
+  "channel_deleted",
+  "group_deleted",
+  "user_change",
+  "app_home_opened",
+  "app_uninstalled",
+  "tokens_revoked",
+];
+
 // ─── Channel activity (po-1446) ────────────────────────────────────────────
 
 /** Why the gate skipped a message, in plain words. Unknown codes are de-snake-cased. */
@@ -340,7 +407,11 @@ export function activityLines(a: SurfacesBindingActivity, quietMinutes: number):
   );
   const c = a.cards;
   lines.push(`${n(c.posted, "card")} posted${c.queued ? ` · ${c.queued} queued for tomorrow (daily limit)` : ""}${c.held ? ` · ${c.held} held (no eligible reviewer in the channel)` : ""}`);
-  if (!a.received) lines.push("Nothing arrived. Check that Nest is in the channel and the message buffer key is set.");
+  // A missing buffer key shows as skipped messages, so nothing at all means Slack's events don't get here.
+  if (!a.received)
+    lines.push(
+      "Nothing arrived from Slack. At api.slack.com/apps → your app → Event Subscriptions, check that the Request URL is verified and the bot events include message.channels (public channels), message.groups (private channels), app_mention (mentions) and reaction_added (🧠), then reinstall the app. If Slack was disconnected and set up again with your own app, the app still has the old address: Setup → Connect Slack says how to update it. Also check that the app is in this channel and its signing secret is the one saved here.",
+    );
   return lines;
 }
 

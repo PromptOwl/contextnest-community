@@ -51,16 +51,15 @@ import {
 } from "../../../lib/api";
 import { reads } from "../../../lib/queries";
 import { CopyButton } from "@/components/ui/copy-button";
-import { getAdminModels, getAdminSettings, updateAdminSettings } from "../../../lib/api";
+import { getAdminSettings, updateAdminSettings } from "../../../lib/api";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { SearchableSelect } from "@/components/SearchableSelect";
-import { modelOptions } from "@/lib/model-options";
+import { ModelPicker } from "@/components/ModelPicker";
 import { useAuth } from "../../../auth/AuthContext";
 import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
 import { NetworkStatusPanel } from "./NetworkStatusPanel";
 import { toast } from "sonner";
-import { generateBufferKey, hostedSlackUrls } from "../../../lib/control-room-setup";
+import { generateBufferKey, hostedSlackUrls, SLACK_BOT_EVENTS, SLACK_BOT_SCOPES } from "../../../lib/control-room-setup";
 
 interface SettingsPageProps {
   settings: AdminSettings | null;
@@ -175,6 +174,7 @@ const TABS: {
     keys: [
       "surfaces_buffer_key",
       "surfaces_judge_model",
+      "surfaces_quiet_minutes",
       "surfaces_default_cap_usd",
       "surfaces_org_name",
       "surfaces_slack_hosted_enabled",
@@ -350,55 +350,22 @@ function HootieModelField({
   /** Changes when the own-provider keys change, so the list is fetched again. */
   reloadKey?: string;
 }) {
-  const [models, setModels] = useState<string[] | null>(null);
-  const [own, setOwn] = useState<string[]>([]);
-  const [providers, setProviders] = useState<Record<string, string>>({});
-  useEffect(() => {
-    getAdminModels()
-      .then((r) => {
-        setModels(r.models);
-        setOwn(r.own_models ?? []);
-        setProviders(r.providers ?? {});
-      })
-      .catch(() => setModels([]));
-  }, [reloadKey]);
-  const options = useMemo(
-    () => modelOptions(models ?? [], own, providers, value),
-    [models, own, providers, value],
-  );
   return (
     <div className="space-y-1.5">
       <Label htmlFor="hootie-model">Model</Label>
-      {models === null ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground h-9">
-          <Loader2 className="h-4 w-4 animate-spin" /> Loading models…
-        </div>
-      ) : models.length > 0 ? (
-        <SearchableSelect
-          id="hootie-model"
-          testId="settings-hootie-model"
-          value={value}
-          onChange={onChange}
-          options={options}
-          placeholder="Pick a model"
-          searchPlaceholder="Search models…"
-          emptyText="No model matches."
-        />
-      ) : (
-        <TextField
-          error={error}
-          id="hootie-model"
-          value={value}
-          placeholder="claude-sonnet-5"
-          onChange={onChange}
-        />
-      )}
-      {error && models && models.length > 0 && <p className="text-xs text-destructive">{error}</p>}
-      <p className="text-xs text-muted-foreground">
-        {models && models.length > 0
-          ? `The model Hootie answers with — ${models.length} available on this server.`
-          : "The model Hootie answers with. The list of available models couldn't be loaded, so type its name (through a gateway, the gateway's name for it)."}
-      </p>
+      <ModelPicker
+        id="hootie-model"
+        testId="settings-hootie-model"
+        value={value}
+        onChange={onChange}
+        error={error}
+        reloadKey={reloadKey}
+        hint={(n) =>
+          n
+            ? `The model Hootie answers with — ${n} available on this server.`
+            : "The model Hootie answers with. The list of available models couldn't be loaded, so type its name (through a gateway, the gateway's name for it)."
+        }
+      />
     </div>
   );
 }
@@ -494,6 +461,15 @@ function HostedSlackGuide({ baseUrl }: { baseUrl: string | null | undefined }) {
       </div>
     </li>
   );
+  const names = (where: string, list: readonly string[], testId: string) => (
+    <li>
+      {where}
+      <div className="mt-1 flex min-w-0 items-start gap-2" data-testid={testId}>
+        <code className="min-w-0 rounded bg-muted px-1.5 py-0.5 text-xs [overflow-wrap:anywhere]">{list.join(", ")}</code>
+        <CopyButton text={list.join("\n")} toastMessage="Copied" />
+      </div>
+    </li>
+  );
   return (
     <details className="rounded-md border px-3 py-2 text-sm" data-testid="hosted-slack-guide">
       <summary className="cursor-pointer font-medium">Where do I find these?</summary>
@@ -509,9 +485,12 @@ function HostedSlackGuide({ baseUrl }: { baseUrl: string | null | undefined }) {
         {urls ? (
           <>
             {row("In OAuth & Permissions → Redirect URLs, add:", urls.redirect)}
+            {names("In OAuth & Permissions → Bot Token Scopes, add:", SLACK_BOT_SCOPES, "hosted-slack-scopes")}
             {row("In Event Subscriptions, turn events on and set the Request URL to:", urls.events)}
+            {names("On the same page, under Subscribe to bot events, add these (message.groups is what private channels need):", SLACK_BOT_EVENTS, "hosted-slack-events")}
             {row("In Interactivity & Shortcuts, turn interactivity on and set the Request URL to:", urls.interactions)}
-            {row("In Slash Commands, create /nest with the Request URL:", urls.commands)}
+            {row("In Slash Commands, create /nest (or another name, if an app in this workspace already uses it) with the Request URL:", urls.commands)}
+            <li>After changing scopes or events on an app that is already installed, use Install App → Reinstall to Workspace.</li>
           </>
         ) : (
           <li className="text-red-800">Set Public base URL in the Basic tab first. The Slack app's URLs are built from it.</li>
@@ -2481,7 +2460,26 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 />
                 <div className="space-y-1.5">
                   <Label htmlFor="surfaces-judge-model">Judge model</Label>
-                  <TextField id="surfaces-judge-model" error={fieldErrors.surfaces_judge_model} value={draft.surfaces_judge_model ?? ""} placeholder="Default: the nest's model" onChange={(v) => set({ surfaces_judge_model: v })} />
+                  <ModelPicker
+                    id="surfaces-judge-model"
+                    testId="settings-judge-model"
+                    value={draft.surfaces_judge_model ?? ""}
+                    onChange={(v) => set({ surfaces_judge_model: v })}
+                    error={fieldErrors.surfaces_judge_model}
+                    hint={(n) => `Judges Slack conversations, unless a listener has its own model. Empty: Hootie's model.${n ? "" : " The list of models couldn't be loaded, so type its name."}`}
+                  />
+                  {!!draft.surfaces_judge_model && (
+                    <Button type="button" variant="ghost" size="sm" onClick={() => set({ surfaces_judge_model: "" })}>
+                      Use Hootie&apos;s model
+                    </Button>
+                  )}
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="surfaces-quiet">Quiet window (minutes)</Label>
+                  <TextField id="surfaces-quiet" error={fieldErrors.surfaces_quiet_minutes} value={draft.surfaces_quiet_minutes == null ? "" : String(draft.surfaces_quiet_minutes)} placeholder="Default: 20" onChange={(v) => set({ surfaces_quiet_minutes: v })} />
+                  <p className="text-xs text-muted-foreground">
+                    A conversation is judged this long after its last message, so it is read as a whole. 5 to 240, for every channel on this server. 🧠 skips the wait.
+                  </p>
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="surfaces-cap">Monthly spend cap per nest (USD)</Label>

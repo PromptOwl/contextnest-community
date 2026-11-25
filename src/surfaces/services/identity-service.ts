@@ -21,7 +21,7 @@ import { parseOrgDomains, emailDomain } from "../../shared/access.js";
 
 import { AppError, ConflictError, NotFoundError, ValidationError } from "../../shared/errors.js";
 import type { SurfaceUserProfile } from "../contract.js";
-import { autoMatchVerdict, firstUsePrompt, COMMIT_VERBS, type AutoMatchVerdict, type CommitVerb } from "../core/identity-rules.js";
+import { autoMatchVerdict, firstUsePrompt, COMMIT_VERBS, type AutoMatchCandidate, type AutoMatchVerdict, type CommitVerb } from "../core/identity-rules.js";
 import { getConnector } from "../registry.js";
 import { invalidateInstallGuards } from "../invalidate.js";
 import { getInstall, homeTenant, installRef, type InstallRow } from "./install-store.js";
@@ -188,7 +188,7 @@ function verifiedDomains(): string[] {
  * (case-insensitive). Self-hosted: the deployment is the org. Shared
  * deployment: the home nest's org domains bound it, and none → nobody.
  */
-async function candidatesFor(install: InstallRow, email: string) {
+async function candidatesFor(install: InstallRow, email: string): Promise<{ list: AutoMatchCandidate[]; outsideOrg: boolean }> {
   const rows = (await getDb().all(
     "SELECT id, email, email_verified_at FROM users WHERE LOWER(email) = ? AND COALESCE(is_service, 0) = 0",
     [email.trim().toLowerCase()],
@@ -204,12 +204,15 @@ async function candidatesFor(install: InstallRow, email: string) {
       return !!d && domains.includes(d);
     });
   }
-  return inOrg.map((r) => ({ id: r.id, email: r.email, email_verified: !!r.email_verified_at }));
+  return {
+    list: inOrg.map((r) => ({ id: r.id, email: r.email, email_verified: !!r.email_verified_at })),
+    outsideOrg: rows.length > 0 && inOrg.length === 0,
+  };
 }
 
 async function verdictFor(install: InstallRow, surfaceUserId: string, profile: SurfaceUserProfile | null): Promise<AutoMatchVerdict> {
   const blocked = await isBlocked(install.id, surfaceUserId);
-  const candidates = profile?.email ? await candidatesFor(install, profile.email) : [];
+  const { list: candidates, outsideOrg } = profile?.email ? await candidatesFor(install, profile.email) : { list: [], outsideOrg: false };
   const v = autoMatchVerdict({
     profile,
     install: { surface: install.surface, home_team_id: homeTenant(install), enterprise_id: install.enterprise_id },
@@ -217,7 +220,7 @@ async function verdictFor(install: InstallRow, surfaceUserId: string, profile: S
     verifiedDomains: verifiedDomains(),
     blocked,
   });
-  if (!v.ok) return v;
+  if (!v.ok) return v.reason === "no_match" && outsideOrg ? { ok: false, reason: "org_domain" } : v;
   // One link per (install, Community user): someone already linked under a
   // different surface id is not auto-matched again.
   const existing = await activeLinkForUser(install.id, v.userId);

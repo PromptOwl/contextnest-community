@@ -395,6 +395,8 @@ export interface AdminSettings {
   /** Write-only: the buffer key to set, or null to clear. */
   surfaces_buffer_key?: string | null;
   surfaces_judge_model?: string;
+  /** Minutes a conversation must be quiet before it is judged; empty = built-in default. */
+  surfaces_quiet_minutes?: number | string | null;
   /** Default monthly Surfaces spend cap per nest, in dollars; null = built-in default. */
   surfaces_default_cap_usd?: number | string | null;
   surfaces_org_name?: string;
@@ -695,9 +697,9 @@ export async function getAdminLicense() {
 }
 
 /** Models this server's credential can reach (admin), and the one Hootie uses now. */
-export async function getAdminModels() {
+export async function getAdminModels(nestId?: string | null) {
   return request<{ models: string[]; current: string; source: "own" | "promptowl" | null; own_models?: string[]; providers?: Record<string, string>; error?: string }>(
-    "/admin/models",
+    `/admin/models${nestId ? `?nest_id=${encodeURIComponent(nestId)}` : ""}`,
   );
 }
 
@@ -4677,6 +4679,9 @@ export interface RunSummary {
   trace?: { error?: string; [k: string]: unknown } | null;
 }
 
+/** A listener run stored as succeeded before its unusable verdict counted as a failure. */
+export const unusableVerdict = (r: Pick<RunSummary, "trace">) => r.trace?.kind === "surfaces_judge" && r.trace?.verdict === "error_schema";
+
 /** A run is only really running once a runner has claimed it. */
 export const isQueued = (r: Pick<RunSummary, "status" | "claimed_by">) =>
   r.status === "running" && !r.claimed_by;
@@ -5587,6 +5592,8 @@ export interface SurfacesStatus {
   bindings: { total: number; active: number; paused_guard: number; paused_by_member: number; removed: number };
   org_name: string | null;
   slack_hosted: boolean;
+  /** This server hosts several organizations. */
+  shared_deployment?: boolean;
   disclosure: string;
   /** po-1444: server admins only. What Slack setup needs from this server. */
   readiness?: {
@@ -5598,6 +5605,18 @@ export interface SurfacesStatus {
   };
 }
 
+export interface SurfacesJudgeTuning {
+  name: string | null;
+  avatar: string | null;
+  folders: string[] | null;
+  max_turns: number | null;
+  max_items: number | null;
+  model: string | null;
+  max_output_tokens: number | null;
+  temperature: number | null;
+  timeout_seconds: number | null;
+}
+
 export interface SurfacesBinding {
   id: string;
   install_id: string;
@@ -5607,6 +5626,16 @@ export interface SurfacesBinding {
   status: "active" | "paused_guard" | "paused_by_member" | "removed";
   /** A nest admin paused it on purpose (po-1437). */
   paused_by_admin?: boolean;
+  listener_agent_node_id?: string | null;
+  /** The listener's own settings; null = the default. */
+  judge?: SurfacesJudgeTuning;
+  /** What each unset setting means right now. */
+  judge_defaults?: SurfacesJudgeTuning;
+  /** The folders its starter gave it: what `judge.folders` may narrow. */
+  listener_folders?: string[];
+  /** What the listener is called; null = no better name than its id. */
+  listener_name?: string | null;
+  conversation_kind?: string;
   [k: string]: unknown;
 }
 
@@ -5720,6 +5749,8 @@ const bindingAction = (id: string, action: "pause" | "resume", reason: string) =
   request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}/${action}`, surfacesJson({ reason }));
 export const pauseSurfacesBinding = (id: string, reason: string) => bindingAction(id, "pause", reason);
 export const resumeSurfacesBinding = (id: string, reason: string) => bindingAction(id, "resume", reason);
+export const updateSurfacesListener = (bindingId: string, judge: SurfacesJudgeTuning) =>
+  request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(bindingId)}`, { method: "PATCH", body: JSON.stringify({ judge }) });
 /** `movedToNestId`: the nest the channel is moving to; the server looks up its name for the history. */
 export const removeSurfacesBinding = (id: string, reason: string, movedToNestId?: string) =>
   request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}`, {
