@@ -13,6 +13,13 @@ export class SlackApiError extends Error {
   }
 }
 
+/** What a log line may say about a failed call: Slack's code, or the error's class. Never its text. */
+export function slackErrorCode(err: unknown): string {
+  if (err instanceof SurfaceRateLimited) return "ratelimited";
+  if (err instanceof SlackApiError) return /^[a-z0-9_]{1,60}$/i.test(err.code) ? err.code : "error";
+  return err instanceof Error ? err.name : "error";
+}
+
 export async function slackCall(
   method: string,
   params: Record<string, string | number | boolean | null | undefined>,

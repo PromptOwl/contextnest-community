@@ -204,7 +204,8 @@ export async function judgeWindow(windowId: string, nowMs: number = Date.now()):
   const token = `${retry ? "r:" : ""}${uuid()}`;
   const claimed = await getDb().run(
     "UPDATE surface_windows SET status = 'judging', claim_token = ?, updated_at = ? WHERE id = ? AND status = 'closing' AND COALESCE(claim_token, '') = ?",
-    [token, iso(nowMs), windowId, before.claim_token ?? ""],
+    // The real time, not the tick's start: recoverStuckWindows ages the claim by it.
+    [token, iso(Date.now()), windowId, before.claim_token ?? ""],
   );
   if (claimed.changes === 0) return false;
   const w = (await getWindow(windowId))!;
@@ -242,6 +243,48 @@ export async function judgeWindow(windowId: string, nowMs: number = Date.now()):
     }
     return false;
   }
+}
+
+/** A judge may call the model for 5 min at most: an older claim lost its worker. */
+export const STUCK_JUDGING_MS = 15 * 60_000;
+
+/**
+ * Windows a restart left `judging`: judged once more, or closed. Never judged
+ * again when the proposal was already made. A worker that was only slow loses
+ * the final compare-and-set and withdraws what it created.
+ */
+export async function recoverStuckWindows(nowMs: number = Date.now()): Promise<number> {
+  const db = getDb();
+  const stuck = (await db.all("SELECT * FROM surface_windows WHERE status = 'judging' AND updated_at <= ?", [iso(nowMs - STUCK_JUDGING_MS)])) as WindowRow[];
+  let n = 0;
+  for (const w of stuck) {
+    const token = w.claim_token ?? "";
+    const made = (await db.all(
+      "SELECT i.item_kind FROM surface_proposal_items i JOIN surface_proposals p ON p.id = i.proposal_id WHERE p.window_id = ? AND i.state <> 'dropped'",
+      [w.id],
+    )) as Array<{ item_kind: string }>;
+    let done: boolean;
+    let how = "its proposal exists";
+    if (made.length) {
+      const kinds = made.map((i) => i.item_kind);
+      done = await finalize(w, token, { status: "judged", verdict: w.forced ? "forced" : "proposed", reason_code: "proposed", item_count: kinds.length, kinds }, nowMs);
+    } else if (!token.startsWith("r:") && (await db.get("SELECT 1 AS x FROM surface_buffer WHERE window_id = ? AND expires_at > ?", [w.id, iso(nowMs)]))) {
+      how = "judging it again";
+      // The kept claim token marks the next attempt as the retry.
+      done =
+        (await db.run("UPDATE surface_windows SET status = 'closing', updated_at = ? WHERE id = ? AND status = 'judging' AND claim_token = ?", [iso(nowMs), w.id, token]))
+          .changes > 0;
+    } else {
+      how = "closed as server_stopped";
+      done = await finalize(w, token, { status: "judged", verdict: "error", reason_code: "server_stopped" }, nowMs);
+      const binding = done && w.forced ? await getBindingRow(w.binding_id) : null;
+      if (binding) await noteRequester(binding, w, FAILED_NOTE);
+    }
+    if (!done) continue;
+    n++;
+    console.warn(`[surfaces] window ${w.id} was left judging by a restart: ${how} binding=${w.binding_id}`);
+  }
+  return n;
 }
 
 /** How far the judge got: what a failure is classified and recorded by. */
@@ -867,7 +910,7 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
   if (created.items.length) await routeNewProposal(created.proposalId);
 }
 
-async function noteRequester(binding: BindingRow, w: WindowRow, text: string): Promise<void> {
+export async function noteRequester(binding: BindingRow, w: WindowRow, text: string): Promise<void> {
   if (!w.forced_by_surface_user_id) return;
   const install = await getInstall(binding.install_id);
   const connector = install ? getConnector(install.surface) : null;
