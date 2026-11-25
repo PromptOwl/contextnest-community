@@ -25,7 +25,7 @@ function fmtDuration(ms: number | null): string {
 }
 /** A skipped or cancelled run never did work: its duration and tokens are noise. */
 const didRun = (o: AgentRunOutcome) => o !== "skipped" && o !== "cancelled";
-const trigger = (t: string) => (t.startsWith("schedule:") ? "Schedule" : "Manual");
+const trigger = (t: string) => (t.startsWith("schedule:") ? "Schedule" : t.startsWith("surfaces:") ? "Slack" : "Manual");
 
 const OUTCOME_LABEL: Record<AgentRunOutcome, string> = {
   running: "Running",
@@ -218,6 +218,7 @@ export function AgentActivity({
                       <td className="px-3 py-1.5 whitespace-nowrap">{formatServerDate(h.started_at)}</td>
                       <td className="px-3 py-1.5" title={h.error ?? undefined}>
                         <OutcomeBadge outcome={h.outcome} />
+                        {h.error && <div className="mt-0.5 max-w-xs text-destructive">{h.error}</div>}
                       </td>
                       <td className="px-3 py-1.5 text-muted-foreground hidden lg:table-cell">{trigger(h.triggered_by)}</td>
                       <td className="px-3 py-1.5 text-right tabular-nums">{didRun(h.outcome) ? fmtDuration(h.duration_ms) : "—"}</td>

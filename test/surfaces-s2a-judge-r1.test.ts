@@ -881,7 +881,7 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     const a = await failWindow("C410", credit);
     expect(a.w.reason_code).toBe("model_billing");
     expect((await one("SELECT reason_code FROM runs WHERE id = ?", [a.w.run_id])).reason_code).toBe("model_billing");
-    expect(a.logged.filter((l) => l.includes(a.w.id)).every((l) => /reason=model_billing status=400$/.test(l))).toBe(true);
+    expect(a.logged.filter((l) => l.includes(a.w.id)).every((l) => /reason=model_billing status=400 /.test(l))).toBe(true);
     // A second window the same day: same code, no second alert.
     const b = await failWindow("C411", credit);
     expect(b.w.reason_code).toBe("model_billing");
@@ -920,6 +920,77 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     expect(w.verdict).toBe("error");
     expect((await all("SELECT id FROM runs WHERE nest_id = ? AND status = 'failed'", [F])).length).toBe(failedBefore);
     expect((await one("SELECT status FROM runs WHERE id = ?", [w.run_id])).status).toBe("succeeded");
+  });
+
+  /** Bind a channel and judge one window with the given model answer. */
+  async function judgeOnce(channel: string, answer: (req: any) => any) {
+    setChannel(channel, ["U_ALICE", "U_BOB", "UBOT"]);
+    const b = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: channel, nest_id: F }, alice.apiKey);
+    expect(b.status, JSON.stringify(b.data)).toBe(201);
+    const id = b.data.binding.id as string;
+    modelImpl = () => submit(noop());
+    await tick(30); // flush other open windows first
+    await S.listener.setListenerFolders(id, ["/", "inbox/"]);
+    const logged: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => void logged.push(a.map(String).join(" ")));
+    const calls = modelCalls.length;
+    try {
+      modelImpl = answer;
+      await say(channel, "U_BOB", "we agreed the cutover moves to friday after the review meeting PLATYPUSCHAT");
+      await tick(21);
+    } finally {
+      spy.mockRestore();
+      modelImpl = () => submit(noop());
+    }
+    const w = await one("SELECT * FROM surface_windows WHERE binding_id = ? ORDER BY opened_at DESC LIMIT 1", [id]);
+    const run = await one("SELECT * FROM runs WHERE id = ?", [w.run_id]);
+    return { id, w, run, trace: JSON.parse(run.trace), logged: logged.filter((l) => l.includes(w.id)), calls: modelCalls.slice(calls) };
+  }
+
+  it("EX-1..EX-3, EX-7: a finished call with no usable verdict is a failed run that says why, with its tokens and times; the ledger says the same", async () => {
+    const usage = { input_tokens: 3000, output_tokens: 1500 };
+    const cut = await judgeOnce("C420", () => ({ content: [], stop_reason: "max_tokens", usage }));
+    expect(cut.w).toMatchObject({ verdict: "error_schema", reason_code: "output_limit" });
+    expect(cut.run).toMatchObject({ status: "failed", verdict: "error", reason_code: "output_limit" });
+    expect(cut.trace.error).toMatch(/ran out of output tokens.*stop: max_tokens/);
+    expect(cut.trace.usage).toMatchObject({ input_tokens: 3000, output_tokens: 1500 });
+    expect(Date.parse(cut.run.started_at)).toBeLessThanOrEqual(Date.parse(cut.run.finished_at));
+    expect(cut.logged).toHaveLength(1);
+    expect(cut.logged[0]).toMatch(/reason=output_limit .*max_output_tokens=1500 .*output_tokens=1500/);
+    const tr = await jsonRequest(app, "GET", `/ledger/win_${cut.w.id}`, undefined, root.apiKey);
+    expect(tr.data.entry.run).toMatchObject({ outcome: "failed", error: cut.trace.error });
+    expect(tr.data.entry.verdict.reason_code).toBe("output_limit");
+
+    const mute = await judgeOnce("C421", () => ({ content: [{ type: "text", text: "PLATYPUSCHAT is a no" }], stop_reason: "end_turn", usage }));
+    expect(mute.run).toMatchObject({ status: "failed", reason_code: "no_verdict" });
+    expect(mute.trace.error).toMatch(/without submitting a decision.*stop: end_turn/);
+
+    const bad = await judgeOnce("C422", (req) => propose(req, { title: `PLATYPUSCHAT ${"x".repeat(81)}` }));
+    expect(bad.run).toMatchObject({ status: "failed", reason_code: "invalid_output" });
+    expect(bad.trace.error).toBe("The model's decision was invalid. (rule: title)");
+
+    // EX-5: neither the chat nor the model's words are recorded anywhere.
+    for (const r of [cut, mute, bad]) expect(JSON.stringify([r.run, r.w, r.logged])).not.toMatch(/PLATYPUS/);
+  });
+
+  it("EX-6: a valid no_op is still a succeeded run", async () => {
+    const ok = await judgeOnce("C423", () => submit(noop()));
+    expect(ok.run).toMatchObject({ status: "succeeded", verdict: "no_op" });
+    expect(ok.trace.error).toBeUndefined();
+  });
+
+  it("EX-4, EX-5: an error with no fixed explanation shows the provider's own words, without secrets or chat text", async () => {
+    const { w, logged } = await failWindow("C424", () => {
+      throw Object.assign(new Error("Unsupported parameter: max_tokens for gpt-5 key sk-abcdefghijklmnop1234 PLATYPUSCHAT"), { status: 400 });
+    });
+    const run = await one("SELECT * FROM runs WHERE id = ?", [w.run_id]);
+    expect(run.reason_code).toBe("model_rejected");
+    expect(JSON.parse(run.trace).error).toMatch(/refused the request\. \(Unsupported parameter: max_tokens for gpt-5/);
+    const lines = logged.filter((l) => l.includes(w.id));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/attempt=1 .*detail="Unsupported parameter/);
+    expect(lines[1]).toMatch(/attempt=2/);
+    expect(JSON.stringify([run, lines])).not.toMatch(/PLATYPUS|abcdefghijklmnop/);
   });
 
   it("a rate limit (429) and a timeout end as model_rate_limited and model_timeout", async () => {

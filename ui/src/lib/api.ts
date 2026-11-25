@@ -4677,6 +4677,9 @@ export interface RunSummary {
   trace?: { error?: string; [k: string]: unknown } | null;
 }
 
+/** A listener run stored as succeeded before its unusable verdict counted as a failure. */
+export const unusableVerdict = (r: Pick<RunSummary, "trace">) => r.trace?.kind === "surfaces_judge" && r.trace?.verdict === "error_schema";
+
 /** A run is only really running once a runner has claimed it. */
 export const isQueued = (r: Pick<RunSummary, "status" | "claimed_by">) =>
   r.status === "running" && !r.claimed_by;

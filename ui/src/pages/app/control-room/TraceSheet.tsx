@@ -202,6 +202,7 @@ function Chain({ t, onOpenDoc }: { t: CrTrace; onOpenDoc: (nestId: string, nodeI
           rows={[
             ["Outcome", <ToneBadge tone="rejected">Failed</ToneBadge>],
             ["Reason", <ReasonCell reason={reason} />],
+            !!e.run?.error && ["Error", <span className="break-words" data-testid="cr-run-error">{e.run.error}</span>],
             ["Steps", `${t.steps.length} recorded before it stopped`],
           ]}
         />

@@ -624,6 +624,8 @@ function serialise(
           outcome: r.run_status ? outcomeOf(r.run_status, trace as any) : null,
           cost_usd: costMicros / 1_000_000,
           external_ref: r.external_ref,
+          // Write tier, like the run's trace: why it failed, in words.
+          ...(opts.detail && typeof trace?.error === "string" ? { error: trace.error.slice(0, 500) } : {}),
         }
       : null,
     verdict: {

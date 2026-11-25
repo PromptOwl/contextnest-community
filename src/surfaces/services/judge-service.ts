@@ -57,7 +57,7 @@ import { routeNewProposal } from "./routing-service.js";
 import { guardKey } from "./window-guard-key.js";
 import { buildWindowGuard } from "./edit-guard.js";
 import { getConnector } from "../registry.js";
-import { classifyJudgeFailure, judgeFailureLogLine, JudgeRunError, type JudgeFailure, type JudgeStage } from "./judge-failure.js";
+import { describeJudgeFailure, judgeFailureLogLine, judgeFailureText, JudgeRunError, type JudgeFailure, type JudgeStage, type JudgeUsage } from "./judge-failure.js";
 
 export { JudgeRunError } from "./judge-failure.js";
 
@@ -183,14 +183,14 @@ export async function judgeWindow(windowId: string, nowMs: number = Date.now()):
   );
   if (claimed.changes === 0) return false;
   const w = (await getWindow(windowId))!;
-  const progress: JudgeProgress = { stage: "setup", nestId: null, agentNode: null, model: null, cost: 0 };
+  const progress: JudgeProgress = { stage: "setup", nestId: null, agentNode: null, model: null, cost: 0, startedAt: Date.now(), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, chat: [] };
   try {
     await judgeClaimed(w, token, nowMs, progress);
     return true;
   } catch (err) {
-    // po-1407: one fixed reason code, and a log line with no message text.
-    const failure = classifyJudgeFailure(err, progress.stage);
-    console.error(judgeFailureLogLine(windowId, failure));
+    // po-1407: one fixed reason code; a log line and a run with no chat text.
+    const failure = describeJudgeFailure(err, progress.stage, progress.chat);
+    console.error(judgeFailureLogLine(windowId, failure, { attempt: retry ? 2 : 1, ...runFacts(w, progress) }));
     if (!retry) {
       await getDb().run("UPDATE surface_windows SET status = 'closing', updated_at = ? WHERE id = ? AND status = 'judging' AND claim_token = ?", [
         iso(Date.now()),
@@ -207,7 +207,7 @@ export async function judgeWindow(windowId: string, nowMs: number = Date.now()):
       // The failed attempt as a run, so the trace has one to follow. A commit-stage
       // throw already recorded its run (succeeded), so it gets no second one.
       if (ended && progress.stage !== "commit" && progress.nestId && progress.agentNode) {
-        await recordRun(progress.nestId, progress.agentNode, progress.model, progress.cost, null, w.id, failure).catch(() => undefined);
+        await recordRun(progress.nestId, progress.agentNode, progress, null, w.id, failure).catch(() => undefined);
       }
       if (ended && failure.code === "model_billing" && progress.nestId) {
         await alertModelBilling(progress.nestId, w.binding_id).catch(() => undefined);
@@ -224,7 +224,21 @@ interface JudgeProgress {
   agentNode: string | null;
   model: string | null;
   cost: number;
+  startedAt: number;
+  usage: JudgeUsage;
+  /** The window's text, in memory only: what an error message is cleaned against. */
+  chat: string[];
 }
+
+/** What a log line says about a run: ids, counts and settings, never text. */
+const runFacts = (w: WindowRow, p: JudgeProgress) => ({
+  binding: w.binding_id,
+  nest: p.nestId,
+  model: p.model,
+  input_tokens: p.usage.input + p.usage.cacheRead + p.usage.cacheWrite,
+  output_tokens: p.usage.output,
+  ms: Date.now() - p.startedAt,
+});
 
 async function ownerOf(email: string): Promise<{ userId: string; email: string } | null> {
   const row = (await getDb().get("SELECT id, email FROM users WHERE LOWER(email) = LOWER(?) AND COALESCE(is_service, 0) = 0", [email])) as
@@ -360,9 +374,19 @@ interface Usage4 {
   cacheRead: number;
   cacheWrite: number;
 }
+const addUsage = (a: JudgeUsage, b: JudgeUsage) => {
+  a.input += b.input;
+  a.output += b.output;
+  a.cacheRead += b.cacheRead;
+  a.cacheWrite += b.cacheWrite;
+};
 interface RunResult {
   raw: unknown | null;
   usage: Usage4;
+  /** Did it call submit_window_verdict? */
+  submitted: boolean;
+  /** Why the loop ended: the model's stop reason, or our own limit. */
+  stop: string;
 }
 
 /** Per-run read limits (round 2, L1): priced into the 16k-input reservation. */
@@ -381,6 +405,7 @@ const charsOf = (v: unknown) => Buffer.byteLength(typeof v === "string" ? v : JS
  * so cumulative input never exceeds what was reserved.
  */
 async function runJudge(ctx: ToolContext, model: string, credential: any, system: string, user: string, folders: string[]): Promise<RunResult> {
+  let stop = "turn_limit";
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: user }];
   const usage: Usage4 = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const tools = judgeTools();
@@ -391,7 +416,14 @@ async function runJudge(ctx: ToolContext, model: string, credential: any, system
     for (let turn = 0; turn < MAX_TURNS; turn++) {
       const projected = Math.ceil((fixedChars + convChars) / CHARS_PER_TOKEN);
       const spentIn = usage.input + usage.cacheRead + usage.cacheWrite;
-      if (spentIn + projected > MAX_INPUT_TOKENS || usage.output >= MAX_OUTPUT_TOKENS) break;
+      if (usage.output >= MAX_OUTPUT_TOKENS) {
+        stop = "max_tokens";
+        break;
+      }
+      if (spentIn + projected > MAX_INPUT_TOKENS) {
+        stop = "input_limit";
+        break;
+      }
       const res = await createTurn({
         credential,
         request: { model, system, messages, tools, max_tokens: Math.max(256, MAX_OUTPUT_TOKENS - usage.output), temperature: 0 } as any,
@@ -403,8 +435,12 @@ async function runJudge(ctx: ToolContext, model: string, credential: any, system
       usage.cacheWrite += res.usage?.cache_creation_input_tokens ?? 0;
       const content = (res.content ?? []) as Array<Record<string, any>>;
       const submit = content.find((b) => b.type === "tool_use" && b.name === "submit_window_verdict");
-      if (submit) return { raw: submit.input ?? null, usage };
-      if (res.stop_reason !== "tool_use") break;
+      const stopped = typeof res.stop_reason === "string" && /^[a-z_]{1,40}$/.test(res.stop_reason) ? res.stop_reason : "none";
+      if (submit) return { raw: submit.input ?? null, usage, submitted: true, stop: stopped };
+      if (res.stop_reason !== "tool_use") {
+        stop = stopped;
+        break;
+      }
       messages.push({ role: "assistant", content: content as any });
       convChars += charsOf(content);
       const results: Anthropic.ToolResultBlockParam[] = [];
@@ -450,7 +486,13 @@ async function runJudge(ctx: ToolContext, model: string, credential: any, system
   } catch (err) {
     throw new JudgeRunError(usage, err);
   }
-  return { raw: null, usage };
+  return { raw: null, usage, submitted: false, stop };
+}
+
+/** Why a finished call gave no usable verdict. */
+function unusable(run: RunResult, rule: string): JudgeFailure {
+  const code = run.stop === "max_tokens" ? "output_limit" : run.submitted ? "invalid_output" : "no_verdict";
+  return { code, name: "VerdictError", status: null, detail: code === "invalid_output" ? `rule: ${rule}` : `stop: ${run.stop}` };
 }
 
 async function dedupCandidates(nestId: string, nowMs: number, nv: NestView): Promise<(item: VerdictItem) => DedupCandidate[]> {
@@ -484,7 +526,12 @@ async function dedupCandidates(nestId: string, nowMs: number, nv: NestView): Pro
 async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress: JudgeProgress): Promise<void> {
   const forced = !!w.forced;
   const binding = (await getBindingRow(w.binding_id)) as BindingRow | null;
-  const end = (f: Finalize) => finalize(w, token, f, nowMs);
+  const end = (f: Finalize) => {
+    // An ending without a model answer still leaves a line to trace it by.
+    if (f.verdict === "error" || f.verdict === "budget_exhausted" || f.verdict === "no_target_folder")
+      console.warn(`[surfaces] judging window ${w.id} ended: verdict=${f.verdict} reason=${f.reason_code ?? "none"} binding=${w.binding_id}`);
+    return finalize(w, token, f, nowMs);
+  };
   // S2b security M2: a DM window is judged only while DM capture is still
   // allowed (the setting, the owner's opt-out) — re-checked under the claim.
   if (!binding || binding.status !== "active" || !binding.capture_ok || !(await dmCaptureAllowed(binding))) {
@@ -492,6 +539,7 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
     return;
   }
   const rows = await decryptWindow(w.id);
+  progress.chat = rows.map((r) => r.text);
   const total = rows.reduce((s, r) => s + meaningfulChars(r.text), 0);
   if (!rows.length || (!forced && total < MIN_WINDOW_MEANINGFUL)) {
     await end({ status: "judged", verdict: "no_op", reason_code: "too_small" });
@@ -580,6 +628,7 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
 
   let cost = 0;
   let verdict: Verdict | null = null;
+  let failure: JudgeFailure | null = null;
   try {
     for (let attempt = 0; attempt < (forced ? 2 : 1) && !verdict; attempt++) {
       const estimate = reservationMicros(model);
@@ -594,12 +643,14 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
       } catch (err) {
         // Settle what was actually spent, never 0 (round 2, L1).
         const u = err instanceof JudgeRunError ? err.usage : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+        addUsage(progress.usage, u);
         const spent = costMicros(model, u.input, u.output, u.cacheRead, u.cacheWrite);
         cost += spent;
         progress.cost = cost;
         await settle(binding.nest_id, estimate, spent, nowMs);
         throw err;
       }
+      addUsage(progress.usage, run.usage);
       const actual = costMicros(model, run.usage.input, run.usage.output, run.usage.cacheRead, run.usage.cacheWrite);
       cost += actual;
       progress.cost = cost;
@@ -613,15 +664,19 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
         adminFolders,
       });
       if (v.ok) verdict = v.verdict;
+      else {
+        failure = unusable(run, v.error);
+        console.error(judgeFailureLogLine(w.id, failure, { attempt: attempt + 1, max_output_tokens: MAX_OUTPUT_TOKENS, ...runFacts(w, progress) }));
+      }
       progress.stage = "setup";
     }
   } finally {
     clearTimeout(timer);
   }
-  await recordRun(binding.nest_id, listener.node_id, model, cost, verdict, w.id);
+  await recordRun(binding.nest_id, listener.node_id, progress, verdict, w.id, verdict ? null : failure);
   progress.stage = "commit";
   if (!verdict) {
-    await end({ status: "judged", verdict: "error_schema", reason_code: null, model, cost_micros: cost });
+    await end({ status: "judged", verdict: "error_schema", reason_code: failure?.code ?? null, model, cost_micros: cost });
     return;
   }
   if (verdict.verdict === "no_op") {
@@ -754,8 +809,7 @@ async function noteRequester(binding: BindingRow, w: WindowRow, text: string): P
 async function recordRun(
   nestId: string,
   agentNode: string,
-  model: string | null,
-  cost: number,
+  p: JudgeProgress,
   v: Verdict | null,
   windowId: string,
   failure: JudgeFailure | null = null,
@@ -763,14 +817,24 @@ async function recordRun(
   const now = new Date().toISOString();
   const runId = `run_${uuid()}`;
   // A failed attempt (po-1407): status failed, verdict error, the reason code;
-  // the trace keeps the error's class name and HTTP status, never its message.
+  // the trace keeps the error's class name, HTTP status and words with no chat text.
+  const base = {
+    kind: "surfaces_judge",
+    model: p.model,
+    prompt_version: PROMPT_VERSION,
+    est_cost_usd: Math.round(p.cost) / 1_000_000,
+    usage: {
+      input_tokens: p.usage.input,
+      output_tokens: p.usage.output,
+      cache_read_input_tokens: p.usage.cacheRead,
+      cache_creation_input_tokens: p.usage.cacheWrite,
+    },
+  };
   const trace = failure
     ? {
-        kind: "surfaces_judge",
-        model,
-        prompt_version: PROMPT_VERSION,
-        est_cost_usd: Math.round(cost) / 1_000_000,
+        ...base,
         verdict: "error",
+        error: judgeFailureText(failure),
         reason_code: failure.code,
         error_name: failure.name,
         http_status: failure.status,
@@ -778,10 +842,7 @@ async function recordRun(
         items: 0,
       }
     : {
-        kind: "surfaces_judge",
-        model,
-        prompt_version: PROMPT_VERSION,
-        est_cost_usd: Math.round(cost) / 1_000_000,
+        ...base,
         verdict: v?.verdict ?? "error_schema",
         items: v?.items.length ?? 0,
       };
@@ -795,7 +856,7 @@ async function recordRun(
         agentNode,
         failure ? "failed" : "succeeded",
         JSON.stringify(trace),
-        now,
+        iso(p.startedAt),
         now,
         now,
         failure ? "error" : (v?.verdict ?? "error"),

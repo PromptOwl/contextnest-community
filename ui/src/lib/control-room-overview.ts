@@ -71,7 +71,7 @@ export interface LedgerEntry {
   at: string;
   nest: { id: string; label: string };
   agent: { node_id: string | null; name: string | null; source: string };
-  run: { id: string; outcome: string | null; cost_usd: number; external_ref?: string | null } | null;
+  run: { id: string; outcome: string | null; cost_usd: number; external_ref?: string | null; error?: string | null } | null;
   verdict: { code: string | null; reason_code: string | null; kinds: string[] | null; message_count: number | null };
   decision: { verdict: string | null; reason_code: string | null; confidence: number | null; summary?: string | null; evidence?: Array<{ kind: string; ref: string }> | null } | null;
   proposal: { id: string | null; title?: string | null; state: string | null; edited: boolean; counts: Record<string, number> } | null;
@@ -149,7 +149,9 @@ const REASON_TEXT: Record<string, string> = {
   model_error: "The model call failed",
   slack_fetch_failed: "Couldn't reach Slack",
   nest_read_failed: "Couldn't read the nest",
-  invalid_output: "The model's answer couldn't be read",
+  invalid_output: "The model's decision was invalid",
+  output_limit: "The model ran out of output tokens before it answered",
+  no_verdict: "The model answered without submitting a decision",
   db_error: "Database error",
   unknown_error: "Unexpected error (see server log)",
   // An agent run the server stopped under (po-1452).
