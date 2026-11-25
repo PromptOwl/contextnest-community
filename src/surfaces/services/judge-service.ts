@@ -57,7 +57,7 @@ import { routeNewProposal } from "./routing-service.js";
 import { guardKey } from "./window-guard-key.js";
 import { buildWindowGuard } from "./edit-guard.js";
 import { getConnector } from "../registry.js";
-import { describeJudgeFailure, judgeFailureLogLine, judgeFailureText, JudgeRunError, type JudgeFailure, type JudgeStage, type JudgeUsage } from "./judge-failure.js";
+import { describeJudgeFailure, judgeFailureLogLine, judgeFailureText, ruleText, JudgeRunError, type JudgeFailure, type JudgeStage, type JudgeUsage } from "./judge-failure.js";
 import { DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT_SECONDS, readJudgeTuning } from "./judge-tuning.js";
 
 export { JudgeRunError } from "./judge-failure.js";
@@ -69,6 +69,29 @@ export const MAX_OUTPUT_TOKENS = DEFAULT_MAX_OUTPUT_TOKENS;
 /** Pre-judge short-circuit (§4.5): organic windows under this are no_op/too_small. */
 export const MIN_WINDOW_MEANINGFUL = 40;
 const READ_TOOLS = new Set(["search_nest", "list_nodes", "read_node"]);
+/** What the person who asked (🧠 or "remember this") is told when no card comes. Fixed words only. */
+const NOTHING_NOTE: Record<string, string> = {
+  chatter: "I didn't find a decision, fact or process to save in that message, so I saved nothing.",
+  question_only: "That message asks a question, and I didn't find an answer to save, so I saved nothing.",
+  no_agreement: "I didn't find an agreement to save yet. React again once it's decided.",
+  already_on_record: "That is already in the nest, so I saved nothing.",
+};
+const BLOCKED_NOTE: Record<string, string> = {
+  owner: "I couldn't suggest that: the owner isn't in this conversation. @mention the person, or leave the owner out, and ask again.",
+  due_date: "I couldn't suggest that: the date isn't stated in the messages. Add the date and ask again.",
+  verbatim: "I couldn't put that in my own words closely enough to save it. Add some context and ask again.",
+  leak: "I couldn't suggest that: it would have included text from another document.",
+  people_rules: "I couldn't suggest that: the people folder only takes roles, ownership and contact facts.",
+};
+const FAILED_NOTE = "Something went wrong while drafting, so nothing was saved. A server admin can see why in the Control room.";
+function forcedNote(f: Finalize): string | null {
+  if (f.verdict === "discarded" || f.verdict === "forced" || f.verdict === "proposed") return null;
+  if (f.reason_code === "sensitive" || f.blocked?.sensitive) return SENSITIVE_NOTE;
+  if (f.verdict === "no_op") return NOTHING_NOTE[f.reason_code ?? ""] ?? NOTHING_NOTE.chatter;
+  if (f.verdict === "filtered") return BLOCKED_NOTE[f.reason_code ?? ""] ?? "I made a suggestion, but it didn't pass the safety checks, so nothing was saved.";
+  return FAILED_NOTE;
+}
+
 export const SENSITIVE_NOTE = "Nest doesn't save this kind of content (pay, health, performance, personal or credentials).";
 
 /** Tests only. */
@@ -210,6 +233,8 @@ export async function judgeWindow(windowId: string, nowMs: number = Date.now()):
       if (ended && progress.stage !== "commit" && progress.nestId && progress.agentNode) {
         await recordRun(progress.nestId, progress.agentNode, progress, null, w.id, failure).catch(() => undefined);
       }
+      const asked = ended && w.forced && progress.stage !== "commit" ? await getBindingRow(w.binding_id).catch(() => null) : null;
+      if (asked) await noteRequester(asked as BindingRow, w, FAILED_NOTE);
       if (ended && failure.code === "model_billing" && progress.nestId) {
         await alertModelBilling(progress.nestId, w.binding_id).catch(() => undefined);
       }
@@ -505,7 +530,7 @@ async function runJudge(
 /** Why a finished call gave no usable verdict. */
 function unusable(run: RunResult, rule: string): JudgeFailure {
   const code = run.stop === "max_tokens" ? "output_limit" : run.submitted ? "invalid_output" : "no_verdict";
-  return { code, name: "VerdictError", status: null, detail: code === "invalid_output" ? `rule: ${rule}` : `stop: ${run.stop}` };
+  return { code, name: "VerdictError", status: null, detail: code === "invalid_output" ? ruleText(rule) : `stop: ${run.stop}` };
 }
 
 async function dedupCandidates(nestId: string, nowMs: number, nv: NestView): Promise<(item: VerdictItem) => DedupCandidate[]> {
@@ -539,11 +564,15 @@ async function dedupCandidates(nestId: string, nowMs: number, nv: NestView): Pro
 async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress: JudgeProgress): Promise<void> {
   const forced = !!w.forced;
   const binding = (await getBindingRow(w.binding_id)) as BindingRow | null;
-  const end = (f: Finalize) => {
+  const end = async (f: Finalize) => {
     // An ending without a model answer still leaves a line to trace it by.
     if (f.verdict === "error" || f.verdict === "budget_exhausted" || f.verdict === "no_target_folder")
       console.warn(`[surfaces] judging window ${w.id} ended: verdict=${f.verdict} reason=${f.reason_code ?? "none"} binding=${w.binding_id}`);
-    return finalize(w, token, f, nowMs);
+    const ended = await finalize(w, token, f, nowMs);
+    // Someone asked and no card is coming: tell them, privately.
+    const told = ended && forced && binding ? forcedNote(f) : null;
+    if (told) await noteRequester(binding!, w, told);
+    return ended;
   };
   // S2b security M2: a DM window is judged only while DM capture is still
   // allowed (the setting, the owner's opt-out) — re-checked under the claim.
@@ -684,7 +713,7 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
       if (v.ok) verdict = v.verdict;
       else {
         failure = unusable(run, v.error);
-        console.error(judgeFailureLogLine(w.id, failure, { attempt: attempt + 1, max_output_tokens: maxOutput, ...runFacts(w, progress) }));
+        console.error(judgeFailureLogLine(w.id, failure, { rule: JSON.stringify(v.error), attempt: attempt + 1, max_output_tokens: maxOutput, ...runFacts(w, progress) }));
       }
       progress.stage = "setup";
     }
@@ -699,7 +728,6 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
   }
   if (verdict.verdict === "no_op") {
     await end({ status: "judged", verdict: "no_op", reason_code: verdict.reason_code, model, cost_micros: cost });
-    if (forced && verdict.reason_code === "sensitive") await noteRequester(binding, w, SENSITIVE_NOTE);
     return;
   }
 
@@ -758,7 +786,6 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
     }
     const first = Object.keys(blocked)[0] ?? null;
     await end({ status: "judged", verdict: "filtered", reason_code: first, item_count: 0, blocked, model, cost_micros: cost, kinds: [] });
-    if (forced && blocked.sensitive) await noteRequester(binding, w, SENSITIVE_NOTE);
     return;
   }
 

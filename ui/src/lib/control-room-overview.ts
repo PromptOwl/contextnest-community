@@ -136,6 +136,12 @@ const REASON_TEXT: Record<string, string> = {
   no_model: "No model configured",
   nest_unreadable: "Nest not readable",
   target_not_document: "Target isn't a document",
+  owner: "Blocked: the suggested owner isn't in the conversation",
+  due_date: "Blocked: it gave a date the messages don't mention",
+  verbatim: "Blocked: it copied too much of the conversation",
+  leak: "Blocked: it included text from another document",
+  people_rules: "Blocked: not allowed in the people folder",
+  low_confidence: "Not confident enough to suggest",
   new_decision: "New decision",
   duplicate: "Duplicate",
   stale_source: "Source out of date",
@@ -146,6 +152,7 @@ const REASON_TEXT: Record<string, string> = {
   model_billing: "The model account is out of credit",
   model_rate_limited: "The model is rate-limited",
   model_rejected: "The model refused the request",
+  model_unavailable: "This model isn't available to the model key",
   model_error: "The model call failed",
   slack_fetch_failed: "Couldn't reach Slack",
   nest_read_failed: "Couldn't read the nest",
@@ -157,6 +164,11 @@ const REASON_TEXT: Record<string, string> = {
   // An agent run the server stopped under (po-1452).
   server_stopped: "The server stopped during the run",
 };
+
+/** A suggestion was made and a safety check stopped it: not the same as nothing to say. */
+const BLOCKED_REASONS = new Set(["owner", "due_date", "verbatim", "leak", "people_rules"]);
+export const isBlocked = (e: Pick<LedgerEntry, "verdict" | "agent">): boolean =>
+  e.agent.source === "surfaces" && e.verdict.code === "no_op" && BLOCKED_REASONS.has(e.verdict.reason_code ?? "");
 
 export function reasonLabel(code: string | null | undefined): string {
   if (!code) return "No reason given";

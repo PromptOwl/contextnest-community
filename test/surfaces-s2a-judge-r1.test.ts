@@ -968,10 +968,46 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
 
     const bad = await judgeOnce("C422", (req) => propose(req, { title: `PLATYPUSCHAT ${"x".repeat(81)}` }));
     expect(bad.run).toMatchObject({ status: "failed", reason_code: "invalid_output" });
-    expect(bad.trace.error).toBe("The model's decision was invalid. (rule: title)");
+    expect(bad.trace.error).toBe("The model's decision was invalid. (the title was missing, too short or too long)");
+    expect(bad.logged[0]).toMatch(/rule="title"/);
 
     // EX-5: neither the chat nor the model's words are recorded anywhere.
     for (const r of [cut, mute, bad]) expect(JSON.stringify([r.run, r.w, r.logged])).not.toMatch(/PLATYPUS/);
+  });
+
+  it("EX-30: a 🧠 on something with nothing to keep is a normal no-proposal, asked once, and the person is told privately", async () => {
+    setChannel("C429", ["U_ALICE", "U_BOB", "UBOT"]);
+    const b = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C429", nest_id: F }, alice.apiKey);
+    expect(b.status, JSON.stringify(b.data)).toBe(201);
+    modelImpl = () => submit(noop());
+    await tick(30);
+    await S.listener.setListenerFolders(b.data.binding.id, ["/", "inbox/"]);
+    const ask = async (text: string, answer: (req: any) => any) => {
+      const ts = await say("C429", "U_BOB", text);
+      const calls = modelCalls.length;
+      const told = slack.ephemerals.length;
+      modelImpl = answer;
+      await send({ type: "reaction_added", user: "U_ALICE", reaction: "brain", item_user: "U_BOB", item: { type: "message", channel: "C429", ts }, event_ts: nextTs() });
+      await tick(21);
+      modelImpl = () => submit(noop());
+      const w = await one("SELECT * FROM surface_windows WHERE binding_id = ? AND forced = 1 ORDER BY opened_at DESC LIMIT 1", [b.data.binding.id]);
+      // The ordinary window of the same message may be judged in this tick too: count the ask's own calls.
+      return { w, calls: modelCalls.slice(calls).filter((c: any) => JSON.stringify(c.messages).includes("(forced)")).length, notes: slack.ephemerals.slice(told).map((e) => e.text).join("\n") };
+    };
+    const hello = await ask("good morning everyone, hope you had a nice weekend", () => submit(noop("chatter")));
+    expect(hello.w).toMatchObject({ verdict: "no_op", reason_code: "chatter" });
+    expect(hello.calls).toBe(1);
+    expect(hello.notes).toMatch(/didn't find a decision, fact or process/);
+    // A suggestion a safety check stops: the person learns why.
+    const team = await ask("we decided the platform team owns the billing cutover", (req) => propose(req, { owner: "The platform team", target_folder: "inbox/" }));
+    expect(team.w).toMatchObject({ verdict: "filtered", reason_code: "owner" });
+    expect(team.notes).toMatch(/owner isn't in this conversation/);
+    // A broken answer: told something went wrong, with no detail.
+    const bad = await ask("we agreed the renewal moves to annual billing today", (req) => propose(req, { title: "x".repeat(81) }));
+    expect(bad.w.verdict).toBe("error_schema");
+    expect(bad.notes).toMatch(/Something went wrong while drafting/);
+    // Never in the channel: only its one notice was posted there.
+    expect(slack.posted.filter((p) => p.channel === "C429").length).toBe(1);
   });
 
   it("EX-6: a valid no_op is still a succeeded run", async () => {

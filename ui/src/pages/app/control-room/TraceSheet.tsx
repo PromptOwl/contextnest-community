@@ -14,7 +14,7 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Check, CircleAlert, Copy, Download, ExternalLink, Lock, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getLedgerTrace, type CrTrace } from "../../../lib/api";
-import { STATE_BADGE, formatDuration, fmtWhen, reasonLine, rowTitle, sourceLabel, usd, verdictBadge, type LedgerEntry } from "../../../lib/control-room-overview";
+import { STATE_BADGE, formatDuration, fmtWhen, isBlocked, reasonLine, rowTitle, sourceLabel, usd, verdictBadge, type LedgerEntry } from "../../../lib/control-room-overview";
 import { ErrorLine, KV, Loading, Mono, ToneBadge } from "./parts";
 import { cn } from "@/lib/utils";
 
@@ -215,7 +215,7 @@ function Chain({ t, onOpenDoc }: { t: CrTrace; onOpenDoc: (nestId: string, nodeI
         <KV
           rows={[
             isListener && e.verdict.message_count != null && ["Evidence", `${e.verdict.message_count} ${e.verdict.message_count === 1 ? "message" : "messages"} in one conversation window`],
-            ["Verdict", <ToneBadge tone={vt}>{vl}</ToneBadge>],
+            ["Verdict", <ToneBadge tone={isBlocked(e) ? "warning" : vt}>{isBlocked(e) ? "Blocked" : vl}</ToneBadge>],
             ["Reason", <ReasonCell reason={reason} />],
             !!e.verdict.kinds?.length && ["Kind", e.verdict.kinds.map((k) => k.replace(/_/g, " ")).join(", ")],
             e.decision?.confidence != null && ["Confidence", `${Math.round(e.decision.confidence * 100)}%`],
@@ -232,7 +232,9 @@ function Chain({ t, onOpenDoc }: { t: CrTrace; onOpenDoc: (nestId: string, nodeI
       steps.push(
         <li key="end" className="pl-9">
           <Note tone="info" icon={<Check className="h-4 w-4" />}>
-            No proposal, so the chain ends here. That is the normal case.{isListener ? " Nobody was pinged and nothing was posted in the channel." : ""}
+            {isBlocked(e)
+              ? "The model made a suggestion and a safety check stopped it, so the chain ends here. Nothing was posted in the channel."
+              : `No proposal, so the chain ends here. That is the normal case.${isListener ? " Nothing was posted in the channel." : ""}`}
           </Note>
         </li>,
       );

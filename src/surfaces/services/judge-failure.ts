@@ -13,6 +13,7 @@ export const JUDGE_FAILURE_CODES = [
   "model_rate_limited",
   "model_timeout",
   "model_rejected",
+  "model_unavailable",
   "model_error",
   "slack_fetch_failed",
   "nest_read_failed",
@@ -57,11 +58,12 @@ export class JudgeRunError extends Error {
 
 /** Each code in words, as shown on the run (the Control room words are REASON_TEXT in the UI). */
 export const JUDGE_FAILURE_TEXT: Record<JudgeFailureCode, string> = {
-  model_auth: "The model key was refused.",
+  model_auth: "The model key was refused. Check the model name and the model key.",
   model_billing: "The model account is out of credit.",
   model_rate_limited: "The model is rate-limited. Try again later.",
   model_timeout: "The model call timed out. Raise the listener's time limit or choose a faster model.",
   model_rejected: "The model refused the request.",
+  model_unavailable: "This model isn't available to the model key. Check the model name, or choose another model.",
   model_error: "The model call failed.",
   slack_fetch_failed: "Couldn't reach Slack.",
   nest_read_failed: "Couldn't read the nest.",
@@ -71,6 +73,26 @@ export const JUDGE_FAILURE_TEXT: Record<JudgeFailureCode, string> = {
   db_error: "Database error.",
   unknown_error: "Unexpected error.",
 };
+
+/** A broken rule of the decision (core/judge-schema.ts) in words a person can follow. */
+const RULE_TEXT: Array<[RegExp, string]> = [
+  [/^items: proposed has none|^items: propose needs/, "it said there was something to save, but gave no suggestion"],
+  [/^items: no_op has none/, "it said there was nothing to save, but gave a suggestion"],
+  [/^items$/, "it gave more than 3 suggestions, or none at all"],
+  [/^(?:not an object|verdict|reason_code|item)$/, "the answer wasn't in the expected form"],
+  [/^target_folder/, "it chose a folder this listener may not use"],
+  [/^target_node_id/, "it named a document it may not change"],
+  [/^title/, "the title was missing, too short or too long"],
+  [/^summary/, "the summary was missing, too long or over 3 sentences"],
+  [/^body/, "the text was missing or too long"],
+  [/^owner/, "the owner was not a usable name"],
+  [/^due_date/, "the due date was not a real date"],
+  [/^evidence_message_ids/, "it cited messages that aren't in the conversation"],
+  [/^tags/, "it used tags this nest doesn't have"],
+  [/^(?:kind|op|correction|agent_suggestion)/, "it mixed up what kind of note this is"],
+  [/^conflict/, "its comparison with an existing note was incomplete"],
+];
+export const ruleText = (rule: string): string => RULE_TEXT.find(([re]) => re.test(rule))?.[1] ?? `part of it was wrong: ${rule}`;
 
 /** The failure in one line, for the run's `error`. */
 export function judgeFailureText(f: JudgeFailure): string {
@@ -110,6 +132,10 @@ function messagesOf(err: unknown): string {
   return [e?.message, e?.error?.message, e?.error?.error?.message].filter((m) => typeof m === "string").join(" ");
 }
 
+/** A gateway or provider saying this key can't use that model, or there is no such model. Matched only, never kept. */
+const MODEL_RE =
+  /not allowed to access (?:the )?model|model[_ ]access[_ ]denied|key_model_access|team_model_access|(?:invalid|unknown|unsupported) model\b|model\b[^.]{0,80}(?:does not exist|not found|not available|isn't available|not supported)/i;
+
 const TIMEOUT_NAMES = new Set(["AbortError", "TimeoutError", "APIConnectionTimeoutError", "APIUserAbortError"]);
 const PARSE_NAMES = new Set(["SyntaxError", "ZodError"]);
 
@@ -144,6 +170,7 @@ export function classifyJudgeFailure(err: unknown, stage: JudgeStage): JudgeFail
   if (!fromModel && isDbError(cause, name)) return out("db_error");
   if (fromModel || stage === "model") {
     if (TIMEOUT_NAMES.has(name)) return out("model_timeout");
+    if ((status === 400 || status === 401 || status === 403 || status === 404) && MODEL_RE.test(messagesOf(cause))) return out("model_unavailable");
     if (status === 401 || status === 403) return out("model_auth");
     if (status === 402 || ((status === 400 || status === 429) && BILLING_RE.test(messagesOf(cause)))) return out("model_billing");
     if (status === 429) return out("model_rate_limited");
