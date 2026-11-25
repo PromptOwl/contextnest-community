@@ -141,6 +141,8 @@ surfacesRoutes.get("/status", async (c) => {
       // the one the public member page shows; hosted = one-click install on.
       org_name: config.SURFACES_ORG_NAME ?? null,
       slack_hosted: hostedEnabled(),
+      // Accounts are matched to Slack members only within the connection's email domains.
+      shared_deployment: config.SHARED_DEPLOYMENT,
       disclosure: SERVER_ADMIN_DISCLOSURE,
       // po-1444: what Slack setup needs from this server, for the admin's
       // checklist. Booleans and the public URL only, never a secret.

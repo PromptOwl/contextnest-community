@@ -466,3 +466,30 @@ describe("guardView: a passing check says why, in plain words", () => {
     expect(guardView(preview({ readers_absent: 2 }, true), ctx).passed![0]).toMatch(/public channel chosen on purpose/);
   });
 });
+
+describe("a same-email member who can't be matched says why", () => {
+  it("names the shared server's domain list, a match since, and an unknown code", async () => {
+    const { guardView } = await import("./control-room-setup");
+    const view = (match_reason: string | null) =>
+      guardView(
+        {
+          would_bind: false,
+          is_ext_shared: false,
+          ext_capture_enabled: false,
+          guard: {
+            capture_ok: false,
+            surface_ok: false,
+            members_known: true,
+            detail: { readers_total: 2, readers_absent: 1, members_total: 2, members_not_readers: 1, guests: 0, externals: 0, non_user_principals: [], universe: false, org_wide: false, ext_shared: false },
+          },
+          people: { absent_readers: [{ user_id: "u", name: "Taimur", email: "t@acme.com", reason: "not_linked", match_reason }], members_not_readers: [], universe_cause: null },
+        } as never,
+        { channel: "qa", nest: "N" },
+      )
+        .groups!.flatMap((g) => g.people)
+        .join(" ");
+    expect(view("org_domain")).toMatch(/several organizations.*Email domains/);
+    expect(view(null)).toMatch(/they match now/);
+    expect(view("brand_new")).toMatch(/could not be made \(brand_new\)/);
+  });
+});

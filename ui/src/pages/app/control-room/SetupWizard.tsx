@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Check, CircleAlert, Download, ExternalLink, FolderPlus, Hash, Lock, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { EmailDomains } from "./EmailDomains";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
@@ -512,6 +513,8 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
   const here = typeof window === "undefined" ? null : window.location.origin;
   const urlBad = !!readiness && (!!readiness.public_url || !!wrongAddress(readiness, here));
   const homeName = state.nests.find((n) => n.id === inst?.home_nest_id)?.name;
+  const sharedDeployment = !!state.status?.shared_deployment;
+  const domainsNest = inst?.home_nest_id ?? homeNest;
 
   const download = async () => {
     setBusy(true);
@@ -587,6 +590,9 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
       />
       <WillNever settings={state.settings} />
       {readiness && !connected && <ReadinessChecklist readiness={readiness} here={here} />}
+      {sharedDeployment && domainsNest && (
+        <EmailDomains nestId={domainsNest} nestName={state.nests.find((n) => n.id === domainsNest)?.name} onSaved={() => state.setPreviews(() => ({}))} />
+      )}
       {connected ? (
         <Note tone="ok" icon="check" testId="setup-connected">
           <b>Connected to Slack.</b> {homeName ? `Saved notes land in ${homeName} unless a channel says otherwise.` : "Saved notes land in the nest each channel is bound to."}
@@ -1219,6 +1225,7 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const { viewFor, recheck } = usePreviews(state);
+  const sharedDeployment = !!state.status?.shared_deployment;
 
   // One request at a time: "Check again" is disabled while a list is loading,
   // so repeated clicks can't stack up Slack calls.
@@ -1260,6 +1267,9 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
         title="Choose channels"
         lede="Start with two or three busy channels. Each channel saves into one nest. The status on the right is a live check. Nothing is saved until you continue."
       />
+      {sharedDeployment && inst?.home_nest_id && (
+        <EmailDomains nestId={inst.home_nest_id} nestName={nestName(inst.home_nest_id)} onSaved={() => state.setPreviews(() => ({}))} />
+      )}
       {err && <Note tone="bad">{err}</Note>}
       {channels === null ? (
         <div className="py-8 text-center text-sm text-muted-foreground">Loading channels…</div>

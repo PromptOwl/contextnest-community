@@ -1053,6 +1053,34 @@ describe("po-1432: the preview names who blocks a pair and who can't read the ne
     expect(absent[hank.email]).toMatchObject({ user_id: hank.userId, reason: "not_linked", match_reason: "unverified" });
   });
 
+  it("shared server: a same-email reader is refused as org_domain until the connection's home nest lists the domain", async () => {
+    const { profile } = await import("./surfaces-fake-connector.js");
+    const ivy = { userId: randomUUID(), email: "ivy@surf.test" };
+    await S.db
+      .getDb()
+      .run("INSERT INTO users (id, email, name, password_hash, email_verified_at) VALUES (?, ?, 'Ivy', 'x', ?)", [ivy.userId, ivy.email, new Date().toISOString()]);
+    fake.profiles.set("SIVY", profile("SIVY", { display_name: "Ivy", email: ivy.email }));
+    const n = await newNest(alice);
+    expect((await jsonRequest(app, "POST", `/nests/${n}/collaborators`, { email: ivy.email, permission: "read" }, alice.apiKey)).status).toBeLessThan(300);
+    setConv("C-SHARED", ["SA", "SIVY"]);
+    const home = (await S.db.getDb().get("SELECT home_nest_id FROM surface_installs WHERE id = ?", [installId])) as { home_nest_id: string | null };
+    const before = process.env.SHARED_DEPLOYMENT;
+    process.env.SHARED_DEPLOYMENT = "true";
+    await S.db.getDb().run("UPDATE surface_installs SET home_nest_id = ? WHERE id = ?", [n, installId]);
+    try {
+      const find = async () => (await preview("C-SHARED", n)).people.absent_readers.find((a: any) => a.email === ivy.email);
+      expect(await find()).toMatchObject({ reason: "not_linked", match_reason: "org_domain" });
+      // The setting an admin saves in Setup; the nest stays private.
+      const saved = await jsonRequest(app, "PATCH", `/nests/${n}/settings`, { org_domains: ["surf.test"] }, alice.apiKey);
+      expect(saved.status, JSON.stringify(saved.data)).toBe(200);
+      expect(await find()).toBeUndefined();
+    } finally {
+      if (before === undefined) delete process.env.SHARED_DEPLOYMENT;
+      else process.env.SHARED_DEPLOYMENT = before;
+      await S.db.getDb().run("UPDATE surface_installs SET home_nest_id = ? WHERE id = ?", [home.home_nest_id, installId]);
+    }
+  });
+
   it("AC 6: a world-readable nest names its cause", async () => {
     const pub = await newNest(alice);
     await jsonRequest(app, "PATCH", `/nests/${pub}/visibility`, { visibility: "public", acknowledge_public: true }, alice.apiKey);

@@ -5590,6 +5590,8 @@ export interface SurfacesStatus {
   bindings: { total: number; active: number; paused_guard: number; paused_by_member: number; removed: number };
   org_name: string | null;
   slack_hosted: boolean;
+  /** This server hosts several organizations. */
+  shared_deployment?: boolean;
   disclosure: string;
   /** po-1444: server admins only. What Slack setup needs from this server. */
   readiness?: {

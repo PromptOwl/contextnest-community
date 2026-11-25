@@ -161,6 +161,9 @@ type Member = NonNullable<SurfacesBindingPreview["people"]>["members_not_readers
 const MATCH_REASON: Record<string, string> = {
   unverified: "their email here is not verified",
   domain: "their email domain is not on this server's sign-in list",
+  org_domain: "this server hosts several organizations, and their email domain is not on this Slack connection's list. Add it under Email domains",
+  no_match: "no account here has the email Slack has for them",
+  no_profile: "Slack did not return their profile. Check again in a minute",
   ambiguous: "their account is already linked to another Slack user, or more than one account has this email",
   email_unconfirmed: "Slack has not confirmed their email",
   home_team: "their Slack user is from another workspace",
@@ -178,7 +181,7 @@ function absentGroups(absent: AbsentReader[], members: Member[], ch: string): Pe
   const notLinked = absent.filter((r) => r.reason === "not_linked");
   add(
     `In ${ch} with the same email, but not linked to their account:`,
-    notLinked.map((r) => `${r.name ?? r.email ?? "Someone"}: ${MATCH_REASON[r.match_reason ?? ""] ?? "the link could not be made"}`),
+    notLinked.map((r) => `${r.name ?? r.email ?? "Someone"}: ${r.match_reason ? (MATCH_REASON[r.match_reason] ?? `the link could not be made (${r.match_reason})`) : "they match now. Check again"}`),
   );
   // Those members are explained above; don't list them again as unmatched.
   const linkedEmails = new Set(notLinked.map((r) => (r.email ?? "").toLowerCase()));
