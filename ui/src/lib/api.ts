@@ -5601,6 +5601,18 @@ export interface SurfacesStatus {
   };
 }
 
+export interface SurfacesJudgeTuning {
+  name: string | null;
+  avatar: string | null;
+  folders: string[] | null;
+  max_turns: number | null;
+  max_items: number | null;
+  model: string | null;
+  max_output_tokens: number | null;
+  temperature: number | null;
+  timeout_seconds: number | null;
+}
+
 export interface SurfacesBinding {
   id: string;
   install_id: string;
@@ -5610,6 +5622,11 @@ export interface SurfacesBinding {
   status: "active" | "paused_guard" | "paused_by_member" | "removed";
   /** A nest admin paused it on purpose (po-1437). */
   paused_by_admin?: boolean;
+  listener_agent_node_id?: string | null;
+  /** The listener's own settings; null = the default. */
+  judge?: SurfacesJudgeTuning;
+  /** The folders its starter gave it: what `judge.folders` may narrow. */
+  listener_folders?: string[];
   [k: string]: unknown;
 }
 
@@ -5723,6 +5740,8 @@ const bindingAction = (id: string, action: "pause" | "resume", reason: string) =
   request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}/${action}`, surfacesJson({ reason }));
 export const pauseSurfacesBinding = (id: string, reason: string) => bindingAction(id, "pause", reason);
 export const resumeSurfacesBinding = (id: string, reason: string) => bindingAction(id, "resume", reason);
+export const updateSurfacesListener = (bindingId: string, judge: SurfacesJudgeTuning) =>
+  request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(bindingId)}`, { method: "PATCH", body: JSON.stringify({ judge }) });
 /** `movedToNestId`: the nest the channel is moving to; the server looks up its name for the history. */
 export const removeSurfacesBinding = (id: string, reason: string, movedToNestId?: string) =>
   request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}`, {

@@ -58,6 +58,7 @@ import { guardKey } from "./window-guard-key.js";
 import { buildWindowGuard } from "./edit-guard.js";
 import { getConnector } from "../registry.js";
 import { describeJudgeFailure, judgeFailureLogLine, judgeFailureText, JudgeRunError, type JudgeFailure, type JudgeStage, type JudgeUsage } from "./judge-failure.js";
+import { DEFAULT_TIMEOUT_SECONDS, readJudgeTuning } from "./judge-tuning.js";
 
 export { JudgeRunError } from "./judge-failure.js";
 
@@ -404,7 +405,17 @@ const charsOf = (v: unknown) => Buffer.byteLength(typeof v === "string" ? v : JS
  * capped and budgeted, and the next turn's input projected BEFORE it is sent
  * so cumulative input never exceeds what was reserved.
  */
-async function runJudge(ctx: ToolContext, model: string, credential: any, system: string, user: string, folders: string[]): Promise<RunResult> {
+async function runJudge(
+  ctx: ToolContext,
+  model: string,
+  credential: any,
+  system: string,
+  user: string,
+  folders: string[],
+  maxOutput: number,
+  temperature: number,
+  maxTurns: number,
+): Promise<RunResult> {
   let stop = "turn_limit";
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: user }];
   const usage: Usage4 = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -413,10 +424,10 @@ async function runJudge(ctx: ToolContext, model: string, credential: any, system
   let convChars = charsOf(user);
   let readChars = 0;
   try {
-    for (let turn = 0; turn < MAX_TURNS; turn++) {
+    for (let turn = 0; turn < maxTurns; turn++) {
       const projected = Math.ceil((fixedChars + convChars) / CHARS_PER_TOKEN);
       const spentIn = usage.input + usage.cacheRead + usage.cacheWrite;
-      if (usage.output >= MAX_OUTPUT_TOKENS) {
+      if (usage.output >= maxOutput) {
         stop = "max_tokens";
         break;
       }
@@ -426,7 +437,7 @@ async function runJudge(ctx: ToolContext, model: string, credential: any, system
       }
       const res = await createTurn({
         credential,
-        request: { model, system, messages, tools, max_tokens: Math.max(256, MAX_OUTPUT_TOKENS - usage.output), temperature: 0 } as any,
+        request: { model, system, messages, tools, max_tokens: Math.max(256, maxOutput - usage.output), temperature } as any,
         signal: ctx.signal,
       });
       usage.input += res.usage?.input_tokens ?? 0;
@@ -567,7 +578,10 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
     await end({ status: "judged", verdict: "error", reason_code: "no_model" });
     return;
   }
-  const model = await resolveGatewayModel(credential, config.SURFACES_JUDGE_MODEL || listener.config.model || hootieModel(credential));
+  // The listener's own settings come first, then the server's judge model.
+  const tuning = readJudgeTuning(listener.config);
+  const maxOutput = tuning.max_output_tokens ?? MAX_OUTPUT_TOKENS;
+  const model = await resolveGatewayModel(credential, tuning.model || config.SURFACES_JUDGE_MODEL || hootieModel(credential));
   progress.model = model;
   progress.stage = "nest";
   const nv = await nestView(binding.nest_id, owner.userId, { folders, thesisNodeId });
@@ -583,7 +597,7 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
   const view: JudgeWindowView = { ...baseView, forced };
   const settings = await getSettings();
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(new Error("timeout")), 120_000);
+  const timer = setTimeout(() => ac.abort(new Error("timeout")), (tuning.timeout_seconds ?? DEFAULT_TIMEOUT_SECONDS) * 1000);
   const ctx: ToolContext = {
     nestId: binding.nest_id,
     runId: "",
@@ -631,7 +645,7 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
   let failure: JudgeFailure | null = null;
   try {
     for (let attempt = 0; attempt < (forced ? 2 : 1) && !verdict; attempt++) {
-      const estimate = reservationMicros(model);
+      const estimate = reservationMicros(model, maxOutput);
       if (!(await reserve(binding.nest_id, estimate, forced, nowMs))) {
         await end({ status: "judged", verdict: "budget_exhausted", reason_code: null, model, cost_micros: cost });
         return;
@@ -639,7 +653,7 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
       let run: RunResult;
       progress.stage = "model";
       try {
-        run = await runJudge(ctx, model, credential, SYSTEM(nv.nestName, folders, { neverPropose, domainTags }), user, folders);
+        run = await runJudge(ctx, model, credential, SYSTEM(nv.nestName, folders, { neverPropose, domainTags }), user, folders, maxOutput, tuning.temperature ?? 0, tuning.max_turns ?? MAX_TURNS);
       } catch (err) {
         // Settle what was actually spent, never 0 (round 2, L1).
         const u = err instanceof JudgeRunError ? err.usage : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -666,7 +680,7 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
       if (v.ok) verdict = v.verdict;
       else {
         failure = unusable(run, v.error);
-        console.error(judgeFailureLogLine(w.id, failure, { attempt: attempt + 1, max_output_tokens: MAX_OUTPUT_TOKENS, ...runFacts(w, progress) }));
+        console.error(judgeFailureLogLine(w.id, failure, { attempt: attempt + 1, max_output_tokens: maxOutput, ...runFacts(w, progress) }));
       }
       progress.stage = "setup";
     }
@@ -726,6 +740,11 @@ async function judgeClaimed(w: WindowRow, token: string, nowMs: number, progress
     });
     if (r.pass) passing.push({ item, heldOn: r.previously_held_on ?? (dup && forced ? (dup.held_on ?? iso(nowMs).slice(0, 10)) : null) });
     else blocked[r.reason] = (blocked[r.reason] ?? 0) + 1;
+  }
+  // The listener's own limit on suggestions per run: the most confident ones stay.
+  if (tuning.max_items && passing.length > tuning.max_items) {
+    passing.sort((a, b) => b.item.confidence - a.item.confidence);
+    blocked.over_limit = passing.splice(tuning.max_items).length;
   }
   if (!passing.length) {
     // Only refused targets: nothing worth keeping here (a no-op verdict).

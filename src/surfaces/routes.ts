@@ -50,7 +50,7 @@ import { listInstalls } from "./services/install-store.js";
 import { bufferKeyConfigured } from "./services/buffer-crypto.js";
 import { publicUrlProblem, slackUrls } from "./adapters/slack/manifest.js";
 import { resolveModelCredential } from "../shared/model-credential.js";
-import { createBindingWithListener } from "./services/listener-service.js";
+import { createBindingWithListener, setListenerJudge } from "./services/listener-service.js";
 
 type C = Context<AuthEnv>;
 
@@ -223,6 +223,11 @@ surfacesRoutes.patch("/bindings/:id", async (c) => {
     await scopedRow(c, c.req.param("id"));
     const b = await readBody(c);
     refuseListener(b);
+    // The listener's model settings are saved on their own: the guard has nothing to re-check.
+    if (b.judge !== undefined) {
+      if (Object.keys(b).length > 1) throw new UnprocessableError("Send judge on its own.");
+      return c.json(await setListenerJudge(c.req.param("id"), c.get("userId"), b.judge));
+    }
     return c.json(
       await updateBinding(c.req.param("id"), c.get("userId"), {
         explicitPublicBind: bool(b.explicit_public_bind, "explicit_public_bind"),

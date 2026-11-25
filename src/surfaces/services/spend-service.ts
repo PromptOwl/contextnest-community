@@ -36,8 +36,8 @@ export function costMicros(model: string, input: number, output: number, cacheRe
   return Math.round(((input + cacheRead + cacheWrite) * FALLBACK.input + output * FALLBACK.output));
 }
 
-export function reservationMicros(model: string): number {
-  return costMicros(model, MAX_INPUT_TOKENS, MAX_OUTPUT_TOKENS);
+export function reservationMicros(model: string, maxOutputTokens: number = MAX_OUTPUT_TOKENS): number {
+  return costMicros(model, MAX_INPUT_TOKENS, maxOutputTokens);
 }
 
 async function ensureRow(nestId: string, month: string): Promise<void> {

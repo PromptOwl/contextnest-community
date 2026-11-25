@@ -8,6 +8,8 @@
  * on every binding (§12 R1).
  */
 import { v4 as uuid } from "uuid";
+import { readJudgeTuning, starterFolders } from "./judge-tuning.js";
+import { getAgent } from "../../metacognition/store.js";
 import { getDb } from "../../db/client.js";
 import { config } from "../../config.js";
 import { AppError, ConflictError, ForbiddenError, NotFoundError } from "../../shared/errors.js";
@@ -119,7 +121,7 @@ export async function canAdministerNest(nestId: string, userId: string): Promise
   return permissionLevel(await resolveNestPermission(nestId, userId)) >= permissionLevel("admin");
 }
 
-async function assertNestAdmin(nestId: string, userId: string): Promise<void> {
+export async function assertNestAdmin(nestId: string, userId: string): Promise<void> {
   if (!(await canAdministerNest(nestId, userId))) {
     throw new ForbiddenError("Only an owner or admin of this nest can manage its conversation bindings.");
   }
@@ -241,6 +243,7 @@ export async function bindingView(row: BindingRow) {
   } catch {
     detail = {};
   }
+  const listener = row.listener_agent_node_id ? await getAgent(row.nest_id, row.listener_agent_node_id) : null;
   return {
     id: row.id,
     install_id: row.install_id,
@@ -251,6 +254,8 @@ export async function bindingView(row: BindingRow) {
     is_general: !!row.is_general,
     dm_owner_user_id: row.dm_owner_user_id,
     listener_agent_node_id: row.listener_agent_node_id,
+    judge: readJudgeTuning(listener?.config),
+    listener_folders: starterFolders(listener?.config),
     explicit_public_bind: !!row.explicit_public_bind,
     is_ext_shared: !!row.is_ext_shared,
     ext_capture_enabled: !!row.ext_capture_enabled,

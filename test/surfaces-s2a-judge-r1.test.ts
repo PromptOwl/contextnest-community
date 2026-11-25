@@ -923,7 +923,7 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
   });
 
   /** Bind a channel and judge one window with the given model answer. */
-  async function judgeOnce(channel: string, answer: (req: any) => any) {
+  async function judgeOnce(channel: string, answer: (req: any) => any, judge?: Record<string, unknown>) {
     setChannel(channel, ["U_ALICE", "U_BOB", "UBOT"]);
     const b = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: channel, nest_id: F }, alice.apiKey);
     expect(b.status, JSON.stringify(b.data)).toBe(201);
@@ -931,6 +931,7 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     modelImpl = () => submit(noop());
     await tick(30); // flush other open windows first
     await S.listener.setListenerFolders(id, ["/", "inbox/"]);
+    if (judge) expect((await jsonRequest(app, "PATCH", `/surfaces/bindings/${id}`, { judge }, alice.apiKey)).status).toBe(200);
     const logged: string[] = [];
     const spy = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => void logged.push(a.map(String).join(" ")));
     const calls = modelCalls.length;
@@ -991,6 +992,73 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     expect(lines[0]).toMatch(/attempt=1 .*detail="Unsupported parameter/);
     expect(lines[1]).toMatch(/attempt=2/);
     expect(JSON.stringify([run, lines])).not.toMatch(/PLATYPUS|abcdefghijklmnop/);
+  });
+
+  it("EX-8, EX-12: saved settings reach the model call and the reservation, and the folders and the tie stay", async () => {
+    const judge = { model: "openai/gpt-5", max_output_tokens: 4000, temperature: 0.5, timeout_seconds: 200 };
+    const reserved: number[] = [];
+    const r = await judgeOnce("C425", (req) => {
+      reserved.push(req.max_tokens);
+      return submit(noop());
+    }, judge);
+    expect(r.calls[0]).toMatchObject({ model: "openai/gpt-5", max_tokens: 4000, temperature: 0.5 });
+    expect(r.trace.model).toBe("openai/gpt-5");
+    expect(S.spend.reservationMicros("openai/gpt-5", 4000)).toBeGreaterThan(S.spend.reservationMicros("openai/gpt-5"));
+    const l = await S.listener.listenerFor(r.id);
+    expect(l).toBeTruthy();
+    expect(S.listener.listenerFolders(l!).folders).toEqual(["/", "inbox/"]);
+    const view = await jsonRequest(app, "GET", `/surfaces/bindings/${r.id}`, undefined, alice.apiKey);
+    expect(view.data.binding.judge).toMatchObject(judge);
+    // A seed re-applied later keeps them.
+    await S.listener.setListenerFolders(r.id, ["inbox/"]);
+    expect((await jsonRequest(app, "GET", `/surfaces/bindings/${r.id}`, undefined, alice.apiKey)).data.binding.judge).toMatchObject(judge);
+  });
+
+  it("EX-9..EX-11: blank keeps today's defaults; out of range, unknown or not an admin is refused and changes nothing; MCP parity", async () => {
+    const r = await judgeOnce("C426", () => submit(noop()));
+    expect(r.calls[0]).toMatchObject({ max_tokens: 1500, temperature: 0 });
+    const url = `/surfaces/bindings/${r.id}`;
+    for (const judge of [{ max_output_tokens: 9000 }, { max_output_tokens: 600.5 }, { temperature: 2 }, { timeout_seconds: 5 }, { model: "bad name!" }, { folders: ["x/"] }, { folders: [] }, { name: "<b>" }, { max_turns: 1 }, { max_items: 4 }, { enabled: true }, { feeds: [] }, "x"]) {
+      expect((await jsonRequest(app, "PATCH", url, { judge }, alice.apiKey)).status, JSON.stringify(judge)).toBe(422);
+    }
+    expect((await jsonRequest(app, "PATCH", url, { judge: { temperature: 1 }, explicit_public_bind: false }, alice.apiKey)).status).toBe(422);
+    expect((await jsonRequest(app, "PATCH", url, { judge: { temperature: 1 } }, bob.apiKey)).status).toBe(403);
+    const unset = { name: null, avatar: null, folders: null, max_turns: null, max_items: null, model: null, max_output_tokens: null, temperature: null, timeout_seconds: null };
+    expect((await jsonRequest(app, "GET", url, undefined, alice.apiKey)).data.binding.judge).toEqual(unset);
+    const mcp = await app.request(`/nests/${F}/mcp`, {
+      method: "POST",
+      headers: { ...MCP_HEADERS, Authorization: `Bearer ${alice.apiKey}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "context_surfaces_binding_update", arguments: { binding_id: r.id, judge: { max_output_tokens: 2000 } } } }),
+    });
+    expect(mcp.status).toBe(200);
+    expect((await jsonRequest(app, "GET", url, undefined, alice.apiKey)).data.binding.judge).toEqual({ ...unset, max_output_tokens: 2000 });
+    expect((await jsonRequest(app, "PATCH", url, { judge: { max_output_tokens: null } }, alice.apiKey)).data.binding.judge).toEqual(unset);
+  });
+
+  it("EX-13, EX-14: name, folders, steps and suggestions per run take effect, and the listener stays tied", async () => {
+    const r = await judgeOnce("C427", (req) => {
+      const one = propose(req, { title: "Cutover moves to Friday", target_folder: "inbox/", confidence: 0.8 });
+      const item = one.content[0].input.items[0];
+      one.content[0].input.items = [item, { ...item, title: "Billing uses annual plans", summary: "Plans are billed yearly.", body: "Plans are billed yearly.", confidence: 0.95 }];
+      return one;
+    }, { name: "General ears", avatar: "🦉", folders: ["inbox/"], max_turns: 2, max_items: 1 });
+    const l = (await S.listener.listenerFor(r.id))!;
+    expect(l).toBeTruthy();
+    expect(l.persona.name).toBe("General ears");
+    expect(S.listener.listenerFolders(l).folders).toEqual(["inbox/"]);
+    expect(r.calls[0].system).toContain('target_folder must be one of: "inbox/"');
+    expect(JSON.parse(r.w.blocked)).toEqual({ over_limit: 1 });
+    expect(r.w.item_count).toBe(1);
+
+    // Two steps: a third turn is never asked for.
+    const loop = await judgeOnce("C428", () => ({ content: [{ type: "tool_use", id: `t${Math.random()}`, name: "list_nodes", input: { folder: "inbox" } }], stop_reason: "tool_use", usage: { input_tokens: 10, output_tokens: 10 } }), { max_turns: 2 });
+    expect(loop.calls).toHaveLength(2);
+    expect(loop.run).toMatchObject({ status: "failed", reason_code: "no_verdict" });
+    expect(loop.trace.error).toMatch(/stop: turn_limit/);
+
+    // A folder the starter drops later is not brought back by the choice.
+    await S.listener.setListenerFolders(r.id, ["/"]);
+    expect(S.listener.listenerFolders((await S.listener.listenerFor(r.id))!).folders).toEqual([]);
   });
 
   it("a rate limit (429) and a timeout end as model_rate_limited and model_timeout", async () => {

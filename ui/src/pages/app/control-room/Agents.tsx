@@ -16,6 +16,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { getRollups, registerAgent } from "../../../lib/api";
+import { ListenerSettings } from "./ListenerSettings";
 import { SOURCE_LABEL, SOURCE_TEXT, agentRows, fmtWhen, usd, type AgentRow } from "../../../lib/control-room-overview";
 import { AgentIcon, Card, CardHead, EmptyState, ErrorLine, Loading, Mono, ToneBadge } from "./parts";
 import { useRead, type ControlRoomScope } from "./scope";
@@ -110,6 +111,7 @@ function AgentList({
                     <span className="hidden min-[801px]:inline">{SOURCE_TEXT[a.source] ?? "Reports to the ledger."}</span>
                     {showNest && a.nestId && knownNest(a.nestId) && <span> · {nestName(a.nestId)}</span>}
                   </div>
+                  {a.source === "surfaces" && <ListenerSettings nodeId={a.nodeId} nestId={a.nestId} />}
                 </div>
               </div>
               <div className="hidden min-[801px]:block">
