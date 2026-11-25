@@ -2875,7 +2875,7 @@ What a run produced links back to it: the review request a `proposal` step filed
 - `GET /nests/:nestId/hooks?agent=` (read) — list, tokens masked.
 - `POST /nests/:nestId/hooks` (write) — Body: `{ agent_node, preset }` with `preset` = `slack` | `teams` | `webhook`. Returns the secret URL once.
 - `DELETE /nests/:nestId/hooks/:id` (write) — accepts the full token or the masked id.
-- `POST /hooks/:token` (public — the token is the auth) — fire it. The Slack and Teams presets verify the request signature against `SLACK_SIGNING_SECRET` / `TEAMS_WEBHOOK_SECRET` in the nest's env store; the message text becomes the run's `inputs`. `404` while the nest is archived.
+- `POST /hooks/:token` (public — the token is the auth) — fire it. The Slack and Teams presets require a valid request signature for `SLACK_SIGNING_SECRET` / `TEAMS_WEBHOOK_SECRET` in the nest's env store: `401` when the secret is not set, or the signature is missing, wrong or (Slack) more than 5 minutes old, Slack's `url_verification` included. The message text becomes the run's `inputs`. `404` while the nest is archived.
 
 ### Env — per-nest secrets for tools and the runner
 
