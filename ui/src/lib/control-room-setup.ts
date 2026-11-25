@@ -306,6 +306,44 @@ export function hostedSlackUrls(baseUrl: string | null | undefined): { redirect:
   };
 }
 
+/** What the hosted Slack app must ask for. Same lists as the server's manifest (BOT_SCOPES, BOT_EVENTS). */
+export const SLACK_BOT_SCOPES: readonly string[] = [
+  "channels:history",
+  "groups:history",
+  "im:history",
+  "channels:read",
+  "groups:read",
+  "im:read",
+  "im:write",
+  "reactions:read",
+  "users:read",
+  "users:read.email",
+  "chat:write",
+  "app_mentions:read",
+  "commands",
+];
+export const SLACK_BOT_EVENTS: readonly string[] = [
+  "message.channels",
+  "message.groups",
+  "message.im",
+  "app_mention",
+  "reaction_added",
+  "member_joined_channel",
+  "member_left_channel",
+  "channel_left",
+  "group_left",
+  "channel_shared",
+  "channel_unshared",
+  "channel_archive",
+  "group_archive",
+  "channel_deleted",
+  "group_deleted",
+  "user_change",
+  "app_home_opened",
+  "app_uninstalled",
+  "tokens_revoked",
+];
+
 // ─── Channel activity (po-1446) ────────────────────────────────────────────
 
 /** Why the gate skipped a message, in plain words. Unknown codes are de-snake-cased. */
@@ -340,7 +378,11 @@ export function activityLines(a: SurfacesBindingActivity, quietMinutes: number):
   );
   const c = a.cards;
   lines.push(`${n(c.posted, "card")} posted${c.queued ? ` · ${c.queued} queued for tomorrow (daily limit)` : ""}${c.held ? ` · ${c.held} held (no eligible reviewer in the channel)` : ""}`);
-  if (!a.received) lines.push("Nothing arrived. Check that Nest is in the channel and the message buffer key is set.");
+  // A missing buffer key shows as skipped messages, so nothing at all means Slack's events don't get here.
+  if (!a.received)
+    lines.push(
+      "Nothing arrived from Slack. At api.slack.com/apps → your app → Event Subscriptions, check that the Request URL is verified and the bot events include message.channels (public channels) and message.groups (private channels), then reinstall the app. Also check that the app is in this channel and its signing secret is the one saved here.",
+    );
   return lines;
 }
 

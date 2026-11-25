@@ -60,7 +60,7 @@ import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
 import { NetworkStatusPanel } from "./NetworkStatusPanel";
 import { toast } from "sonner";
-import { generateBufferKey, hostedSlackUrls } from "../../../lib/control-room-setup";
+import { generateBufferKey, hostedSlackUrls, SLACK_BOT_EVENTS, SLACK_BOT_SCOPES } from "../../../lib/control-room-setup";
 
 interface SettingsPageProps {
   settings: AdminSettings | null;
@@ -494,6 +494,15 @@ function HostedSlackGuide({ baseUrl }: { baseUrl: string | null | undefined }) {
       </div>
     </li>
   );
+  const names = (where: string, list: readonly string[], testId: string) => (
+    <li>
+      {where}
+      <div className="mt-1 flex min-w-0 items-start gap-2" data-testid={testId}>
+        <code className="min-w-0 rounded bg-muted px-1.5 py-0.5 text-xs [overflow-wrap:anywhere]">{list.join(", ")}</code>
+        <CopyButton text={list.join("\n")} toastMessage="Copied" />
+      </div>
+    </li>
+  );
   return (
     <details className="rounded-md border px-3 py-2 text-sm" data-testid="hosted-slack-guide">
       <summary className="cursor-pointer font-medium">Where do I find these?</summary>
@@ -509,9 +518,12 @@ function HostedSlackGuide({ baseUrl }: { baseUrl: string | null | undefined }) {
         {urls ? (
           <>
             {row("In OAuth & Permissions → Redirect URLs, add:", urls.redirect)}
+            {names("In OAuth & Permissions → Bot Token Scopes, add:", SLACK_BOT_SCOPES, "hosted-slack-scopes")}
             {row("In Event Subscriptions, turn events on and set the Request URL to:", urls.events)}
+            {names("On the same page, under Subscribe to bot events, add these (message.groups is what private channels need):", SLACK_BOT_EVENTS, "hosted-slack-events")}
             {row("In Interactivity & Shortcuts, turn interactivity on and set the Request URL to:", urls.interactions)}
-            {row("In Slash Commands, create /nest with the Request URL:", urls.commands)}
+            {row("In Slash Commands, create /nest (or another name, if an app in this workspace already uses it) with the Request URL:", urls.commands)}
+            <li>After changing scopes or events on an app that is already installed, use Install App → Reinstall to Workspace.</li>
           </>
         ) : (
           <li className="text-red-800">Set Public base URL in the Basic tab first. The Slack app's URLs are built from it.</li>

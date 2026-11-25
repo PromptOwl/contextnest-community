@@ -6,7 +6,8 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { randomBytes } from "crypto";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest, resetAuthRateLimit } from "./helpers.js";
-import { publicUrlProblem, PUBLIC_URL_SETTING } from "../src/surfaces/adapters/slack/manifest.js";
+import { BOT_EVENTS, BOT_SCOPES, publicUrlProblem, PUBLIC_URL_SETTING } from "../src/surfaces/adapters/slack/manifest.js";
+import { SLACK_BOT_EVENTS, SLACK_BOT_SCOPES } from "../ui/src/lib/control-room-setup.js";
 
 const BASE = "https://nest.ready.test";
 let env: { cleanup: () => Promise<void> };
@@ -203,5 +204,12 @@ describe("hosted OAuth start by a server admin", () => {
     } finally {
       for (const k of Object.keys(HOSTED)) delete process.env[k];
     }
+  });
+});
+
+describe("the hosted Slack guide (Server settings → Surfaces)", () => {
+  it("lists exactly the scopes and events the manifest asks for", () => {
+    expect(SLACK_BOT_SCOPES).toEqual(BOT_SCOPES);
+    expect(SLACK_BOT_EVENTS).toEqual(BOT_EVENTS);
   });
 });

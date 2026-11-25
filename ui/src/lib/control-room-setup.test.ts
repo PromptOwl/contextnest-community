@@ -420,7 +420,9 @@ describe("po-1446: channel activity in plain words", () => {
     const { activityLines } = await import("./control-room-setup");
     const lines = activityLines(base, 20);
     expect(lines).toContain("No thread judged yet.");
-    expect(lines[lines.length - 1]).toMatch(/Nothing arrived/);
+    expect(lines[lines.length - 1]).toMatch(/Nothing arrived from Slack.*message\.groups.*reinstall/);
+    expect(lines[lines.length - 1]).not.toMatch(/buffer key/);
+    expect(activityLines({ ...base, received: 1, skipped: { too_short: 1 } }, 20).join(" ")).not.toMatch(/Nothing arrived/);
   });
 });
 
