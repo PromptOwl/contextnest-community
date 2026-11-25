@@ -557,13 +557,14 @@ describe("SEC-C6-01: message bodies are untrusted data to the watcher", () => {
     const apiError = (status: number, message: string) => Object.assign(new Error(message), { status });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      for (const [status, code, label] of [
-        [400, "model_rejected", "The model refused the request"],
-        [402, "model_billing", "The model account is out of credit"],
-        [401, "model_auth", "The model key was refused"],
+      for (const [status, code, label, says] of [
+        [400, "model_rejected", "The model refused the request", "roles must alternate"],
+        [400, "model_unavailable", "This model isn't available to the model key", "invalid model gpt-4"],
+        [402, "model_billing", "The model account is out of credit", "payment required"],
+        [401, "model_auth", "The model key was refused", "invalid key"],
       ] as const) {
-        await open(alice, `Another message long enough to pass the short-batch rule: the release train moved to Tuesdays at 10:00 after the ${status} retro, and the change board signed it off.`);
-        script = [() => { throw apiError(status, "secret-sk-abc123 invalid model gpt-4"); }];
+        await open(alice, `Another message long enough to pass the short-batch rule: the release train moved to Tuesdays at 10:00 after the ${code} retro, and the change board signed it off.`);
+        script = [() => { throw apiError(status, `secret-sk-abc123 ${says}`); }];
         const ran = await runWatch(owner);
         expect(ran.status, JSON.stringify(ran.data)).toBe(200);
         expect(ran.data.result.run_id, JSON.stringify(ran.data)).toBeTruthy();
