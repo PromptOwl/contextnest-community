@@ -308,7 +308,8 @@ meChatRoutes.put("/preferences", async (c) => {
 /** What the agents that write under my login have said (One chat 8). */
 meChatRoutes.get("/agents", async (c) => {
   const userId = c.get("userId");
-  if (!tryConsume(`chat-unread:${userId}`, UNREAD_BUDGET)) {
+  // Its own bucket: reading this list must not use up the unread badge's reads.
+  if (!tryConsume(`chat-agents:${userId}`, UNREAD_BUDGET)) {
     return c.json({ error: "Too many reads — every 30 s is plenty." }, 429, { "Retry-After": "10" });
   }
   return c.json(await myAgents({ userId, email: await resolveCallerEmail(userId) }));

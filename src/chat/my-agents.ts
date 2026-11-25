@@ -45,7 +45,30 @@ export interface MyAgents {
   threads: MyAgentThread[];
 }
 
-export async function myAgents(params: { userId: string; email: string }): Promise<MyAgents> {
+/** Served from memory this long per person, as the unread summary is: every
+ *  open tab polls it. Short, so a reply shows soon and lost access goes soon. */
+const CACHE_MS = 10_000;
+const cache = new Map<string, { at: number; value: Promise<MyAgents> }>();
+
+/** Tests only. */
+export function _resetMyAgentsCache(): void {
+  cache.clear();
+}
+
+export function myAgents(params: { userId: string; email: string }): Promise<MyAgents> {
+  const hit = cache.get(params.userId);
+  if (hit && hit.at > Date.now() - CACHE_MS) return hit.value;
+  if (cache.size > 2000) for (const [k, v] of cache) if (v.at <= Date.now() - CACHE_MS) cache.delete(k);
+  // Joined by concurrent polls; a failed build is not kept.
+  const value = build(params).catch((err) => {
+    cache.delete(params.userId);
+    throw err;
+  });
+  cache.set(params.userId, { at: Date.now(), value });
+  return value;
+}
+
+async function build(params: { userId: string; email: string }): Promise<MyAgents> {
   const out: MyAgents = { agents: [], threads: [] };
   if (!config.TEAM_CHAT_ENABLED) return out;
   const { userId } = params;
@@ -113,11 +136,13 @@ export async function myAgents(params: { userId: string; email: string }): Promi
   if (list.length > 0) {
     // The last message of each thread: answered when it is not my agent's.
     const last = (await getDb().all(
-      `SELECT c.thread_id, c.author, c.client_json, c.created_at FROM annotation_comments c
-        WHERE c.deleted_at IS NULL AND c.thread_id IN (${list.map(() => "?").join(", ")})
-        ORDER BY c.created_at ASC`,
+      `SELECT c.thread_id, c.author, c.client_json FROM annotation_comments c
+        JOIN (SELECT thread_id, MAX(created_at) AS at FROM annotation_comments
+               WHERE deleted_at IS NULL AND thread_id IN (${list.map(() => "?").join(", ")}) GROUP BY thread_id) m
+          ON m.thread_id = c.thread_id AND m.at = c.created_at
+       WHERE c.deleted_at IS NULL`,
       list.map((t) => t.thread_id),
-    )) as Array<{ thread_id: string; author: string; client_json: string | null; created_at: string }>;
+    )) as Array<{ thread_id: string; author: string; client_json: string | null }>;
     for (const c of last) {
       const t = threads.get(c.thread_id);
       if (t) t.answered = !(c.author.toLowerCase() === email && writerHandlesOf(c.client_json).length > 0);

@@ -6,7 +6,10 @@ let env: ReturnType<typeof setupTestEnv>;
 let app: any, misha: any, ed: any, sal: any, nest: string;
 const post = (u: any, channel: string, body: string, agent?: string, thread?: string) =>
   jsonRequest(app, "POST", `/nests/${nest}/nodes/nodes/channels/${channel}/annotations${thread ? `/${thread}/comments` : ""}`, { body, ...(agent ? { client: { agent } } : {}) }, u.apiKey);
-const mine = async (u: any) => (await jsonRequest(app, "GET", "/me/chat/agents", undefined, u.apiKey)).data;
+const mine = async (u: any) => {
+  (await import("../src/chat/my-agents.js"))._resetMyAgentsCache();
+  return (await jsonRequest(app, "GET", "/me/chat/agents", undefined, u.apiKey)).data;
+};
 
 beforeAll(async () => {
   env = setupTestEnv();
@@ -62,7 +65,19 @@ describe("my agents", () => {
     expect((await jsonRequest(app, "DELETE", `/nests/${nest}/collaborators/${row.id}`, undefined, misha.apiKey)).status).toBeLessThan(300);
     const left = await mine(ed);
     const still = await jsonRequest(app, "GET", `/nests/${nest}/channels`, undefined, ed.apiKey);
-    if (still.status >= 400) expect(left.threads).toEqual([]);
     expect(still.status).toBeGreaterThanOrEqual(400);
+    expect(left).toEqual({ agents: [], threads: [] });
+  });
+  it("EX-1 a document comment by my agent is listed as one", async () => {
+    const doc = (await jsonRequest(app, "POST", `/nests/${nest}/nodes`, { title: "Event", content: "x" }, misha.apiKey)).data.node.id;
+    await jsonRequest(app, "POST", `/nests/${nest}/nodes/${doc}/annotations`, { body: "owner?", client: { agent: "claude" } }, misha.apiKey);
+    expect((await mine(misha)).threads.find((t: any) => t.node_id === doc)).toMatchObject({ kind: "document", channel: null });
+  });
+  it("is empty while team chat is off", async () => {
+    process.env.TEAM_CHAT_ENABLED = "false";
+    const off = await jsonRequest(app, "GET", "/me/chat/agents", undefined, misha.apiKey);
+    process.env.TEAM_CHAT_ENABLED = "true";
+    if (off.status < 400) expect(off.data.threads).toEqual([]);
+    expect(JSON.stringify(off.data)).not.toContain("Tiers conflict");
   });
 });
