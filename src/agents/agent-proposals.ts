@@ -28,7 +28,7 @@ import { randomBytes } from "node:crypto";
 import { getDb } from "../db/client.js";
 import { addComment, syncAnnotationsNode } from "../annotations/service.js";
 import { createNode } from "../nodes/service.js";
-import { submitForReview } from "../governance/review-service.js";
+import { cancelReview, submitForReview } from "../governance/review-service.js";
 import { canCreateInNest } from "../governance/stewardship-service.js";
 import { serializeClient, type ClientMetadata } from "../shared/client-metadata.js";
 import { ConflictError, ForbiddenError, ValidationError } from "../shared/errors.js";
@@ -58,7 +58,8 @@ export interface AgentProposalView {
   /** The card message. */
   message_id: string;
   /** The agent handle that filed it: the one the decision wakes. Null when
-   *  the caller declared no agent (a person's card wakes nobody). */
+   *  the caller is not proven to be that agent (provenHandle): then it wakes
+   *  nobody. */
   proposed_by: string | null;
   thread_id: string;
   channel: string | null;
@@ -81,6 +82,35 @@ export function proposerHandle(client: ClientMetadata | undefined): string | nul
   const c = (client ?? {}) as Record<string, unknown>;
   const h = normHandle(c.agent) || normHandle(c.key_label);
   return h && !isReservedHandle(h) && /^[a-z0-9][a-z0-9._-]{0,62}$/.test(h) ? h : null;
+}
+
+/**
+ * The handle the decision on this card wakes. A declared `client.agent` and a
+ * key's label are what the caller SAYS it is (anyone can label their own key),
+ * and the wake is a signed "a person approved your plan" that a runner acts
+ * on, so saying it is not enough: the handle counts only when this call came
+ * on that agent's own hired key, or from the login that set up its webhook.
+ * Anything else files the card and wakes nobody.
+ */
+export async function provenHandle(
+  caller: Pick<HandoffCaller, "nestId" | "userEmail" | "apiKeyId">,
+  client: ClientMetadata | undefined,
+): Promise<string | null> {
+  const handle = proposerHandle(client);
+  if (!handle) return null;
+  const db = getDb();
+  if (caller.apiKeyId) {
+    const hired = await db.get("SELECT 1 AS ok FROM hired_agents WHERE nest_id = ? AND kind = 'key' AND handle = ? AND ref = ?", [caller.nestId, handle, caller.apiKeyId]);
+    if (hired) return handle;
+  }
+  const hook = await db.get("SELECT 1 AS ok FROM agent_webhooks WHERE nest_id = ? AND handle = ? AND LOWER(created_by) = LOWER(?)", [caller.nestId, handle, caller.userEmail]);
+  return hook ? handle : null;
+}
+
+/** Tests only: runs after the review is filed and before its card is written. */
+let beforeCard: ((nodeId: string) => Promise<void>) | null = null;
+export function _setBeforeCard(fn: ((nodeId: string) => Promise<void>) | null): void {
+  beforeCard = fn;
 }
 
 export async function proposeInThread(
@@ -109,7 +139,7 @@ export async function proposeInThread(
   }
 
   const client = callerSafeClient(caller.client);
-  const proposedBy = proposerHandle(client);
+  const proposedBy = await provenHandle(caller, client);
   const channel = nodeId.split("/").pop() ?? null;
   const note = `Proposed${proposedBy ? ` by @${proposedBy}` : ""} in #${channel} for approval.`;
 
@@ -143,12 +173,15 @@ export async function proposeInThread(
   });
 
   const preview = previewOf(content);
+  let proposal: AgentProposalView;
+  try {
+  await beforeCard?.(created.node.id);
   // The card: model text, made inert like Hootie's (no live links, escaped).
   const body = inertAnswer(`Approval needed — ${title}\n\n${preview}`);
   const thread = await addComment(caller.nestId, nodeId, threadId, caller.userEmail, body, client);
   const messageId = justWritten(thread, caller.userEmail);
   if (!messageId) throw new Error("proposal card not written");
-  const proposal: AgentProposalView = {
+  proposal = {
     kind: "create_node",
     node_id: created.node.id,
     version: created.version,
@@ -167,14 +200,40 @@ export async function proposeInThread(
     serializeClient({ ...(client ?? {}), proposal } as unknown as ClientMetadata),
     messageId,
   ]);
+  } catch (err) {
+    // No card, so nobody can be asked from the thread: take the review back
+    // out of the queue rather than leave one that wakes nobody. The plan
+    // stays its author's draft.
+    await cancelReview({ nestId: caller.nestId, nodeId: created.node.id, cancelledBy: caller.userEmail }).catch((e) =>
+      console.error("[agent-proposals] could not withdraw a review without a card", caller.nestId, created.node.id, e),
+    );
+    throw err;
+  }
+  // The review was in the queue before its card existed. A decision that fell
+  // in between found no card and woke nobody; send its wake now (once: the
+  // delivery is keyed on the review and the handle).
+  await wakeIfAlreadyDecided(caller.nestId, created.node.id, review.id);
   await syncAnnotationsNode(caller.nestId, nodeId, caller.userEmail).catch(() => {});
   return { proposal };
+}
+
+async function wakeIfAlreadyDecided(nestId: string, nodeId: string, reviewId: string): Promise<void> {
+  try {
+    const row = (await getDb().get("SELECT status, resolved_by FROM review_requests WHERE id = ? AND nest_id = ?", [reviewId, nestId])) as
+      | { status: string; resolved_by: string | null }
+      | undefined;
+    if (!row || (row.status !== "approved" && row.status !== "rejected") || !row.resolved_by) return;
+    const { wakeOnProposalDecided } = await import("../stream/agent-wake.js");
+    await wakeOnProposalDecided({ nestId, nodeId, reviewId, status: row.status, decidedBy: row.resolved_by });
+  } catch (err) {
+    console.error("[agent-proposals] late decision wake failed", nestId, reviewId, err);
+  }
 }
 
 export function proposalCardText(p: AgentProposalView): string {
   return (
     `Approve card ${p.message_id} in #${p.channel} thread ${p.thread_id}: "${p.title}" — pending review ${p.review_id} of ${p.node_id} v${p.version}. ` +
     `A reviewer approves it with context_approve { title: "${p.title}" } or rejects it with context_reject (REST: POST …/nodes/${p.node_id}/approve | /reject); ` +
-    (p.proposed_by ? `the decision wakes @${p.proposed_by}.` : "no agent was declared, so the decision wakes nobody.")
+    (p.proposed_by ? `the decision wakes @${p.proposed_by}.` : "this call did not come from an agent's own key, so the decision wakes nobody.")
   );
 }

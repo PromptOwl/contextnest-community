@@ -84,7 +84,7 @@ agentRoutes.post("/threads/:threadId/propose", async (c) => {
   const who = await caller(c);
   const client = messageClient(attributeRequest(c, body.client), body.client, c.get("apiKeyLabel"));
   const { proposeInThread } = await import("./agent-proposals.js");
-  const result = await proposeInThread({ ...who, client }, c.req.param("threadId"), { title: body.title, content: body.content, folder: body.folder });
+  const result = await proposeInThread({ ...who, client, apiKeyId: c.get("apiKeyId") ?? null }, c.req.param("threadId"), { title: body.title, content: body.content, folder: body.folder });
   return c.json(result, 201);
 });
 

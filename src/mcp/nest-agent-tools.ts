@@ -87,7 +87,7 @@ export const NEST_AGENT_TOOL_DEFINITIONS = [
     description:
       "Put an approve card in front of your own work (an agent's gate): files `content` (your plan, markdown) as a draft titled `title`, submits it to the review queue under your login, " +
       "and posts a card in the channel thread `thread` that a writer approves (context_approve) or rejects (context_reject) — from the thread, on any device. " +
-      "Declare yourself (client.agent, your @handle): the decision then wakes you with an `agent.proposal.decided` webhook carrying the thread, so you continue only after a person decides. " +
+      "Call it on your own hired key (or as the login that set up your webhook) and declare client.agent, your @handle: the decision then wakes you with an `agent.proposal.decided` webhook carrying the thread, so you continue only after a person decides. " +
       "Nothing is published by this call. Members who can create in the nest only; title at most 200 characters, content at most 20,000; folder defaults to \"plans\".",
     inputSchema: {
       type: "object" as const,
@@ -159,7 +159,7 @@ export async function runNestAgentTool(toolName: string, args: Record<string, an
     }
     if (toolName === "context_propose") {
       if (ctx.capability === "read") return toolError(READ_ONLY_KEY_REFUSAL, "UNAUTHORIZED_ACTION");
-      const who = { ...caller, client: messageClient(ctx.client, args.client, ctx.apiKeyLabel) };
+      const who = { ...caller, client: messageClient(ctx.client, args.client, ctx.apiKeyLabel), apiKeyId: ctx.apiKeyId ?? null };
       // Loaded on use: the review queue + node write path it pulls in stays off the app's startup graph.
       const { proposeInThread, proposalCardText } = await import("../agents/agent-proposals.js");
       const data = await proposeInThread(who, args.thread, { title: args.title, content: args.content, folder: args.folder });

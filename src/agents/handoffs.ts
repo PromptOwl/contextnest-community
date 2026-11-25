@@ -58,6 +58,8 @@ export interface HandoffCaller {
   userId: string;
   userEmail: string;
   baseUrl?: string;
+  /** The key this call came on, or null for a signed-in person. */
+  apiKeyId?: string | null;
   /** The caller's own attribution (an agent handing off declares itself). */
   client?: ClientMetadata;
 }
