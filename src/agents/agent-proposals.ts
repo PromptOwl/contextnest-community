@@ -19,7 +19,8 @@
  * `metadata.source_thread` links it to the thread, and the card names both.
  *
  * Guards: members only and a channel thread the caller can read (the handoff
- * rule, handoffs.ts readableChannelThread + channelPostRefusal); the caller
+ * rule, handoffs.ts readableChannelThread + channelPostRefusal), or a thread
+ * of a conversation the caller is a member of (an agent woken by a DM); the caller
  * must be able to create in the nest (a draft under review pages reviewers,
  * so a reader can't make one); bounded title and plan; the card's text is
  * model text and goes through inertAnswer like Hootie's cards.
@@ -31,12 +32,14 @@ import { createNode } from "../nodes/service.js";
 import { cancelReview, submitForReview } from "../governance/review-service.js";
 import { canCreateInNest } from "../governance/stewardship-service.js";
 import { serializeClient, type ClientMetadata } from "../shared/client-metadata.js";
-import { ConflictError, ForbiddenError, ValidationError } from "../shared/errors.js";
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { channelPostRefusal } from "../channels/channel-service.js";
 import { callerSafeClient, normHandle } from "../channels/message-meta.js";
 import { justWritten } from "../mentions/mention-index.js";
 import { inertAnswer } from "../hootie/inert.js";
 import { readableChannelThread, type HandoffCaller } from "./handoffs.js";
+import { isContainerMember, isConversationId } from "../chat/containers.js";
+import { isNestMember } from "../channels/channel-service.js";
 import { isReservedHandle } from "./reserved.js";
 
 export const MAX_PROPOSAL_TITLE = 200;
@@ -62,7 +65,29 @@ export interface AgentProposalView {
    *  nobody. */
   proposed_by: string | null;
   thread_id: string;
+  /** The channel's name, or null in a conversation. */
   channel: string | null;
+  /** The conversation (C2) the card is in, or null in a channel. */
+  conversation: string | null;
+}
+
+/**
+ * The thread a card may go in: a channel thread the caller can read (the
+ * handoff rule), or a thread of a direct or group conversation the caller is
+ * a member of — an agent woken by a DM files its card where it was asked.
+ * NotFound for anything else, one answer for "no such thread" and "not yours".
+ */
+async function cardThread(caller: HandoffCaller, threadId: string): Promise<{ nodeId: string; conversation: boolean }> {
+  const row = (await getDb().get("SELECT node_id FROM annotation_threads WHERE id = ? AND nest_id = ?", [threadId, caller.nestId])) as
+    | { node_id: string }
+    | undefined;
+  if (row && isConversationId(row.node_id)) {
+    if (!(await isNestMember(caller.nestId, caller.userId)) || !(await isContainerMember(caller.nestId, row.node_id, caller.userId))) {
+      throw new NotFoundError("Thread not found");
+    }
+    return { nodeId: row.node_id, conversation: true };
+  }
+  return { ...(await readableChannelThread(caller, threadId)), conversation: false };
 }
 
 function text(raw: unknown, name: string, max: number): string {
@@ -131,7 +156,7 @@ export async function proposeInThread(
   }
 
   // NotFound for a thread the caller can't read, a non-member, a document thread.
-  const { nodeId } = await readableChannelThread(caller, threadId);
+  const { nodeId, conversation } = await cardThread(caller, threadId);
   const refusal = await channelPostRefusal(caller.nestId, nodeId, caller.userId, caller.userEmail);
   if (refusal) throw refusal.status === 409 ? new ConflictError(refusal.error) : new ForbiddenError(refusal.error);
   if (!(await canCreateInNest(caller.nestId, caller.userEmail))) {
@@ -140,8 +165,8 @@ export async function proposeInThread(
 
   const client = callerSafeClient(caller.client);
   const proposedBy = await provenHandle(caller, client);
-  const channel = nodeId.split("/").pop() ?? null;
-  const note = `Proposed${proposedBy ? ` by @${proposedBy}` : ""} in #${channel} for approval.`;
+  const channel = conversation ? null : (nodeId.split("/").pop() ?? null);
+  const note = `Proposed${proposedBy ? ` by @${proposedBy}` : ""} in ${channel ? `#${channel}` : "a conversation"} for approval.`;
 
   // The plan: a draft under review, linked to the thread it came from.
   // An agent re-plans under the same title across sessions: a taken one gets
@@ -194,6 +219,7 @@ export async function proposeInThread(
     proposed_by: proposedBy,
     thread_id: threadId,
     channel,
+    conversation: conversation ? nodeId : null,
   };
   // The server-only mark, written after the message exists (the handoff path).
   await getDb().run("UPDATE annotation_comments SET client_json = ? WHERE id = ?", [
@@ -232,7 +258,7 @@ async function wakeIfAlreadyDecided(nestId: string, nodeId: string, reviewId: st
 
 export function proposalCardText(p: AgentProposalView): string {
   return (
-    `Approve card ${p.message_id} in #${p.channel} thread ${p.thread_id}: "${p.title}" — pending review ${p.review_id} of ${p.node_id} v${p.version}. ` +
+    `Approve card ${p.message_id} in ${p.channel ? `#${p.channel}` : "the conversation"} thread ${p.thread_id}: "${p.title}" — pending review ${p.review_id} of ${p.node_id} v${p.version}. ` +
     `A reviewer approves it with context_approve { title: "${p.title}" } or rejects it with context_reject (REST: POST …/nodes/${p.node_id}/approve | /reject); ` +
     (p.proposed_by ? `the decision wakes @${p.proposed_by}.` : "this call did not come from an agent's own key, so the decision wakes nobody.")
   );

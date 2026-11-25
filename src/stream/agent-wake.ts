@@ -27,6 +27,16 @@
  * process: a restart drops the ones in flight, and the agent still finds the
  * mention in its `context_my_work`.
  *
+ * DM an agent (epic recipes-and-the-central-harness): in a 1:1 conversation
+ * with an agent (C2, `#conversation:dm`), a person's message is addressed to
+ * that agent without an @mention, and goes out as `event: "agent.dm"` — the
+ * same body, signature, Idempotency-Key, retries, delivery row, fences and
+ * `read` call (context_conversation_read). An explicit @mention in a dm is
+ * still `agent.mention`. In a GROUP conversation only an explicit @mention
+ * wakes an agent member (no wake storms). A message an agent wrote — a
+ * declared `client.agent`, or a key labelled with an agent handle — never
+ * sends `agent.dm`, whoever the agent is.
+ *
  * Which messages: exactly the ones the @mention index records
  * (mentions/mention-index.ts) — a person posting through the REST comment
  * routes or MCP `context_comment`. Text a model wrote (Hootie's answers, a
@@ -65,8 +75,10 @@ import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { deserializeClient } from "../shared/client-metadata.js";
 import { resolveActorLabel } from "../channels/actor-label.js";
-import { isChannelNode } from "../channels/channel-node.js";
-import { isConversationId } from "../chat/containers.js";
+import { isChannelNode, readChannelDoc, tagsOf } from "../channels/channel-node.js";
+import { agentMembers, CONVERSATION_TAG, isConversationId } from "../chat/containers.js";
+import { normalizeTag } from "../governance/tag-index-service.js";
+import { extractMentions } from "../shared/mentions.js";
 import { postWebhook, resolveNestName, type WebhookFetch } from "../notify/webhook.js";
 import { senderFor } from "../notify/outbound-log.js";
 import { guardedFetch } from "../metacognition/net.js";
@@ -76,6 +88,9 @@ import { isReservedHandle } from "../agents/reserved.js";
 import { displayNames, namedActor, normHandle, writerHandles } from "../channels/message-meta.js";
 
 export const AGENT_WAKE_EVENT = "agent.mention";
+/** A person's message in a 1:1 conversation with the agent: addressed to it
+ *  without an @mention (DM an agent, epic recipes-and-the-central-harness). */
+export const AGENT_DM_EVENT = "agent.dm";
 /** The webhooks panel's "send test event" (PO-1189, AC-UX-16). */
 export const AGENT_TEST_EVENT = "agent.test";
 /** Waits before the 1st, 2nd and 3rd retry of a failed wake-up. */
@@ -202,15 +217,15 @@ export function wakeIdempotencyKey(nestId: string, commentId: string, handle: st
 async function overLimit(nestId: string, threadId: string, handle: string): Promise<boolean> {
   const db = getDb();
   const now = Date.now();
-  // Wake-ups only: the panel's test events have their own limit and must not
-  // use up an agent's allowance.
+  // Wake-ups only (a mention or a dm): the panel's test events have their own
+  // limit and must not use up an agent's allowance.
   const perThread = (await db.get(
-    "SELECT CAST(COUNT(*) AS INTEGER) AS n FROM agent_wake_deliveries WHERE thread_id = ? AND handle = ? AND created_at >= ? AND event = 'agent.mention'",
+    "SELECT CAST(COUNT(*) AS INTEGER) AS n FROM agent_wake_deliveries WHERE thread_id = ? AND handle = ? AND created_at >= ? AND event IN ('agent.mention', 'agent.dm')",
     [threadId, handle, new Date(now - WAKE_THREAD_WINDOW_MS).toISOString()],
   )) as { n: number | string } | undefined;
   if (Number(perThread?.n ?? 0) >= WAKE_PER_THREAD_LIMIT) return true;
   const perHandle = (await db.get(
-    "SELECT CAST(COUNT(*) AS INTEGER) AS n FROM agent_wake_deliveries WHERE nest_id = ? AND handle = ? AND created_at >= ? AND event = 'agent.mention'",
+    "SELECT CAST(COUNT(*) AS INTEGER) AS n FROM agent_wake_deliveries WHERE nest_id = ? AND handle = ? AND created_at >= ? AND event IN ('agent.mention', 'agent.dm')",
     [nestId, handle, new Date(now - WAKE_HANDLE_WINDOW_MS).toISOString()],
   )) as { n: number | string } | undefined;
   return Number(perHandle?.n ?? 0) >= WAKE_PER_HANDLE_LIMIT;
@@ -345,6 +360,28 @@ function excerptOf(body: string): string {
   return flat.length > MENTION_EXCERPT_MAX ? `${flat.slice(0, MENTION_EXCERPT_MAX)}…` : flat;
 }
 
+/** A conversation's kind and agent members (its tags), or null when it is
+ *  not one this nest has. */
+async function dmShape(nestId: string, nodeId: string): Promise<{ kind: "dm" | "group"; agents: string[] } | null> {
+  const doc = await readChannelDoc(nestId, nodeId);
+  if (!doc) return null;
+  const tags = tagsOf(doc).map((t: unknown) => normalizeTag(String(t)));
+  if (!tags.includes(CONVERSATION_TAG)) return null;
+  return { kind: tags.includes(`${CONVERSATION_TAG}:group`) ? "group" : "dm", agents: (await agentMembers(nestId, nodeId, doc)).map(normHandle) };
+}
+
+/** Did an agent write this message? A declared `client.agent`, or a key
+ *  labelled with the handle of an agent in the conversation or of one with a
+ *  wake target. A person's own labelled key ("laptop") is not an agent. */
+async function isAgentAuthored(nestId: string, client: ReturnType<typeof deserializeClient>, members: string[]): Promise<boolean> {
+  const c = (client ?? {}) as Record<string, unknown>;
+  if (normHandle(c.agent)) return true;
+  const label = normHandle(c.key_label);
+  if (!label) return false;
+  if (members.includes(label)) return true;
+  return !!(await storedAgentWebhook(nestId, label).catch(() => null));
+}
+
 /** What happened for one tagged handle: a POST went out, it has no target
  *  (it reads its mentions from context_my_work), or nothing was sent (the
  *  writer itself, a duplicate, or the rate fence). */
@@ -401,12 +438,27 @@ export async function wakeMentionedAgents(params: {
     const actor = await resolveActorLabel({ email: msg.author, client });
     const self = new Set([normHandle(actor.agent), ...writerHandles(client)].filter(Boolean));
 
+    // A conversation (C2): in a 1:1 with an agent, a person's message is
+    // addressed to that agent without an @mention (`agent.dm`); in a group
+    // only an explicit @mention wakes (no wake storms). Which handles the
+    // text itself names decides mention vs dm.
+    const dm = isConversationId(nodeId) ? await dmShape(nestId, nodeId) : null;
+    const named = new Set(extractMentions(msg.body ?? "").map(normHandle));
+    // Agent-authored messages never wake an agent over a dm: a declared agent,
+    // or a key labelled with an agent handle (a member of this conversation,
+    // or one with a wake target).
+    const agentAuthored = dm ? await isAgentAuthored(nestId, client, dm.agents) : false;
+
     let channel: string | null | undefined;
     let nestName: string | undefined;
     let author: string | undefined;
     for (const { handle: raw } of rows) {
       const handle = normHandle(raw);
       if (!handle) continue;
+      // Not named in the text: only a dm's own agent is addressed, and only
+      // by a person. Anything else is no wake at all (not even an outcome).
+      const event = named.has(handle) ? AGENT_WAKE_EVENT : dm?.kind === "dm" && dm.agents.includes(handle) && !agentAuthored ? AGENT_DM_EVENT : null;
+      if (!event) continue;
       if (sealed || !trusted || self.has(handle)) {
         outcomes.set(handle, "skipped");
         continue;
@@ -427,7 +479,7 @@ export async function wakeMentionedAgents(params: {
            (idempotency_key, nest_id, handle, node_id, thread_id, comment_id, status, created_at, attempts, event)
          VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?)
          ON CONFLICT (idempotency_key) DO NOTHING`,
-        [key, nestId, handle, nodeId, threadId, commentId, new Date().toISOString(), AGENT_WAKE_EVENT],
+        [key, nestId, handle, nodeId, threadId, commentId, new Date().toISOString(), event],
       );
       if (!reserved.changes) {
         outcomes.set(handle, "skipped"); // already sent (or being sent): a retry
@@ -444,7 +496,7 @@ export async function wakeMentionedAgents(params: {
       const sameNest = !!own && own.url === target.url;
       const deliveryId = randomUUID();
       const body = JSON.stringify({
-        event: AGENT_WAKE_EVENT,
+        event,
         delivery_id: deliveryId,
         nest: { id: nestId, name: nestName },
         channel,
@@ -473,7 +525,7 @@ export async function wakeMentionedAgents(params: {
         nodeId,
         handle,
         target,
-        event: AGENT_WAKE_EVENT,
+        event,
         deliveryId,
         body,
         sender: msg.author,
@@ -556,8 +608,8 @@ export type DecidedOutcome = "sent" | "none" | "skipped";
  * REST and MCP alike): when the review is an agent's approve card, send that
  * agent ONE signed POST
  *
- *   { event: "agent.proposal.decided", delivery_id, nest, channel, node_id,
- *     thread_id, message_id (the card), mentioned, at,
+ *   { event: "agent.proposal.decided", delivery_id, nest, channel,
+ *     conversation, node_id, thread_id, message_id (the card), mentioned, at,
  *     proposal: { review_id, node_id, version, status, decided_by },
  *     read: { tool, arguments } }
  *
@@ -635,12 +687,15 @@ export async function wakeOnProposalDecided(params: {
     if (!reserved.changes) return "skipped";
 
     const channel = (await isChannelNode(nestId, card.thread_node)) ? card.thread_node.split("/").pop()! : null;
+    // A card filed in a direct or group conversation (an agent woken by a DM).
+    const conversation = !channel && isConversationId(card.thread_node) ? card.thread_node : null;
     const deliveryId = randomUUID();
     const body = JSON.stringify({
       event: AGENT_DECIDED_EVENT,
       delivery_id: deliveryId,
       nest: { id: nestId, name: await resolveNestName(nestId) },
       channel,
+      conversation,
       node_id: card.thread_node,
       thread_id: card.thread_id,
       message_id: card.id,
@@ -649,7 +704,9 @@ export async function wakeOnProposalDecided(params: {
       proposal: { review_id: reviewId, node_id: nodeId, version: Number(review.version), status, decided_by: decidedBy },
       read: channel
         ? { tool: "context_channel_read", arguments: { channel, thread: card.thread_id } }
-        : { tool: "context_comments", arguments: { id: card.thread_node, thread: card.thread_id } },
+        : conversation
+          ? { tool: "context_conversation_read", arguments: { conversation, thread: card.thread_id } }
+          : { tool: "context_comments", arguments: { id: card.thread_node, thread: card.thread_id } },
     });
     void deliver({
       key,

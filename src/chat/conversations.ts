@@ -20,9 +20,10 @@
  * the same 404 on the thread routes.
  *
  * An agent member reads with the key it runs on: the person behind that key
- * must be a member (containers.ts). Every message by someone else in the
- * conversation is put in front of the agent as if it had been @mentioned
- * (`indexAgentMembers`: a mention row, so My Work and the wake-up see it).
+ * must be a member (containers.ts). In a DM, every message by someone else
+ * is put in front of the agent as if it had been @mentioned
+ * (`indexAgentMembers`: a mention row, so My Work and the `agent.dm` wake-up
+ * see it); in a group, only an explicit @mention reaches it.
  */
 import { randomUUID } from "node:crypto";
 import type { ContextNode } from "@promptowl/contextnest-engine";
@@ -290,10 +291,12 @@ export async function addConversationMember(caller: Caller, raw: unknown, member
 }
 
 /**
- * After a message lands in a conversation: a mention row for every AGENT
- * member the message does not already name (and that didn't write it), so
- * the agent's My Work lists it and the wake-up goes out — a message to an
- * agent in its dm is addressed to it. Best-effort, like every fan-out.
+ * After a message lands in a DIRECT conversation: a mention row for every
+ * AGENT member the message does not already name (and that didn't write it),
+ * so the agent's My Work lists it and the wake-up (`agent.dm`) goes out — a
+ * message to an agent in its dm is addressed to it. A group is not: there an
+ * agent is reached by an explicit @mention, as a person is. Best-effort,
+ * like every fan-out.
  */
 export async function indexAgentMembers(params: {
   nestId: string;
@@ -306,7 +309,11 @@ export async function indexAgentMembers(params: {
   const { nestId, nodeId, threadId, commentId } = params;
   if (!commentId) return 0;
   try {
-    const handles = (await agentMembers(nestId, nodeId)).filter((h) => !params.authorHandles.includes(normHandle(h)));
+    // A dm only: in a group an agent is addressed by an explicit @mention,
+    // like a person (no wake storms; DM an agent, recipes-and-the-central-harness).
+    const doc = await readChannelDoc(nestId, nodeId);
+    if (!doc || kindOf(doc) !== "dm") return 0;
+    const handles = (await agentMembers(nestId, nodeId, doc)).filter((h) => !params.authorHandles.includes(normHandle(h)));
     if (handles.length === 0) return 0;
     const db = getDb();
     const msg = (await db.get("SELECT created_at FROM annotation_comments WHERE id = ?", [commentId])) as { created_at: string } | undefined;
