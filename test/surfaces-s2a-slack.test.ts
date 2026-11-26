@@ -579,13 +579,17 @@ describe("install", () => {
     expect((await put({ client_id: "cid.1", client_secret: "csecret-xyz", signing_secret: SIGNING })).status).toBe(200);
   });
 
-  it("disconnect also closes half-finished connects, so Setup never resumes one", async () => {
+  it("disconnect also closes the same nest's half-finished connects, and leaves other nests' alone", async () => {
     const a = (await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: N }, root.apiKey)).data.install_id as string;
     const b = (await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: N }, root.apiKey)).data.install_id as string;
+    // Another nest's half-finished connect (someone else mid-connect, e.g. self-serve) is left alone.
+    const otherNest = (await jsonRequest(app, "POST", "/nests", { name: "Elsewhere" }, root.apiKey)).data.nest.id as string;
+    const c = (await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: otherNest }, root.apiKey)).data.install_id as string;
     const { disconnectInstall } = await import("../src/surfaces/services/lifecycle-service.js");
     await disconnectInstall(a);
     const rows = (await S.db.getDb().all("SELECT id, status FROM surface_installs WHERE id IN (?, ?)", [a, b])) as any[];
     expect(rows.map((x) => x.status)).toEqual(["disconnected", "disconnected"]);
+    expect(((await S.db.getDb().get("SELECT status FROM surface_installs WHERE id = ?", [c])) as any).status).toBe("pending");
   });
 
   it("AC-INS-06: a bad signature or a timestamp older than 300 s → 401, nothing processed", async () => {

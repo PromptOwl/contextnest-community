@@ -404,6 +404,9 @@ describe("/admin/settings — validation", () => {
     expect(wrong.status).toBe(400);
     expect(wrong.data.fieldErrors.surfaces_slack_hosted_client_secret).toMatch(/Slack refused this Client secret/);
     expect(await persistedSetting("SURFACES_SLACK_HOSTED_CLIENT_SECRET")).not.toBe(null);
+    // Only a new Client ID typed, the saved secret is the old app's: the error says to paste the secret too.
+    const idOnly = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_slack_hosted_client_id: "777.777" }, admin.apiKey);
+    expect(idOnly.data.fieldErrors.surfaces_slack_hosted_client_secret).toMatch(/saved Client secret doesn't match.*save both/);
     slackAnswer = "invalid_client_id";
     expect((await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_slack_hosted_client_id: "999.999" }, admin.apiKey)).data.fieldErrors).toHaveProperty("surfaces_slack_hosted_client_id");
     expect((await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey)).data.surfaces_slack_hosted_client_id).toBe("123.456");

@@ -45,7 +45,7 @@ export async function slackCall(
 }
 
 /**
- * Slack checks the client pair before the code, so a dummy code tells a wrong
+ * Slack checks the client pair before the code (observed, not documented), so a dummy code tells a wrong
  * key (invalid_client_id / bad_client_secret) from a good one (invalid_code).
  * Anything else (Slack down, rate limit) does not block a save.
  */

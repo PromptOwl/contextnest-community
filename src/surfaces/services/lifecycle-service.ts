@@ -246,9 +246,13 @@ export async function disconnectInstall(installId: string, actorUserId: string |
     new Date().toISOString(),
     installId,
   ]);
-  // A full disconnect: half-finished connects of the same surface go too, or Setup resumes one (old nest, old keys).
+  // A full disconnect: this nest's half-finished connects go too, or Setup resumes one (old keys).
+  // Other nests' are left alone: with self-serve, someone else may be mid-connect.
   const install = await getInstall(installId);
-  const stale = (await db.all("SELECT id FROM surface_installs WHERE surface = ? AND status = 'pending'", [install?.surface ?? "slack"])) as Array<{ id: string }>;
+  const stale = (await db.all("SELECT id FROM surface_installs WHERE surface = ? AND status = 'pending' AND home_nest_id = ?", [
+    install?.surface ?? "slack",
+    install?.home_nest_id ?? "",
+  ])) as Array<{ id: string }>;
   const { deleteSecrets } = await import("./secret-store.js");
   for (const s of stale) {
     await db.run("UPDATE surface_installs SET status = 'disconnected', updated_at = ? WHERE id = ? AND status = 'pending'", [new Date().toISOString(), s.id]);

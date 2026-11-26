@@ -1630,7 +1630,15 @@ export function createApp(): Hono<AuthEnv> {
       const secret = slackKeys.surfaces_slack_hosted_client_secret ?? config.SURFACES_SLACK_HOSTED_CLIENT_SECRET;
       const { refusedClientPair } = await import("./surfaces/adapters/slack/api.js");
       const refused = id && secret ? await refusedClientPair(id, secret) : null;
-      if (refused) addError(`surfaces_slack_hosted_${refused.field}`, refused.error);
+      // The refused key may be the saved one, from the app's previous keys: say so, so both get pasted.
+      const fromStore = refused && !slackKeys[`surfaces_slack_hosted_${refused.field}`];
+      if (refused)
+        addError(
+          `surfaces_slack_hosted_${refused.field}`,
+          fromStore
+            ? `The saved ${refused.field === "client_id" ? "Client ID" : "Client secret"} doesn't match the value you entered. Paste this app's ${refused.field === "client_id" ? "Client ID" : "Client secret"} too and save both.`
+            : refused.error,
+        );
     }
     // Experimental: the cross-nest document stream. Its own switch, no
     // dependencies. Off writes a tombstone (null): the switch is off now and
