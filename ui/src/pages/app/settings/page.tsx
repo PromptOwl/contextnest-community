@@ -6,7 +6,7 @@
  * tabs by role so the page stays short. Add a new setting to a tab's <Card>
  * list and to that tab's `keys` (so the unsaved-changes dot tracks it).
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Shield, Loader2, Eye, EyeOff, Users, Globe2, Plus, Trash2, Pencil, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -49,12 +49,12 @@ import {
   updateCommunitySite as updateCommunitySiteApi,
   removeCommunitySite,
 } from "../../../lib/api";
+import { bypassNavGuard, setNavGuard } from "../../../lib/nav-guard";
 import { reads } from "../../../lib/queries";
 import { CopyButton } from "@/components/ui/copy-button";
-import { getAdminModels, getAdminSettings, updateAdminSettings } from "../../../lib/api";
+import { getAdminSettings, updateAdminSettings } from "../../../lib/api";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { SearchableSelect } from "@/components/SearchableSelect";
-import { modelOptions } from "@/lib/model-options";
+import { ModelPicker } from "@/components/ModelPicker";
 import { useAuth } from "../../../auth/AuthContext";
 import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
@@ -62,6 +62,8 @@ import { NetworkStatusPanel } from "./NetworkStatusPanel";
 import { NavColorField } from "./NavColorField";
 import hootieIcon from "../../../assets/hootie.svg";
 import { toast } from "sonner";
+import { generateBufferKey } from "../../../lib/control-room-setup";
+import { SlackAppCard } from "../control-room/SlackAppCard";
 
 interface SettingsPageProps {
   settings: AdminSettings | null;
@@ -177,13 +179,10 @@ const TABS: {
     keys: [
       "surfaces_buffer_key",
       "surfaces_judge_model",
+      "surfaces_quiet_minutes",
       "surfaces_default_cap_usd",
       "surfaces_org_name",
-      "surfaces_slack_hosted_enabled",
       "surfaces_slack_self_serve",
-      "surfaces_slack_hosted_client_id",
-      "surfaces_slack_hosted_client_secret",
-      "surfaces_slack_hosted_signing_secret",
     ],
   },
   {
@@ -352,55 +351,22 @@ function HootieModelField({
   /** Changes when the own-provider keys change, so the list is fetched again. */
   reloadKey?: string;
 }) {
-  const [models, setModels] = useState<string[] | null>(null);
-  const [own, setOwn] = useState<string[]>([]);
-  const [providers, setProviders] = useState<Record<string, string>>({});
-  useEffect(() => {
-    getAdminModels()
-      .then((r) => {
-        setModels(r.models);
-        setOwn(r.own_models ?? []);
-        setProviders(r.providers ?? {});
-      })
-      .catch(() => setModels([]));
-  }, [reloadKey]);
-  const options = useMemo(
-    () => modelOptions(models ?? [], own, providers, value),
-    [models, own, providers, value],
-  );
   return (
     <div className="space-y-1.5">
       <Label htmlFor="hootie-model">Model</Label>
-      {models === null ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground h-9">
-          <Loader2 className="h-4 w-4 animate-spin" /> Loading models…
-        </div>
-      ) : models.length > 0 ? (
-        <SearchableSelect
-          id="hootie-model"
-          testId="settings-hootie-model"
-          value={value}
-          onChange={onChange}
-          options={options}
-          placeholder="Pick a model"
-          searchPlaceholder="Search models…"
-          emptyText="No model matches."
-        />
-      ) : (
-        <TextField
-          error={error}
-          id="hootie-model"
-          value={value}
-          placeholder="claude-sonnet-5"
-          onChange={onChange}
-        />
-      )}
-      {error && models && models.length > 0 && <p className="text-xs text-destructive">{error}</p>}
-      <p className="text-xs text-muted-foreground">
-        {models && models.length > 0
-          ? `The model Hootie answers with — ${models.length} available on this server.`
-          : "The model Hootie answers with. The list of available models couldn't be loaded, so type its name (through a gateway, the gateway's name for it)."}
-      </p>
+      <ModelPicker
+        id="hootie-model"
+        testId="settings-hootie-model"
+        value={value}
+        onChange={onChange}
+        error={error}
+        reloadKey={reloadKey}
+        hint={(n) =>
+          n
+            ? `The model Hootie answers with — ${n} available on this server.`
+            : "The model Hootie answers with. The list of available models couldn't be loaded, so type its name (through a gateway, the gateway's name for it)."
+        }
+      />
     </div>
   );
 }
@@ -414,6 +380,7 @@ function SecretField({
   onChange,
   placeholder,
   error,
+  action,
 }: {
   id: string;
   label: string;
@@ -422,10 +389,15 @@ function SecretField({
   onChange: (v: string | null | undefined) => void;
   placeholder?: string;
   error?: string;
+  /** A control beside the label (po-1448: Generate for the buffer key). */
+  action?: ReactNode;
 }) {
   return (
     <div className="space-y-1.5">
-      <Label htmlFor={id}>{label}</Label>
+      <div className="flex items-center justify-between gap-2">
+        <Label htmlFor={id}>{label}</Label>
+        {action}
+      </div>
       <div className="text-xs text-muted-foreground">
         {value === null ? "Will be cleared when you save." : isSet ? "Set (hidden)." : "Not set."}
       </div>
@@ -441,6 +413,40 @@ function SecretField({
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * po-1448: make a buffer key in the browser. It reaches the server only on
+ * Save. Replacing a saved key asks first: what Nest holds now can't be read.
+ */
+function GenerateBufferKey({ isSet, onKey }: { isSet: boolean; onKey: (key: string) => void }) {
+  const [confirm, setConfirm] = useState(false);
+  const make = () => {
+    onKey(generateBufferKey());
+    setConfirm(false);
+    toast.success("New key ready. Click Save to use it.");
+  };
+  return (
+    <>
+      <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => (isSet ? setConfirm(true) : make())} data-testid="generate-buffer-key">
+        Generate
+      </Button>
+      <AlertDialog open={confirm} onOpenChange={setConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Replace the buffer key?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Messages Nest is holding right now were encrypted with the old key and will be lost. Approved notes aren&apos;t affected. Nothing changes until you click Save.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={make}>Generate a new key</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
 
@@ -726,6 +732,21 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
     });
   }, [draft, settings]);
   const isDirty = dirtyKeys.length > 0;
+  // Leaving with unsaved settings asks first, as on the Structure rules page.
+  const [leave, setLeave] = useState<(() => void) | null>(null);
+  useEffect(() => {
+    if (!isDirty) return;
+    setNavGuard((proceed) => {
+      setLeave(() => proceed);
+      return true;
+    });
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => {
+      setNavGuard(null);
+      window.removeEventListener("beforeunload", warn);
+    };
+  }, [isDirty]);
   const dirtyInTab = (keys: (keyof AdminSettings)[]) =>
     keys.some((k) => dirtyKeys.includes(k));
 
@@ -819,7 +840,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
         icon={Shield}
         title="Server settings"
         description="Server-wide options. Changes apply on Save and persist across restarts."
-        className="mb-6"
+        // Under the 4rem app header: Save and "Unsaved changes" stay in reach.
+        className="sticky top-16 z-20 mb-3 border-b bg-background py-3"
         actions={
           settings && (
             <>
@@ -862,6 +884,28 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
         </AlertDialogContent>
       </AlertDialog>
 
+      <AlertDialog open={leave !== null} onOpenChange={(o) => !o && setLeave(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Leave without saving?</AlertDialogTitle>
+            <AlertDialogDescription>Your changes to the server settings haven't been saved and will be lost.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Stay</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const go = leave;
+                setLeave(null);
+                if (go) bypassNavGuard(go);
+              }}
+              data-testid="settings-leave-confirm"
+            >
+              Leave
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {saveError && (
         <div
           role="alert"
@@ -878,7 +922,8 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
         </div>
       ) : (
         <Tabs value={currentTab} onValueChange={setActiveTab}>
-          <TabsList>
+          {/* Wraps: the tabs are wider than the page beside the sidebar. */}
+          <TabsList className="h-auto flex-wrap justify-start">
             {visibleTabs.map((t) => (
               <TabsTrigger key={t.id} value={t.id} className="gap-1.5">
                 {t.label}
@@ -925,8 +970,9 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     onChange={(v) => set({ public_base_url: v })}
                   />
                   <p className="text-xs text-muted-foreground">
-                    This server's public address — used for share links and
-                    SSO redirects. Leave empty if unsure.
+                    This server's public https address, used for share links,
+                    SSO redirects and Slack. Slack can't reach localhost or a
+                    private network address.
                   </p>
                 </div>
                 <div className="space-y-1.5">
@@ -2412,12 +2458,32 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                   isSet={!!settings?.surfaces_buffer_key_set}
                   value={draft.surfaces_buffer_key}
                   onChange={(v) => set({ surfaces_buffer_key: v })}
-                  placeholder="32 bytes, base64 or hex — e.g. openssl rand -base64 32"
+                  placeholder="32 bytes, base64 or hex. Click Generate, or run: openssl rand -base64 32"
                   error={fieldErrors.surfaces_buffer_key}
+                  action={<GenerateBufferKey isSet={!!settings?.surfaces_buffer_key_set} onKey={(k) => set({ surfaces_buffer_key: k })} />}
                 />
                 <div className="space-y-1.5">
                   <Label htmlFor="surfaces-judge-model">Judge model</Label>
-                  <TextField id="surfaces-judge-model" error={fieldErrors.surfaces_judge_model} value={draft.surfaces_judge_model ?? ""} placeholder="Default: the nest's model" onChange={(v) => set({ surfaces_judge_model: v })} />
+                  <ModelPicker
+                    id="surfaces-judge-model"
+                    testId="settings-judge-model"
+                    value={draft.surfaces_judge_model ?? ""}
+                    onChange={(v) => set({ surfaces_judge_model: v })}
+                    error={fieldErrors.surfaces_judge_model}
+                    hint={(n) => `Judges Slack conversations, unless a listener has its own model. Empty: Hootie's model.${n ? "" : " The list of models couldn't be loaded, so type its name."}`}
+                  />
+                  {!!draft.surfaces_judge_model && (
+                    <Button type="button" variant="ghost" size="sm" onClick={() => set({ surfaces_judge_model: "" })}>
+                      Use Hootie&apos;s model
+                    </Button>
+                  )}
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="surfaces-quiet">Quiet window (minutes)</Label>
+                  <TextField id="surfaces-quiet" error={fieldErrors.surfaces_quiet_minutes} value={draft.surfaces_quiet_minutes == null ? "" : String(draft.surfaces_quiet_minutes)} placeholder="Default: 20" onChange={(v) => set({ surfaces_quiet_minutes: v })} />
+                  <p className="text-xs text-muted-foreground">
+                    A conversation is judged this long after its last message, so it is read as a whole. 5 to 240, for every channel on this server. 🧠 skips the wait.
+                  </p>
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="surfaces-cap">Monthly spend cap per nest (USD)</Label>
@@ -2431,49 +2497,23 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
             </Card>
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Hosted Slack app</CardTitle>
+                <CardTitle className="text-base">Slack app</CardTitle>
                 <CardDescription>
-                  One-click install with PromptOwl's own Slack app. Leave off to
-                  install your own app from the manifest instead.
+                  One Slack app for this server. Create it from the manifest,
+                  then save its keys here. The same keys show in Control room →
+                  Setup; a change in either place shows in both. The keys save
+                  with their own Save keys button.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm">{draft.surfaces_slack_hosted_enabled ? "On" : "Off"}</span>
-                  <Switch checked={!!draft.surfaces_slack_hosted_enabled} onCheckedChange={(v) => set({ surfaces_slack_hosted_enabled: v })} aria-label="Hosted Slack app" />
-                </div>
-                <div className="flex items-center justify-between gap-4">
+                <SlackAppCard heading={false} />
+                <div className="flex items-center justify-between gap-4 border-t pt-4">
                   <span className="text-sm">
                     Self-serve: anyone signed in can connect their own Slack
                     workspace to a nest they own ({draft.surfaces_slack_self_serve ? "on" : "off"})
                   </span>
-                  <Switch
-                    checked={!!draft.surfaces_slack_self_serve}
-                    disabled={!draft.surfaces_slack_hosted_enabled}
-                    onCheckedChange={(v) => set({ surfaces_slack_self_serve: v })}
-                    aria-label="Self-serve Slack"
-                  />
+                  <Switch checked={!!draft.surfaces_slack_self_serve} onCheckedChange={(v) => set({ surfaces_slack_self_serve: v })} aria-label="Self-serve Slack" />
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="surfaces-slack-client-id">Client ID</Label>
-                  <TextField id="surfaces-slack-client-id" error={fieldErrors.surfaces_slack_hosted_client_id} value={draft.surfaces_slack_hosted_client_id ?? ""} onChange={(v) => set({ surfaces_slack_hosted_client_id: v })} />
-                </div>
-                <SecretField
-                  id="surfaces-slack-client-secret"
-                  label="Client secret"
-                  isSet={!!settings?.surfaces_slack_hosted_client_secret_set}
-                  value={draft.surfaces_slack_hosted_client_secret}
-                  onChange={(v) => set({ surfaces_slack_hosted_client_secret: v })}
-                  error={fieldErrors.surfaces_slack_hosted_client_secret}
-                />
-                <SecretField
-                  id="surfaces-slack-signing-secret"
-                  label="Signing secret"
-                  isSet={!!settings?.surfaces_slack_hosted_signing_secret_set}
-                  value={draft.surfaces_slack_hosted_signing_secret}
-                  onChange={(v) => set({ surfaces_slack_hosted_signing_secret: v })}
-                  error={fieldErrors.surfaces_slack_hosted_signing_secret}
-                />
               </CardContent>
             </Card>
           </TabsContent>

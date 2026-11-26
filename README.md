@@ -103,7 +103,7 @@ The in-app **How it works** page (sidebar → Help) is the full tour; **Docs** (
 | Where | What | Who |
 |---|---|---|
 | Header ribbon | **My Work** — the one queue for reviews, assigned tasks, handoffs, mentions and saved messages across nests, with a count that turns red when something is urgent · **My Drafts** (yours, never submitted). Inside a nest, **Browse** and **Instructions** sit beside them. | everyone |
-| Left rail | **Nests** — every nest you can see on every page, with a filter box and the current nest unfolded · **Stream** (*experimental*, `EXPERIMENTAL_DOC_STREAM`) — a feed of every document version across your nests, people and agents · **Control room** (while Surfaces is on) — Overview, Decision ledger and Agents for the nests you administer; Slack setup for server admins | everyone / nest admins |
+| Left rail | **Nests** — every nest you can see on every page, with a filter box and the current nest unfolded · **Stream** (*experimental*, `EXPERIMENTAL_DOC_STREAM`) — a feed of every document version across your nests, people and agents · **Control room** (while Surfaces is on, superadmins only) — Overview, Decision ledger, Agents and Slack setup | everyone / superadmins |
 | Account menu → **Workspace settings** | **Teams** · **API keys** · **Connected apps** — and for server admins **Teammates** · **Server settings** · **Activity trace** · **Message log** | everyone / server admins |
 | Account menu | **Account** (name, password) · **How it works** · keyboard shortcuts · logout | everyone |
 

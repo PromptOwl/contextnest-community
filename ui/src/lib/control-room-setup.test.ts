@@ -115,8 +115,19 @@ describe("AC-CR-15: progress comes from facts, so setup resumes where it was lef
 
   it("AC-CR-15: removed bindings don't count; an active install wins over a pending one", () => {
     expect(deriveProgress(facts({ install: install("active"), bindings: [{ nest_id: "n1", status: "removed", conversation_id: "C1" }] })).count).toBe(1);
-    expect(pickInstall([install("pending", "p"), install("active", "a"), { ...install("active", "t"), surface: "teams" }])?.id).toBe("a");
-    expect(pickInstall([install("disconnected", "d")])).toBeNull();
+    expect(pickInstall([install("pending", "p"), install("active", "a"), { ...install("active", "t"), surface: "teams" }], false)?.id).toBe("a");
+    expect(pickInstall([install("disconnected", "d")], false)).toBeNull();
+  });
+
+  it("a pending install counts only in the mode setup is in now, so a leftover from the other mode can't block Download manifest", () => {
+    const hosted = { ...install("pending", "h"), mode: "hosted" as const };
+    const manifest = install("pending", "m");
+    expect(pickInstall([hosted], false)).toBeNull();
+    expect(pickInstall([manifest], true)).toBeNull();
+    expect(pickInstall([hosted, manifest], false)?.id).toBe("m");
+    expect(pickInstall([manifest, hosted], true)?.id).toBe("h");
+    // A connected workspace stays connected whatever the switch says.
+    expect(pickInstall([manifest, { ...hosted, status: "active" }], false)?.id).toBe("h");
   });
 });
 
@@ -143,9 +154,9 @@ describe("AC-CR-02: a refused pair names the counts and offers the fixes before 
   });
 
   it("AC-CR-02: allowed pairs say whether cards may quote existing records", () => {
-    expect(guardView(preview(), { channel: "a", nest: "Revenue" })).toEqual({ state: "ok", label: "Cards can show existing records", note: null });
+    expect(guardView(preview(), { channel: "a", nest: "Revenue" })).toMatchObject({ state: "ok", label: "Cards can show existing records", note: null });
     const po = guardView(preview({ surface_ok: false, detail: { members_total: 18, members_not_readers: 11 } }), { channel: "revops", nest: "Revenue" });
-    expect(po).toEqual({ state: "proposals_only", label: "Proposals only", note: "11 of the 18 members can't read Revenue, so cards here never quote existing records." });
+    expect(po).toMatchObject({ state: "proposals_only", label: "Proposals only", note: "11 of the 18 members can't read Revenue, so cards here never quote existing records." });
     expect(fixOptions(po)).toEqual([]);
   });
 
@@ -222,12 +233,13 @@ describe("po-1432: the wizard names who blocks a pair and offers to add channel 
   it("AC 1: a reader no Slack user is linked to is named with the email", () => {
     const v = guardView(refused({ absent_readers: [{ user_id: "u1", name: "Misha", email: "misha@promptowl.ai", reason: "no_slack_link" }] }), ctx);
     expect(v.state).toBe("refused");
-    expect(v.note).toBe("Misha (misha@promptowl.ai) can read PO - Engineering Ops, but no Slack user in this workspace is linked to that email.");
+    expect(v.note).toBe("1 person who can read PO - Engineering Ops can't be found in #testnest.");
+    expect(v.groups).toEqual([{ heading: "No Slack user in this workspace has the same email:", people: ["Misha (misha@promptowl.ai)"] }]);
   });
 
   it("AC 2: readers not in the channel are named, with a message only", () => {
     const one = guardView(refused({ absent_readers: [{ user_id: "u1", name: "Sam", email: "sam@x.ai", reason: "not_in_channel" }] }), ctx);
-    expect(one.note).toBe("Sam can read PO - Engineering Ops but isn't in #testnest. Add them in Slack, then check again.");
+    expect(one.groups).toEqual([{ heading: "Not in #testnest. Add them in Slack, then check again:", people: ["Sam"] }]);
     expect(fixOptions(one)).toEqual(["create_nest", "other_nest", "leave_off"]);
     const many = guardView(
       refused({
@@ -239,12 +251,79 @@ describe("po-1432: the wizard names who blocks a pair and offers to add channel 
       }),
       ctx,
     );
-    expect(many.note).toBe("Sam, taimur@x.ai and Qaish can read PO - Engineering Ops but aren't in #testnest. Add them in Slack, then check again.");
+    // A list, not one sentence per person (po-1440).
+    expect(many.groups).toEqual([{ heading: "Not in #testnest. Add them in Slack, then check again:", people: ["Sam", "taimur@x.ai", "Qaish"] }]);
   });
 
   it("a reader without an account is named by email", () => {
     const v = guardView(refused({ absent_readers: [{ user_id: null, name: null, email: "new@x.ai", reason: "no_account" }] }), ctx);
-    expect(v.note).toBe("new@x.ai can read PO - Engineering Ops but has no account on this server yet.");
+    expect(v.groups).toEqual([{ heading: "No account on this server yet:", people: ["new@x.ai"] }]);
+  });
+
+  it("po-1440: mixed reasons give one summary and one list per reason, never a repeated sentence", () => {
+    const v = guardView(
+      refused(
+        {
+          absent_readers: [
+            { user_id: "u1", name: "Sam", email: "sam@x.ai", reason: "not_in_channel" },
+            { user_id: "u2", name: "Misha", email: "misha@promptowl.ai", reason: "no_slack_link" },
+            { user_id: "u3", name: "Ana", email: "ana@x.ai", reason: "no_slack_link" },
+            { user_id: null, name: null, email: "new@x.ai", reason: "no_account" },
+          ],
+        },
+        { readers_total: 9, readers_absent: 4 },
+      ),
+      ctx,
+    );
+    expect(v.note).toBe("4 people who can read PO - Engineering Ops can't be found in #testnest.");
+    expect(v.groups!.map((g) => g.heading)).toEqual([
+      "Not in #testnest. Add them in Slack, then check again:",
+      "No Slack user in this workspace has the same email:",
+      "No account on this server yet:",
+    ]);
+    expect(v.groups![1].people).toEqual(["Misha (misha@promptowl.ai)", "Ana (ana@x.ai)"]);
+  });
+
+  it("po-1445: with a reader unmatched by email, the unmatched channel members show the email Slack has", () => {
+    const v = guardView(
+      refused({
+        absent_readers: [{ user_id: "u2", name: "Misha", email: "misha@promptowl.ai", reason: "no_slack_link" }],
+        members_not_readers: [
+          { surface_user_id: "SM", name: "Misha S", community_user_id: null, email: null, slack_email: "misha@promptowl.io" },
+          { surface_user_id: "SQ", name: "Quinn", community_user_id: null, email: null, slack_email: null },
+          { surface_user_id: "SC", name: "Carol", community_user_id: "u-carol", email: "carol@x.ai" },
+        ],
+      }),
+      ctx,
+    );
+    expect(v.groups![1]).toEqual({
+      heading: "In #testnest but not matched to an account here:",
+      people: ["Misha S: Slack email misha@promptowl.io", "Quinn: Slack shares no confirmed email"],
+    });
+    // Without an email mismatch to explain, the members aren't listed.
+    const plain = guardView(refused({ absent_readers: [{ user_id: "u1", name: "Sam", email: "sam@x.ai", reason: "not_in_channel" }], members_not_readers: [{ surface_user_id: "SQ", name: "Quinn", community_user_id: null, email: null, slack_email: null }] }), ctx);
+    expect(plain.groups).toHaveLength(1);
+  });
+
+  it("po-1467: a same-email member whose link was refused shows once, with the reason, not as both absent and unmatched", () => {
+    const v = guardView(
+      refused({
+        absent_readers: [
+          { user_id: "u1", name: "Hiren", email: "hiren@promptowl.ai", reason: "not_linked", match_reason: "unverified" },
+          { user_id: "u2", name: null, email: "temp_a@gmail.com", reason: "no_slack_link" },
+        ],
+        members_not_readers: [
+          { surface_user_id: "SH", name: "Hiren F", community_user_id: null, email: null, slack_email: "Hiren@promptowl.ai" },
+          { surface_user_id: "SQ", name: "Quinn", community_user_id: null, email: null, slack_email: null },
+        ],
+      }),
+      ctx,
+    );
+    expect(v.groups).toEqual([
+      { heading: "In #testnest with the same email, but not linked to their account:", people: ["Hiren: their email here is not verified"] },
+      { heading: "No Slack user in this workspace has the same email:", people: ["temp_a@gmail.com"] },
+      { heading: "In #testnest but not matched to an account here:", people: ["Quinn: Slack shares no confirmed email"] },
+    ]);
   });
 
   it("AC 6: a public nest and a live public link name their cause", () => {
@@ -275,6 +354,28 @@ describe("po-1432: the wizard names who blocks a pair and offers to add channel 
     ]);
     expect(membersToAdd(preview())).toEqual([]);
   });
+
+  it("QA: proposals-only names who can't read, so a missing Add to nest is explained", () => {
+    const po = (members: People["members_not_readers"]) =>
+      guardView(withPeople(preview({ surface_ok: false, detail: { members_total: 2, members_not_readers: members.length } }), { members_not_readers: members }), ctx);
+    // Nobody can be added: an unmatched person and another app's bot are named, no "Can be added" list.
+    const none = po([
+      { surface_user_id: "SX", name: "Xavier", community_user_id: null, email: null, slack_email: "x@x.io" },
+      { surface_user_id: "B1", name: "Zapier", community_user_id: null, email: null, is_bot: true },
+    ]);
+    expect(none.state).toBe("proposals_only");
+    expect(none.groups).toEqual([
+      { heading: "No matching account on this server, so they can't be added:", people: ["Xavier: Slack email x@x.io"] },
+      { heading: "Apps in the channel. They can't be given access; remove them in Slack:", people: ["Zapier"] },
+    ]);
+    expect(membersToAdd(withPeople(preview(), { members_not_readers: [{ surface_user_id: "B1", name: "Zapier", community_user_id: null, email: null, is_bot: true }] }))[0].addable).toBe(false);
+    // An addable member is listed under its own heading.
+    expect(po([{ surface_user_id: "SC", name: "Carol", community_user_id: "u-carol", email: "carol@x.ai" }]).groups).toEqual([
+      { heading: "Can be added to the nest:", people: ["Carol (carol@x.ai)"] },
+    ]);
+    // An older server without people keeps the note alone.
+    expect(guardView(preview({ surface_ok: false, detail: { members_total: 2, members_not_readers: 1 } }), ctx).groups).toBeUndefined();
+  });
 });
 
 describe("po-1432 review: shared-deployment cause and capped name lists", () => {
@@ -288,13 +389,118 @@ describe("po-1432 review: shared-deployment cause and capped name lists", () => 
     );
   });
 
-  it("when the server names fewer readers than are absent, the note adds how many more", () => {
+  it("when the server names fewer readers than are absent, the note gives the full count and says only the first are listed", () => {
     const p = {
       ...preview({ would_bind: false, detail: { readers_total: 312, readers_absent: 22 } }),
       people: people({ absent_readers: [{ user_id: "u1", name: "Sam", email: "sam@x.ai", reason: "not_in_channel" }] }),
     };
-    expect(guardView(p, ctx).note).toBe(
-      "Sam can read PO - Engineering Ops but isn't in #testnest. Add them in Slack, then check again. 21 more readers aren't in #testnest either.",
+    expect(guardView(p, ctx).note).toBe("22 people who can read PO - Engineering Ops can't be found in #testnest. Only 1 is listed below.");
+  });
+});
+
+describe("po-1448: Server settings → Surfaces helpers", () => {
+  it("generateBufferKey makes 32 random bytes in base64, different every time", async () => {
+    const { generateBufferKey } = await import("./control-room-setup");
+    const a = generateBufferKey();
+    const b = generateBufferKey();
+    expect(a).toHaveLength(44);
+    expect(Uint8Array.from(atob(a), (c) => c.charCodeAt(0))).toHaveLength(32);
+    expect(a).not.toBe(b);
+  });
+});
+
+describe("po-1446: channel activity in plain words", () => {
+  const base = { days: 7, since: "", received: 0, buffered: 0, skipped: {}, waiting: 0, judged: { proposed: 0, nothing_kept: 0, failed: 0 }, cards: { posted: 0, queued: 0, held: 0 } };
+
+  it("names what arrived, what was skipped and why, what is waiting, what was judged, and the cards", async () => {
+    const { activityLines } = await import("./control-room-setup");
+    const lines = activityLines(
+      { ...base, received: 14, buffered: 9, skipped: { too_short: 3, bot_or_system: 2 }, waiting: 1, judged: { proposed: 1, nothing_kept: 4, failed: 0 }, cards: { posted: 1, queued: 1, held: 0 } },
+      20,
     );
+    expect(lines).toEqual([
+      "14 messages received · 9 kept for judging · 5 skipped (3 too short, 2 from bots or Slack itself)",
+      "1 thread waiting for the 20-minute quiet window",
+      "5 threads judged: 1 proposed, 4 with nothing worth keeping. The Decision ledger says why for each.",
+      "1 card posted · 1 queued for tomorrow (daily limit)",
+    ]);
+  });
+
+  it("says where to look when nothing arrived", async () => {
+    const { activityLines } = await import("./control-room-setup");
+    const lines = activityLines(base, 20);
+    expect(lines).toContain("No thread judged yet.");
+    expect(lines[lines.length - 1]).toMatch(/Nothing arrived from Slack.*message\.groups.*app_mention.*reaction_added.*reinstall/);
+    expect(lines[lines.length - 1]).not.toMatch(/buffer key/);
+    // One Slack app per server: the hint points at the address Setup lists, not at a per-connection one.
+    expect(lines[lines.length - 1]).toMatch(/Request URL is the events address listed under Setup → Slack app/);
+    expect(activityLines({ ...base, received: 1, skipped: { too_short: 1 } }, 20).join(" ")).not.toMatch(/Nothing arrived/);
+  });
+});
+
+describe("po-1446 review: failed, held and singular wording", () => {
+  it("says failed and held, and uses the singular for one", async () => {
+    const { activityLines } = await import("./control-room-setup");
+    const lines = activityLines(
+      { days: 7, since: "", received: 1, buffered: 1, skipped: {}, waiting: 0, judged: { proposed: 0, nothing_kept: 0, failed: 1 }, cards: { posted: 0, queued: 0, held: 1 } },
+      20,
+    );
+    expect(lines[0]).toBe("1 message received · 1 kept for judging · 0 skipped");
+    expect(lines[1]).toBe("1 thread judged: 0 proposed, 0 with nothing worth keeping, 1 failed. The Decision ledger says why for each.");
+    expect(lines[2]).toBe("0 cards posted · 1 held (no eligible reviewer in the channel)");
+  });
+});
+
+describe("guardView: a passing check says why, in plain words", () => {
+  const preview = (detail: Record<string, unknown>, surface_ok: boolean) =>
+    ({
+      would_bind: true,
+      is_ext_shared: false,
+      ext_capture_enabled: false,
+      guard: {
+        capture_ok: true,
+        surface_ok,
+        members_known: true,
+        detail: { readers_total: 6, readers_absent: 0, members_total: 10, members_not_readers: 0, guests: 0, externals: 0, non_user_principals: [], universe: false, org_wide: false, ext_shared: false, ...detail },
+      },
+    }) as never;
+  it("everyone can read, some can't, one reader, and a public channel chosen on purpose", async () => {
+    const { guardView } = await import("./control-room-setup");
+    const ctx = { channel: "general", nest: "Ops" };
+    expect(guardView(preview({}, true), ctx).passed).toEqual([
+      "All 6 people who can read Ops are in #general, so nobody outside the channel sees what it saves.",
+      "All 10 channel members can read Ops, so cards in Slack can show its existing notes.",
+      "Server admins can read every nest and aren't counted.",
+    ]);
+    expect(guardView(preview({ members_not_readers: 4 }, false), ctx).passed![1]).toBe("4 of the 10 channel members can't read Ops. They see new suggestions in Slack, never existing notes.");
+    expect(guardView(preview({ readers_total: 1 }, true), ctx).passed![0]).toMatch(/^The 1 person who can read Ops is in #general/);
+    expect(guardView(preview({ readers_absent: 2 }, true), ctx).passed![0]).toMatch(/public channel chosen on purpose/);
+  });
+});
+
+describe("a same-email member who can't be matched says why", () => {
+  it("names the shared server's domain list, a match since, and an unknown code", async () => {
+    const { guardView } = await import("./control-room-setup");
+    const view = (match_reason: string | null) =>
+      guardView(
+        {
+          would_bind: false,
+          is_ext_shared: false,
+          ext_capture_enabled: false,
+          guard: {
+            capture_ok: false,
+            surface_ok: false,
+            members_known: true,
+            detail: { readers_total: 2, readers_absent: 1, members_total: 2, members_not_readers: 1, guests: 0, externals: 0, non_user_principals: [], universe: false, org_wide: false, ext_shared: false },
+          },
+          people: { absent_readers: [{ user_id: "u", name: "Taimur", email: "t@acme.com", reason: "not_linked", match_reason }], members_not_readers: [], universe_cause: null },
+        } as never,
+        { channel: "qa", nest: "N" },
+      )
+        .groups!.flatMap((g) => g.people)
+        .join(" ");
+    expect(view("org_domain")).toMatch(/several organizations.*Email domains/);
+    expect(view(null)).toMatch(/they match now/);
+    expect(view("brand_new")).toMatch(/could not be made \(brand_new\)/);
   });
 });

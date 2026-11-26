@@ -1,9 +1,11 @@
 /**
  * Why a judge run failed, as one fixed code on the window and its failed run (po-1407).
- * Never keeps an error's message (it can carry a key or chat text): only class name and HTTP status.
+ * The class name and HTTP status are kept. An error's message is kept only for the codes whose
+ * fixed words don't say enough, and only after `safeErrorMessage` took out secrets and chat text.
  */
 import { SlackApiError } from "../adapters/slack/api.js";
 import { SurfaceRateLimited } from "../contract.js";
+import { redact } from "../../notify/outbound-log.js";
 
 export const JUDGE_FAILURE_CODES = [
   "model_auth",
@@ -11,10 +13,13 @@ export const JUDGE_FAILURE_CODES = [
   "model_rate_limited",
   "model_timeout",
   "model_rejected",
+  "model_unavailable",
   "model_error",
   "slack_fetch_failed",
   "nest_read_failed",
   "invalid_output",
+  "output_limit",
+  "no_verdict",
   "db_error",
   "unknown_error",
 ] as const;
@@ -29,6 +34,8 @@ export interface JudgeFailure {
   name: string;
   /** The HTTP status, when the error carries one. */
   status: number | null;
+  /** What exactly went wrong: a validation rule, a stop reason or a cleaned provider message. */
+  detail?: string | null;
 }
 
 export interface JudgeUsage {
@@ -49,6 +56,73 @@ export class JudgeRunError extends Error {
   }
 }
 
+/** Each code in words, as shown on the run (the Control room words are REASON_TEXT in the UI). */
+export const JUDGE_FAILURE_TEXT: Record<JudgeFailureCode, string> = {
+  model_auth: "The model key was refused. Check the model name and the model key.",
+  model_billing: "The model account is out of credit.",
+  model_rate_limited: "The model is rate-limited. Try again later.",
+  model_timeout: "The model call timed out. Raise the listener's time limit or choose a faster model.",
+  model_rejected: "The model refused the request.",
+  model_unavailable: "This model isn't available to the model key. Check the model name, or choose another model.",
+  model_error: "The model call failed.",
+  slack_fetch_failed: "Couldn't reach Slack.",
+  nest_read_failed: "Couldn't read the nest.",
+  invalid_output: "The model's decision was invalid.",
+  output_limit: "The model ran out of output tokens before it answered. Raise the listener's max output tokens or choose another model.",
+  no_verdict: "The model answered without submitting a decision.",
+  db_error: "Database error.",
+  unknown_error: "Unexpected error.",
+};
+
+/** A broken rule of the decision (core/judge-schema.ts) in words a person can follow. */
+const RULE_TEXT: Array<[RegExp, string]> = [
+  [/^items: proposed has none|^items: propose needs/, "it said there was something to save, but gave no suggestion"],
+  [/^items: no_op has none/, "it said there was nothing to save, but gave a suggestion"],
+  [/^items$/, "it gave more than 3 suggestions, or none at all"],
+  [/^(?:not an object|verdict|reason_code|item)$/, "the answer wasn't in the expected form"],
+  [/^target_folder/, "it chose a folder this listener may not use"],
+  [/^target_node_id/, "it named a document it may not change"],
+  [/^title/, "the title was missing, too short or too long"],
+  [/^summary/, "the summary was missing, too long or over 3 sentences"],
+  [/^body/, "the text was missing or too long"],
+  [/^owner/, "the owner was not a usable name"],
+  [/^due_date/, "the due date was not a real date"],
+  [/^evidence_message_ids/, "it cited messages that aren't in the conversation"],
+  [/^tags/, "it used tags this nest doesn't have"],
+  [/^(?:kind|op|correction|agent_suggestion)/, "it mixed up what kind of note this is"],
+  [/^conflict/, "its comparison with an existing note was incomplete"],
+];
+export const ruleText = (rule: string): string => RULE_TEXT.find(([re]) => re.test(rule))?.[1] ?? `part of it was wrong: ${rule}`;
+
+/** The failure in one line, for the run's `error`. */
+export function judgeFailureText(f: JudgeFailure): string {
+  return `${JUDGE_FAILURE_TEXT[f.code]}${f.detail ? ` (${f.detail})` : ""}`;
+}
+
+/** Codes whose words don't say enough on their own: these carry the error's own message. */
+const WITH_MESSAGE = new Set<JudgeFailureCode>(["model_rejected", "model_error", "slack_fetch_failed", "nest_read_failed", "db_error", "unknown_error"]);
+const MAX_DETAIL = 300;
+/** Words a provider error needs to make sense; never masked, even if the chat used them too. */
+const PLAIN_WORDS =
+  /^(?:model|models|token|tokens|max_tokens|max_completion_tokens|temperature|request|error|invalid|invalid_request_error|limit|parameter|unsupported|support|supported|value|message|messages|timeout|connection|with|this|that|does|only|default|not|from|the)$/i;
+
+/**
+ * An error's own message, safe to store and log: credentials redacted, and every
+ * word of the judged conversation masked (AC-BUF-05: chat text never reaches a
+ * log or a table), since a provider can echo what it was sent.
+ */
+export function safeErrorMessage(err: unknown, chat: string[]): string | null {
+  const cause = err instanceof JudgeRunError ? err.cause : err;
+  const raw = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "";
+  if (!raw.trim()) return null;
+  const said = new Set(chat.flatMap((t) => t.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? []).filter((w) => w.length >= 3));
+  return redact(raw)
+    .replace(/[\p{L}\p{N}_]+/gu, (w) => (said.has(w.toLowerCase()) && !PLAIN_WORDS.test(w) ? "…" : w))
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_DETAIL);
+}
+
 /** Out-of-credit refusal: Anthropic's 400 "credit balance is too low" (raw or LiteLLM-wrapped), 402, or "quota". Matched only, never kept. */
 const BILLING_RE = /credit balance|billing|insufficient[_ ](?:quota|funds|credit)|exceeded your current quota|out of credit|payment required/i;
 
@@ -57,6 +131,10 @@ function messagesOf(err: unknown): string {
   const e = err as { message?: unknown; error?: { message?: unknown; error?: { message?: unknown } } } | null;
   return [e?.message, e?.error?.message, e?.error?.error?.message].filter((m) => typeof m === "string").join(" ");
 }
+
+/** A gateway or provider saying this key can't use that model, or there is no such model. Matched only, never kept. */
+const MODEL_RE =
+  /not allowed to access (?:the )?model|model[_ ]access[_ ]denied|key_model_access|team_model_access|(?:invalid|unknown|unsupported) model\b|model\b[^.]{0,80}(?:does not exist|not found|not available|isn't available|not supported)/i;
 
 const TIMEOUT_NAMES = new Set(["AbortError", "TimeoutError", "APIConnectionTimeoutError", "APIUserAbortError"]);
 const PARSE_NAMES = new Set(["SyntaxError", "ZodError"]);
@@ -92,6 +170,7 @@ export function classifyJudgeFailure(err: unknown, stage: JudgeStage): JudgeFail
   if (!fromModel && isDbError(cause, name)) return out("db_error");
   if (fromModel || stage === "model") {
     if (TIMEOUT_NAMES.has(name)) return out("model_timeout");
+    if ((status === 400 || status === 401 || status === 403 || status === 404) && MODEL_RE.test(messagesOf(cause))) return out("model_unavailable");
     if (status === 401 || status === 403) return out("model_auth");
     if (status === 402 || ((status === 400 || status === 429) && BILLING_RE.test(messagesOf(cause)))) return out("model_billing");
     if (status === 429) return out("model_rate_limited");
@@ -105,7 +184,28 @@ export function classifyJudgeFailure(err: unknown, stage: JudgeStage): JudgeFail
   return out("unknown_error");
 }
 
-/** The one server-log line for a failure: name, code, status. No message, no chat. */
-export function judgeFailureLogLine(windowId: string, f: JudgeFailure): string {
-  return `[surfaces] judging window ${windowId} failed: ${f.name} reason=${f.code}${f.status ? ` status=${f.status}` : ""}`;
+/**
+ * An agent run's failure (channel watcher, metacognition runner): an error
+ * with an HTTP status or a timeout came from the model; anything else keeps
+ * its own class (db_error, invalid_output, unknown_error).
+ */
+export function classifyRunFailure(err: unknown, timedOut = false): JudgeFailure {
+  if (timedOut) return { code: "model_timeout", name: nameOf(err), status: statusOf(err) };
+  const fromModel = statusOf(err) !== null || TIMEOUT_NAMES.has(nameOf(err));
+  return classifyJudgeFailure(err, fromModel ? "model" : "setup");
+}
+
+/** A thrown failure, classified, with the error's own cleaned message when the code alone doesn't explain it. */
+export function describeJudgeFailure(err: unknown, stage: JudgeStage, chat: string[]): JudgeFailure {
+  const f = classifyJudgeFailure(err, stage);
+  return WITH_MESSAGE.has(f.code) ? { ...f, detail: safeErrorMessage(err, chat) } : f;
+}
+
+/** The one server-log line for a failure: name, code, status, cleaned detail and run facts. No chat. */
+export function judgeFailureLogLine(windowId: string, f: JudgeFailure, facts: Record<string, string | number | null | undefined> = {}): string {
+  const extra = Object.entries({ ...facts, detail: f.detail ? JSON.stringify(f.detail) : null })
+    .filter(([, v]) => v !== null && v !== undefined && v !== "")
+    .map(([k, v]) => ` ${k}=${v}`)
+    .join("");
+  return `[surfaces] judging window ${windowId} failed: ${f.name} reason=${f.code}${f.status ? ` status=${f.status}` : ""}${extra}`;
 }

@@ -22,6 +22,7 @@ import { invalidateConversationGuards, invalidateInstallGuards } from "../invali
 import { surfacesEnabled } from "../flags.js";
 import { effectiveReaders } from "./readers.js";
 import { failClosedBinding, markRemoved, recheckBinding, type BindingRow } from "./binding-service.js";
+import { logCaught } from "../log.js";
 
 export { onBindingPaused } from "./pause-hooks.js";
 
@@ -85,12 +86,12 @@ export async function runGuardSweep(now: number = Date.now()): Promise<string[]>
       } catch (err) {
         // This nest's readers can't be computed: fail its bindings closed and
         // carry on with every other nest (M1).
-        console.error(`[surfaces] reader computation failed for nest ${b.nest_id}; failing its bindings closed`, err instanceof Error ? err.message : err);
+        logCaught("guard", err, { nest: b.nest_id, call: "readers" }); // failing its bindings closed
         fingerprints.set(key, null);
       }
     }
     if (fingerprints.get(key) === null) {
-      await failClosedBinding(b.id).catch(() => {});
+      await failClosedBinding(b.id).catch((err) => logCaught("guard", err, { binding: b.id, call: "fail_closed" }));
       continue;
     }
     const changed = b.readers_fingerprint !== fingerprints.get(key);
@@ -105,8 +106,8 @@ export async function runGuardSweep(now: number = Date.now()): Promise<string[]>
     } catch (err) {
       // recheckBinding fails closed itself; this covers a throw before it got
       // that far (e.g. reading the row). Never leave a binding live on error.
-      console.error(`[surfaces] guard re-check failed for binding ${id}:`, err instanceof Error ? err.message : err);
-      await failClosedBinding(id).catch(() => {});
+      logCaught("guard", err, { binding: id, call: "recheck" });
+      await failClosedBinding(id).catch((e) => logCaught("guard", e, { binding: id, call: "fail_closed" }));
     }
   }
   // S2b: retry any card redaction that failed (§4.17, redaction_pending).
@@ -138,7 +139,7 @@ export function startSurfacesGuardLoop(): void {
   if (timer) return;
   timer = setInterval(() => {
     if (!surfacesEnabled()) return;
-    void guardTick().catch((err) => console.error("[surfaces] guard sweep failed", err));
+    void guardTick().catch((err) => logCaught("guard", err, { call: "sweep" }));
   }, GUARD_TICK_MS);
   timer.unref?.();
 }

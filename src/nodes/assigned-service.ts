@@ -12,6 +12,7 @@ import { getDb } from "../db/client.js";
 import { canReadNode } from "../governance/access-guard.js";
 import { taskFieldsOf } from "./task-fields.js";
 import { openBlockerCounts } from "./relations.js";
+import { nestDoneTags } from "../nests/service.js";
 
 export interface AssignedItem {
   nest_id: string;
@@ -24,14 +25,31 @@ export interface AssignedItem {
   assigned_at: string | null;
   /** Open blockers (task relations); absent when nothing open blocks it. */
   open_blockers?: number;
+  /** The document's tags, lowercase and without the leading `#` — the stage
+   *  (`stage:doing`) and anything else a filter might use. */
+  tags: string[];
+  /** Present (true) only on a finished task, and only when the caller asked
+   *  for them (`includeDone`). Open tasks carry no flag. */
+  done?: true;
+  /** When the task was completed, for a finished task. */
+  completed_at?: string | null;
 }
 
 const MAX_ITEMS = 100;
 
+const normTag = (t: unknown) => String(t).toLowerCase().replace(/^#/, "");
+
+/**
+ * `includeDone` also returns the caller's finished tasks (marked `done`), after
+ * the open ones. A task is finished when it has a completion stamp OR carries
+ * one of its nest's done tags — a task closed by tag through an agent or a
+ * file sync has no stamp, and used to sit in the open list forever.
+ */
 export async function listAssignedTo(
   email: string,
   userId: string,
   nestName: Map<string, string>,
+  opts: { includeDone?: boolean } = {},
 ): Promise<AssignedItem[]> {
   const nestIds = [...nestName.keys()];
   if (nestIds.length === 0 || !email) return [];
@@ -43,6 +61,16 @@ export async function listAssignedTo(
     [...nestIds, `%${me}%`],
   )) as Array<{ nest_id: string; node_id: string; frontmatter_json: string }>;
 
+  const doneTagsByNest = new Map<string, Set<string>>();
+  const doneTagsOf = async (nestId: string) => {
+    let set = doneTagsByNest.get(nestId);
+    if (!set) {
+      set = new Set((await nestDoneTags(nestId).catch(() => [])).map(normTag));
+      doneTagsByNest.set(nestId, set);
+    }
+    return set;
+  };
+
   const candidates: AssignedItem[] = [];
   for (const r of rows) {
     let fm: any;
@@ -53,7 +81,11 @@ export async function listAssignedTo(
     }
     const f = taskFieldsOf(fm?.metadata);
     // The API lowercases on write; a file sync or import may not.
-    if (f.assignee?.toLowerCase() !== me || f.completed_at) continue;
+    if (f.assignee?.toLowerCase() !== me) continue;
+    const tags: string[] = Array.isArray(fm?.tags) ? fm.tags.map(normTag) : [];
+    const doneTags = await doneTagsOf(r.nest_id);
+    const finished = !!f.completed_at || tags.some((t) => doneTags.has(t));
+    if (finished && !opts.includeDone) continue;
     candidates.push({
       nest_id: r.nest_id,
       nest_name: nestName.get(r.nest_id) ?? r.nest_id,
@@ -63,6 +95,8 @@ export async function listAssignedTo(
       due: f.due ?? null,
       priority: f.priority ?? null,
       assigned_at: f.assigned_at ?? null,
+      tags,
+      ...(finished ? { done: true as const, completed_at: f.completed_at ?? null } : {}),
     });
   }
   // Sort before capping, so the soonest-due cards are the ones kept: overdue
@@ -70,8 +104,11 @@ export async function listAssignedTo(
   // access check then runs only until the cap fills.
   candidates.sort(
     (a, b) =>
-      (a.due ?? "9999").localeCompare(b.due ?? "9999") ||
-      (b.assigned_at ?? "").localeCompare(a.assigned_at ?? ""),
+      Number(!!a.done) - Number(!!b.done) ||
+      (a.done
+        ? (b.completed_at ?? b.assigned_at ?? "").localeCompare(a.completed_at ?? a.assigned_at ?? "")
+        : (a.due ?? "9999").localeCompare(b.due ?? "9999") ||
+          (b.assigned_at ?? "").localeCompare(a.assigned_at ?? "")),
   );
   const out: AssignedItem[] = [];
   for (const c of candidates) {

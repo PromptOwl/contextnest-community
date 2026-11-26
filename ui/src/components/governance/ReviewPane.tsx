@@ -8,6 +8,7 @@
  * Request changes takes a required reason inline. Edit draft hands off to the
  * document editor, where the edit-and-approve flow (CU-wdqcq04wnw) lives.
  */
+import { displayNameFor } from "../../lib/person-name";
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -20,6 +21,7 @@ import {
   Lock,
   Pencil,
   Send,
+  SkipForward,
   X,
 } from "lucide-react";
 import * as api from "../../lib/api";
@@ -35,6 +37,8 @@ import {
 } from "../../lib/review-pane";
 import { MarkdownEditor } from "../MarkdownEditor";
 import { DiffViewer } from "./DiffViewer";
+import { ReviewProvenance } from "./ReviewProvenance";
+import { ReviewTaskDetails, isTaskLike } from "./ReviewTaskDetails";
 import { summarizeChange } from "./change-summary";
 import { unifiedDiff } from "./diff-util";
 import { rowDiffLines, tableRowDiff } from "../../lib/table-row-diff";
@@ -59,6 +63,9 @@ interface ReviewPaneProps {
   onRequestChanges: (note: string) => Promise<void>;
   /** Decline for good (reason required). Omit to hide Reject. */
   onReject?: (note: string) => Promise<void>;
+  /** Pass over this one without deciding and open the next. Omit when there is
+   *  no next, and the button is not shown. */
+  onSkip?: () => void;
   /** Open the document in the editor (Edit, Save & approve). */
   onEditDraft: () => void;
   onOpenDocument: (nodeId: string) => void;
@@ -86,6 +93,7 @@ export function ReviewPane({
   onApprove,
   onRequestChanges,
   onReject,
+  onSkip,
   onEditDraft,
   onOpenDocument,
   onClose,
@@ -210,6 +218,7 @@ export function ReviewPane({
   const changeSummary =
     hasPublished && publishedBody != null ? summarizeChange(publishedBody, body || "").text : null;
 
+  const requester = displayNameFor(request.requestedByName ?? request.requestedBy);
   return (
     <div className="flex min-w-0 flex-col gap-4" data-testid="review-pane">
       {/* Header: what this is, who sent it, what it changes. */}
@@ -217,7 +226,7 @@ export function ReviewPane({
         <div className="min-w-0 flex-1">
           <h2 className="text-xl font-semibold leading-tight">{title}</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            From <span className="font-medium text-foreground/80">{request.requestedBy}</span> ·{" "}
+            From <span className="font-medium text-foreground/80">{requester}</span> ·{" "}
             {since(request.requestedAt)}
             {" · "}
             {hasPublished
@@ -248,12 +257,21 @@ export function ReviewPane({
           <Send className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
           <div className="min-w-0">
             <p className="text-xs font-medium text-blue-800 dark:text-blue-300">
-              {request.requestedBy}&rsquo;s note
+              {requester}&rsquo;s note
             </p>
             <p className="mt-0.5 whitespace-pre-wrap">{request.requestNote}</p>
           </div>
         </div>
       )}
+
+      <ReviewProvenance
+        requestedBy={requester}
+        requestedAt={request.requestedAt}
+        runId={request.runId}
+        lastEdit={(node as { last_edit?: any } | undefined)?.last_edit ?? null}
+      />
+
+      {isTaskLike(node as any) && <ReviewTaskDetails node={node as any} />}
 
       {changeSummary && (
         <p
@@ -316,7 +334,9 @@ export function ReviewPane({
                 </>
               )
             ) : (
+              (tab === "published" ? publishedBody : body)?.trim() ? (
               <MarkdownEditor
+                compact
                 // Remount per document and per tab, or TipTap keeps the
                 // previous body on swap.
                 key={`${nodeId}:${tab}`}
@@ -326,6 +346,12 @@ export function ReviewPane({
                 nestId={nestId}
                 onWikiLinkClick={handleWikiLinkClick}
               />
+              ) : (
+                <p className="p-4 text-sm text-muted-foreground" data-testid="review-pane-empty-body">
+                  This {typeLabel ? typeLabel.toLowerCase() : "document"} has no written description. What you are
+                  approving is in the details above.
+                </p>
+              )
             )}
           </div>
         </div>
@@ -377,6 +403,18 @@ export function ReviewPane({
                     data-testid="review-pane-edit"
                   >
                     <Pencil className="mr-1.5 h-4 w-4" /> Edit draft
+                  </Button>
+                )}
+                {mode === "idle" && onSkip && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={processing}
+                    onClick={onSkip}
+                    data-testid="review-pane-skip"
+                    title="Leave this for later and open the next change. It stays in your queue."
+                  >
+                    <SkipForward className="mr-1.5 h-4 w-4" /> Skip
                   </Button>
                 )}
                 {mode === "idle" && (

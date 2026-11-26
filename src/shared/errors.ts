@@ -8,6 +8,9 @@ export class AppError extends Error {
   }
 }
 
+/** A review decision refused for a reason written for the person who asked; safe to show them. */
+export class ReviewRefusal extends Error {}
+
 export class NotFoundError extends AppError {
   constructor(message = "Not found") {
     super(404, message);

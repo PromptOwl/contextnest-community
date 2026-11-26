@@ -13,6 +13,7 @@ import {
   markIntroSeen,
   memberRows,
   memberSpec,
+  membersSummary,
   messageFeatures,
   nestChat,
   orderConversations,
@@ -92,6 +93,12 @@ describe("AC-C3-16 members panel", () => {
     expect(rows.map((r) => r.online)).toEqual([true, false, false, false]);
     expect(rows.find((r) => r.label === "Me")?.you).toBe(true);
     expect(rows.find((r) => r.label === "@scout")?.kind).toBe("agent");
+  });
+  it("po-1451 counts everyone with access, not only who joined", () => {
+    const joined = memberRows(members.slice(0, 1), new Set(), "me@x");
+    const others = memberRows(members.slice(1), new Set(["zed@x"]), "me@x");
+    expect(membersSummary(joined, others)).toBe("4 with access · 1 joined · 1 around now");
+    expect(membersSummary(joined, [])).toBe("1 member");
   });
 });
 

@@ -17,7 +17,7 @@ import type { NestPermission } from "../shared/access.js";
 import type { Querier, SqlParam } from "../db/adapter.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 
-const DIMENSIONS = ["folder", "status", "tag", "assignee", "priority", "field"] as const;
+const DIMENSIONS = ["folder", "status", "tag", "assignee", "priority", "field", "creator"] as const;
 const SWIMLANES = ["assignee", "priority", "parent", "field"] as const;
 /** A custom field key (src/nodes/custom-fields.ts KEY_RE). Whether the field
  *  still exists is the UI's concern — a deleted field's board shows one

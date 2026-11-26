@@ -97,6 +97,14 @@ export const LIST_COLUMNS: ListColumn[] = [
     value: (n, c) => (n.parent ? (c.titleOf(n.parent) ?? n.parent).toLowerCase() : null),
   },
   {
+    id: "creator",
+    label: "Created by",
+    width: "130px",
+    sortable: true,
+    hideBelow: "lg",
+    value: (n) => n.author?.toLowerCase() || null,
+  },
+  {
     id: "tags",
     label: "Tags",
     width: "140px",

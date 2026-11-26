@@ -110,6 +110,34 @@ describe("assignment → inbox + My Work", () => {
   });
 });
 
+describe("My Work tasks: finished by tag, and the done filter", () => {
+  it("a task in a done tag leaves assigned even without a completion stamp; assigned_done=1 brings it back marked done", async () => {
+    // Open when it is made, so no completed_at is ever written …
+    await create(owner, { title: "parked-task", content: "x", type: "task", tags: ["parked", "stage:review"], assignee: ann.email });
+    let { data } = await jsonRequest(app, "GET", "/me/work", undefined, ann.apiKey);
+    expect(data.assigned.find((x: any) => x.node_id === "nodes/parked-task").tags).toEqual(
+      expect.arrayContaining(["parked", "stage:review"]),
+    );
+    // … then the nest decides "parked" means done.
+    await jsonRequest(app, "PATCH", `/nests/${nestId}/settings`, { done_tags: ["parked"] }, owner.apiKey);
+    ({ data } = await jsonRequest(app, "GET", "/me/work", undefined, ann.apiKey));
+    expect(data.assigned.some((x: any) => x.node_id === "nodes/parked-task")).toBe(false);
+    ({ data } = await jsonRequest(app, "GET", "/me/work?assigned_done=1", undefined, ann.apiKey));
+    const done = data.assigned.find((x: any) => x.node_id === "nodes/parked-task");
+    expect(done).toMatchObject({ done: true });
+    // Open work still comes first.
+    const firstDone = data.assigned.findIndex((x: any) => x.done);
+    expect(data.assigned.slice(firstDone).every((x: any) => x.done)).toBe(true);
+  });
+
+  it("open tasks carry tags and no done flag", async () => {
+    const { data } = await jsonRequest(app, "GET", "/me/work", undefined, ann.apiKey);
+    const open = data.assigned.find((x: any) => x.node_id === "nodes/write-copy");
+    expect(open.tags).toContain("doing");
+    expect(open.done).toBeUndefined();
+  });
+});
+
 describe("board config: groupings and swimlanes", () => {
   it("accepts assignee/priority columns, swimlanes and hide-done; rejects junk", async () => {
     const ok = await jsonRequest(app, "POST", `/nests/${nestId}/boards`, {

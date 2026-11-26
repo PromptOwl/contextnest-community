@@ -47,24 +47,28 @@ describe("index built from the database manifest", () => {
   };
 
   it("writes the same context.yaml and INDEX.md as a full crawl, without crawling", async () => {
-    const log = vi.spyOn(console, "log");
-    let moveLine = "";
+    const crawl = vi.spyOn(NestStorage.prototype, "discoverDocuments");
+    const run = vi.spyOn(getDb(), "run");
     try {
       const a = await create("Alpha", "nodes/one", "links to [[Beta]]");
       const b = await create("Beta", "nodes/one", "plain");
       await create("Gamma", "nodes/two", "see contextnest://nodes/one/beta");
+      run.mockClear();
       const moved = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${b}/move`, { folder: "nodes/two" }, apiKey);
       expect(moved.status).toBe(200);
+      // The move only queues its index update, for both paths (po-1247).
+      const queued = run.mock.calls
+        .filter(([sql]) => String(sql).includes("INSERT INTO nest_write_jobs"))
+        .map(([, params]) => (params as unknown[])[1]);
+      expect(queued).toEqual(expect.arrayContaining([b, "nodes/two/beta"]));
       const del = await jsonRequest(app, "DELETE", `/nests/${nestId}/nodes/${a}`, undefined, apiKey);
       expect(del.status).toBeLessThan(300);
       await sealsSettled(nestId);
-      moveLine = log.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith("[write] io move:")) ?? "";
     } finally {
-      log.mockRestore();
+      run.mockRestore();
     }
-    // The move's index update read the database, not the folders.
-    expect(moveLine).toContain("regenerateIndex");
-    expect(moveLine).not.toContain("discoverDocuments");
+    // Every queued update read the database, not the folders.
+    expect(crawl).not.toHaveBeenCalled();
 
     const rows = (await getDb().all(
       "SELECT node_id FROM node_index WHERE nest_id = ? AND manifest_json IS NULL",
@@ -78,6 +82,8 @@ describe("index built from the database manifest", () => {
     expect(fromDb[2]).toMatch(/beta/i);
     expect(fromDb[0]).toMatch(/gamma/i);
     await new NestStorage(root, { agentConfigs: false }).regenerateIndex();
+    expect(crawl).toHaveBeenCalled(); // the spy does see a crawl
+    crawl.mockRestore();
     expect(fromDb).toEqual(await snapshot(root, folders));
   });
 

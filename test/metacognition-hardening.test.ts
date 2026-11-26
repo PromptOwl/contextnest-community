@@ -423,12 +423,21 @@ describe("failures, timeouts and cost", () => {
     script = [() => new Promise<Turn>(() => {})];
     const done = await run("nodes/curator");
     expect(done.run.status).toBe("failed");
+    expect(done.run.reason_code).toBe("model_timeout"); // po-1452: what the ledger shows
     expect(done.run.trace.stopped_by).toBe("timeout");
     expect(done.run.trace.error).toMatch(/10s limit/);
     await new Promise((r) => setTimeout(r, 100));
     expect(slack.some((t) => /Run of \*nodes\/curator\* failed/.test(t))).toBe(true);
     await jsonRequest(app, "PUT", `/nests/${nestId}/metacognition/nodes/curator`, CONFIG, owner.apiKey);
   }, 30_000);
+
+  it("po-1452: a model call the provider refuses closes the run failed with a fixed reason code", async () => {
+    script = [() => { throw Object.assign(new Error("credit balance is too low"), { status: 402 }); }];
+    const done = await run("nodes/curator");
+    expect(done.run.status).toBe("failed");
+    expect(done.run.reason_code).toBe("model_billing");
+    expect(done.run.trace.http_status).toBe(402);
+  });
 
   it("writes each turn's usage to the trace as it goes, and a crash keeps it", async () => {
     script = [call(toolUse("read_node", { id: "nodes/gtm/pricing" })), say("Done.")];
@@ -459,8 +468,9 @@ describe("failures, timeouts and cost", () => {
     );
     slack.length = 0;
     expect(await recoverOrphanedRuns({ nestId })).toBeGreaterThanOrEqual(1);
-    const row = (await db.get("SELECT status, trace FROM runs WHERE id = ?", [id])) as any;
+    const row = (await db.get("SELECT status, trace, reason_code FROM runs WHERE id = ?", [id])) as any;
     expect(row.status).toBe("failed");
+    expect(row.reason_code).toBe("server_stopped");
     const trace = JSON.parse(row.trace);
     expect(trace.usage.input_tokens).toBe(500);
     expect(trace.stopped_by).toBe("crashed");

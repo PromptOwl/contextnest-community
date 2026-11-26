@@ -16,6 +16,7 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { nowExpr } from "../db/sql.js";
 import { listNestExternalEdits } from "./external-edit-service.js";
+import { listNodeChanges } from "../nodes/node-changes.js";
 import { describeTaskActivity, listTaskActivity } from "../nodes/task-activity.js";
 import type { Comment, CommentStatus, ActivityEntry } from "./types.js";
 
@@ -250,6 +251,20 @@ export async function getActivity(params: {
         refId: r.id,
       });
     }
+  }
+
+  // Moves and tag changes (po-1400).
+  for (const ch of await listNodeChanges({ nestId: params.nestId, nodeId: params.nodeId, limit })) {
+    const agent = typeof ch.client?.agent === "string" ? ch.client.agent : undefined;
+    entries.push({
+      type: ch.kind,
+      nodeId: ch.nodeId,
+      actor: ch.actor,
+      at: ch.at,
+      detail: ch.detail,
+      refId: ch.id,
+      ...(agent ? { agent } : {}),
+    });
   }
 
   // Task interactions — what agents (and people) logged with context_task_log.

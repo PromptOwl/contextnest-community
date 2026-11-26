@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
-import { ValidationError } from "../shared/errors.js";
+import { NotFoundError, ValidationError } from "../shared/errors.js";
 import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
 import { injectArtifactBridge } from "../shared/artifact-bridge.js";
 import { resolveCallerEmail, canReadNode } from "../governance/access-guard.js";
@@ -13,7 +13,9 @@ import {
   readArtifact,
   resolveHostedNodeId,
 } from "./service.js";
+import { deleteComment, editComment } from "./comment-edits.js";
 import { ARTIFACT_NODE_TYPE, type AnnotationAnchor } from "./types.js";
+import { isArchivedForCaller } from "../nodes/service.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { attributeRequest } from "../shared/client-metadata.js";
 import { channelPostRefusal } from "../channels/channel-service.js";
@@ -56,6 +58,7 @@ annotationRoutes.get("/:nodeId{.+}/annotations", async (c) => {
   if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
+  if (await isArchivedForCaller(nestId, nodeId, userEmail)) throw new NotFoundError("Node not found");
   return c.json({ threads: await listThreads(nestId, nodeId) });
 });
 
@@ -164,6 +167,35 @@ export async function handleAnnotationReply(
 annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/comments", async (c) =>
   handleAnnotationReply(c, getNodeId(c), c.req.param("threadId")!),
 );
+
+// POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments/:commentId/{edit,delete}
+// The author's own comment (po-1229). POST, not PATCH/DELETE: those verbs on
+// /nodes/** are write-tier document changes, and commenting is read tier.
+for (const action of ["edit", "delete"] as const) {
+  annotationRoutes.post(`/:nodeId{.+}/annotations/:threadId/comments/:commentId/${action}`, async (c) => {
+    const nestId = c.req.param("nestId")!;
+    const nodeId = getNodeId(c);
+    const userId = c.get("userId");
+    const userEmail = await resolveCallerEmail(userId);
+    if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
+      return c.json({ error: "Access denied" }, 403);
+    }
+    const input = await c.req
+      .json<{ body?: unknown; client?: unknown }>()
+      .catch((): { body?: unknown; client?: unknown } => ({}));
+    const caller = {
+      nestId,
+      userId,
+      userEmail,
+      client: messageClient(attributeRequest(c, input.client), input.client, c.get("apiKeyLabel")),
+    };
+    const at = { nodeId, threadId: c.req.param("threadId")!, commentId: c.req.param("commentId")! };
+    if (action === "edit") await editComment(caller, at, input.body, requestBaseUrl(c.req.url));
+    else await deleteComment(caller, at);
+    const thread = (await listThreads(nestId, nodeId)).find((t) => t.id === at.threadId) ?? null;
+    return c.json({ thread });
+  });
+}
 
 // POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/resolve
 annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/resolve", async (c) => {

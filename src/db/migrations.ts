@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import { ANON_USER_ID } from "../shared/constants.js";
-import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
+import { surfacesS1Ddl, surfacesBindingHistoryDdl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterSqlite } from "../surfaces/schema-ddl-s2b.js";
 import { surfacesS3Ddl, surfacesS3AlterSqlite } from "../surfaces/schema-ddl-s3.js";
@@ -2841,6 +2841,33 @@ export function runMigrations(db: Database.Database): void {
       );
     `);
     recordMigration("100_hired_agents");
+  }
+
+  // 101: Surfaces binding history (po-1437): who started, paused, resumed,
+  //   moved or removed a channel binding, when and why. Shared DDL with Postgres.
+  if (!hasMigration("101_surface_binding_history")) {
+    db.exec(surfacesBindingHistoryDdl("(datetime('now'))"));
+    recordMigration("101_surface_binding_history");
+  }
+
+  // 102: who moved a document and who changed its tags (po-1400). Nothing to
+  //   backfill: earlier moves were not recorded anywhere.
+  if (!hasMigration("102_node_changes")) {
+    db.exec(`
+    CREATE TABLE IF NOT EXISTS node_changes (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('moved', 'tags_changed')),
+      actor TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      client_json TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_node_changes_node
+      ON node_changes(nest_id, node_id, created_at);
+    `);
+    recordMigration("102_node_changes");
   }
 }
 

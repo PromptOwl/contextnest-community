@@ -95,13 +95,15 @@ import {
 } from "./workflow/run-routes.js";
 import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { metacognitionRoutes } from "./metacognition/routes.js";
-import { envRoutes } from "./workflow/env-routes.js";
+import { envRoutes, storedEnvValues } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
 import { onboardingRoutes } from "./onboarding/routes.js";
 import { surfacesRoutes, linkPageRoutes } from "./surfaces/routes.js";
 import { slackPublicRoutes } from "./surfaces/adapters/slack/routes.js";
 import { aboutSurfacesRoutes, ABOUT_SURFACES_PATH } from "./surfaces/about-page.js";
 import { surfacesEnabled } from "./surfaces/flags.js";
+import { getSettings as getSurfaceSettings, updateSettings as updateSurfaceSettings } from "./surfaces/services/settings-service.js";
+import { applySettingsPatch, DEFAULT_SETTINGS as DEFAULT_SURFACE_SETTINGS } from "./surfaces/core/settings.js";
 import { createSlackConnector } from "./surfaces/adapters/slack/connector.js";
 import { registerConnector, getConnector } from "./surfaces/registry.js";
 import { parseKey } from "./surfaces/services/buffer-crypto.js";
@@ -1040,7 +1042,7 @@ export function createApp(): Hono<AuthEnv> {
   // superadmin) only.
   app.use("/admin/settings", flexAuthMiddleware);
   app.use("/admin/settings/*", flexAuthMiddleware);
-  const currentServerSettings = () => ({
+  const currentServerSettings = async () => ({
     promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
     manual_sign_in: config.MANUAL_SIGN_IN,
     // True while password self-registration is open alongside live SSO —
@@ -1094,8 +1096,8 @@ export function createApp(): Hono<AuthEnv> {
     surfaces_judge_model: config.SURFACES_JUDGE_MODEL ?? "",
     surfaces_default_cap_usd: config.SURFACES_DEFAULT_CAP_MICROS ? config.SURFACES_DEFAULT_CAP_MICROS / 1_000_000 : null,
     surfaces_org_name: config.SURFACES_ORG_NAME ?? "",
-    // Hosted one-click Slack app (PromptOwl's own); secrets are presence only.
-    surfaces_slack_hosted_enabled: config.FEATURE_SURFACES_SLACK_HOSTED,
+    surfaces_quiet_minutes: (await getSurfaceSettings()).quiet_minutes,
+    // The server's one Slack app; secrets are presence only.
     surfaces_slack_hosted_client_id: config.SURFACES_SLACK_HOSTED_CLIENT_ID ?? "",
     surfaces_slack_hosted_client_secret_set: !!config.SURFACES_SLACK_HOSTED_CLIENT_SECRET,
     surfaces_slack_hosted_signing_secret_set: !!config.SURFACES_SLACK_HOSTED_SIGNING_SECRET,
@@ -1161,7 +1163,7 @@ export function createApp(): Hono<AuthEnv> {
   app.get("/admin/settings", async (c) => {
     if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
-    return c.json(currentServerSettings());
+    return c.json(await currentServerSettings());
   });
 
   // Newer release on npm, and the command that updates this install.
@@ -1181,7 +1183,9 @@ export function createApp(): Hono<AuthEnv> {
   app.get("/admin/models", async (c) => {
     if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
-    const credential = resolveModelCredential();
+    // With a nest, what that nest's calls can reach: its own key comes first.
+    const forNest = c.req.query("nest_id");
+    const credential = resolveModelCredential(forNest ? await storedEnvValues(forNest) : {});
     const current = hootieModel(credential);
     // On the server's own gateway every call stays there, so PromptOwl-held
     // own-provider models aren't offered.
@@ -1281,6 +1285,8 @@ export function createApp(): Hono<AuthEnv> {
       fieldErrors[field] = message;
     };
     const pending: Array<{ name: string; value: string | null }> = [];
+    // Kept with the Surfaces settings, not as a server setting; saved with the rest.
+    let quietMinutes: number | null = null;
 
     // Custom assistant identity is an enterprise entitlement. A request that
     // would CHANGE it is refused whole — nothing written, not even its other
@@ -1294,7 +1300,7 @@ export function createApp(): Hono<AuthEnv> {
             error:
               "Custom assistant name and branding are an Enterprise feature. Upgrade the licence to change them.",
             code: "enterprise_required",
-            settings: currentServerSettings(),
+            settings: await currentServerSettings(),
           },
           403,
         );
@@ -1320,7 +1326,7 @@ export function createApp(): Hono<AuthEnv> {
           error:
             "Models on this server are supplied by PromptOwl. Using your own model key or gateway is an Enterprise feature.",
           code: "byok_required",
-          settings: currentServerSettings(),
+          settings: await currentServerSettings(),
         },
         403,
       );
@@ -1339,7 +1345,7 @@ export function createApp(): Hono<AuthEnv> {
             error:
               "Single sign-on with Entra ID, Okta or another identity provider is an Enterprise feature. Google sign-in works on every plan.",
             code: "sso_required",
-            settings: currentServerSettings(),
+            settings: await currentServerSettings(),
           },
           403,
         );
@@ -1598,12 +1604,19 @@ export function createApp(): Hono<AuthEnv> {
       if (v.length > 100) addError("surfaces_org_name", "Organization name must be 100 characters or fewer.");
       else pending.push({ name: "SURFACES_ORG_NAME", value: v || null });
     }
-    if ("surfaces_slack_hosted_enabled" in body) {
-      const surfacesOn = "surfaces_enabled" in body ? !!body.surfaces_enabled : config.FEATURE_SURFACES;
-      if (body.surfaces_slack_hosted_enabled && !surfacesOn) addError("surfaces_slack_hosted_enabled", "Turn Surfaces on first.");
-      else pending.push({ name: "FEATURE_SURFACES_SLACK_HOSTED", value: body.surfaces_slack_hosted_enabled ? "true" : null });
+    if ("surfaces_quiet_minutes" in body) {
+      const raw = body.surfaces_quiet_minutes;
+      const n = raw === null || String(raw).trim() === "" ? DEFAULT_SURFACE_SETTINGS.quiet_minutes : Number(raw);
+      const now = await getSurfaceSettings();
+      try {
+        applySettingsPatch(now, { quiet_minutes: n });
+        quietMinutes = n;
+      } catch {
+        addError("surfaces_quiet_minutes", `Quiet window must be a whole number of minutes from 5 to 240 (empty uses the default, ${DEFAULT_SURFACE_SETTINGS.quiet_minutes}).`);
+      }
     }
-    // Hosted Slack app id and secrets: single tokens; the secrets are write-only.
+    // The server's Slack app id and secrets: single tokens; the secrets are write-only.
+    const slackKeys: Record<string, string> = {};
     for (const [key, name] of [
       ["surfaces_slack_hosted_client_id", "SURFACES_SLACK_HOSTED_CLIENT_ID"],
       ["surfaces_slack_hosted_client_secret", "SURFACES_SLACK_HOSTED_CLIENT_SECRET"],
@@ -1612,7 +1625,26 @@ export function createApp(): Hono<AuthEnv> {
       if (!(key in body)) continue;
       const v = typeof body[key] === "string" ? body[key].trim() : "";
       if (/\s/.test(v) || v.length > 256) addError(key, "Must be a single value with no spaces, up to 256 characters (or empty to clear it).");
-      else pending.push({ name, value: v || null });
+      else {
+        pending.push({ name, value: v || null });
+        slackKeys[key] = v;
+      }
+    }
+    // A new Client ID or secret is checked with Slack before it is saved, so a wrong key fails here, not at approval.
+    if (slackKeys.surfaces_slack_hosted_client_id || slackKeys.surfaces_slack_hosted_client_secret) {
+      const id = slackKeys.surfaces_slack_hosted_client_id ?? config.SURFACES_SLACK_HOSTED_CLIENT_ID;
+      const secret = slackKeys.surfaces_slack_hosted_client_secret ?? config.SURFACES_SLACK_HOSTED_CLIENT_SECRET;
+      const { refusedClientPair } = await import("./surfaces/adapters/slack/api.js");
+      const refused = id && secret ? await refusedClientPair(id, secret) : null;
+      // The refused key may be the saved one, from the app's previous keys: say so, so both get pasted.
+      const fromStore = refused && !slackKeys[`surfaces_slack_hosted_${refused.field}`];
+      if (refused)
+        addError(
+          `surfaces_slack_hosted_${refused.field}`,
+          fromStore
+            ? `The saved ${refused.field === "client_id" ? "Client ID" : "Client secret"} doesn't match the value you entered. Paste this app's ${refused.field === "client_id" ? "Client ID" : "Client secret"} too and save both.`
+            : refused.error,
+        );
     }
     // Experimental: the cross-nest document stream. Its own switch, no
     // dependencies. Off writes a tombstone (null): the switch is off now and
@@ -2114,7 +2146,7 @@ export function createApp(): Hono<AuthEnv> {
     const errorMessages = Object.values(fieldErrors);
     if (errorMessages.length)
       return c.json(
-        { error: errorMessages.join("; "), fieldErrors, settings: currentServerSettings() },
+        { error: errorMessages.join("; "), fieldErrors, settings: await currentServerSettings() },
         400,
       );
 
@@ -2137,7 +2169,7 @@ export function createApp(): Hono<AuthEnv> {
           {
             error: message,
             fieldErrors: { [ses ? "ses_region" : "smtp_url"]: message },
-            settings: currentServerSettings(),
+            settings: await currentServerSettings(),
           },
           400,
         );
@@ -2159,13 +2191,24 @@ export function createApp(): Hono<AuthEnv> {
           .map((p) => authOrEmailSetting(p.name)!),
       ),
     ];
+    // First, so when it fails nothing else has been saved.
+    if (quietMinutes !== null) {
+      try {
+        await updateSurfaceSettings({ quiet_minutes: quietMinutes });
+      } catch (e) {
+        return c.json(
+          { error: `Nothing was saved. Could not save the quiet window: ${e instanceof Error ? e.message : String(e)}`, settings: await currentServerSettings() },
+          500,
+        );
+      }
+    }
     try {
       await applySettings(pending);
     } catch (e) {
       return c.json(
         {
-          error: e instanceof Error ? e.message : String(e),
-          settings: currentServerSettings(),
+          error: `${e instanceof Error ? e.message : String(e)}. Other settings in this save may already be stored.`,
+          settings: await currentServerSettings(),
         },
         500
       );
@@ -2186,7 +2229,7 @@ export function createApp(): Hono<AuthEnv> {
       if (refused) {
         if (savedAny) await validateLicense({ forceFresh: true });
         return c.json(
-          { error: refused, fieldErrors: { [`provider_keys.${p}`]: refused }, settings: currentServerSettings() },
+          { error: refused, fieldErrors: { [`provider_keys.${p}`]: refused }, settings: await currentServerSettings() },
           400,
         );
       }
@@ -2194,7 +2237,7 @@ export function createApp(): Hono<AuthEnv> {
     }
     if (savedAny) await validateLicense({ forceFresh: true });
 
-    return c.json({ settings: currentServerSettings() });
+    return c.json({ settings: await currentServerSettings() });
   });
 
   // GET /admin/trace — the operator audit surface: newest-first activity
@@ -2481,6 +2524,8 @@ export function createApp(): Hono<AuthEnv> {
         ...paging,
         sections: parseMyWorkSections(c.req.query("sections")),
         actingAs: actingAgentHandle(readClient(c)),
+        // ?assigned_done=1 — My Work's "Done" / "All" task filter.
+        includeDoneTasks: c.req.query("assigned_done") === "1",
       }),
     );
   });
@@ -3437,10 +3482,12 @@ export function createApp(): Hono<AuthEnv> {
     // Handlers re-check node read-access; don't bump these POSTs to "write".
     //   POST …/annotations                        → create thread
     //   POST …/annotations/:id/{comments,resolve,reopen}
+    //   POST …/annotations/:id/comments/:commentId/{edit,delete}
     const isAnnotationAction =
       isPost &&
       (/\/annotations$/.test(path) ||
-        /\/annotations\/[^/]+\/(comments|resolve|reopen)$/.test(path));
+        /\/annotations\/[^/]+\/(comments|resolve|reopen)$/.test(path) ||
+        /\/annotations\/[^/]+\/comments\/[^/]+\/(edit|delete)$/.test(path));
     // Marking a channel read (PO-1189) is the caller's own bookmark, like a
     // pin: anyone who can read the channel may, a read-only member most of
     // all. The handler checks channel access. Exact segments.

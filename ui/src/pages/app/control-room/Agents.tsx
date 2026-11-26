@@ -15,8 +15,9 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { getRollups, registerAgent } from "../../../lib/api";
-import { SOURCE_LABEL, SOURCE_TEXT, agentRows, fmtWhen, usd, type AgentRow } from "../../../lib/control-room-overview";
+import { getRollups, listSurfacesBindings, registerAgent } from "../../../lib/api";
+import { ListenerSettings } from "./ListenerSettings";
+import { SOURCE_LABEL, SOURCE_TEXT, agentRows, fmtWhen, usd, withIdleListeners, type AgentRow } from "../../../lib/control-room-overview";
 import { AgentIcon, Card, CardHead, EmptyState, ErrorLine, Loading, Mono, ToneBadge } from "./parts";
 import { useRead, type ControlRoomScope } from "./scope";
 import { cn } from "@/lib/utils";
@@ -25,8 +26,12 @@ const FRESH_MS = 90 * 60_000;
 
 export function Agents({ scope, onManageKeys }: { scope: ControlRoomScope; onManageKeys: () => void }) {
   const { nestId, range, tick } = scope;
-  const roll = useRead(() => getRollups(nestId, { from: range.from, to: range.to, by: "agent", grain: "week" }), [nestId, range.from, tick]);
-  const rows = roll.data ? agentRows(roll.data.rows) : null;
+  // Bumped after a listener is saved, so its row shows the new name at once.
+  const [saves, setSaves] = useState(0);
+  const roll = useRead(() => getRollups(nestId, { from: range.from, to: range.to, by: "agent", grain: "week" }), [nestId, range.from, tick, saves]);
+  // Connected listeners show even before their first conversation, so they can be set up.
+  const bound = useRead(() => listSurfacesBindings().catch(() => []), [tick, saves]);
+  const rows = roll.data ? withIdleListeners(agentRows(roll.data.rows), bound.data ?? [], nestId) : null;
   // Arrival: an agent whose last report is newer than at the previous read.
   const seen = useRef<Map<string, string> | null>(null);
   const [arrived, setArrived] = useState<Set<string>>(new Set());
@@ -42,7 +47,7 @@ export function Agents({ scope, onManageKeys }: { scope: ControlRoomScope; onMan
     const t = setTimeout(() => setArrived(new Set()), 1600);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roll.data]);
+  }, [roll.data, bound.data]);
 
   return (
     <div className="space-y-4" data-testid="cr-agents">
@@ -53,7 +58,7 @@ export function Agents({ scope, onManageKeys }: { scope: ControlRoomScope; onMan
           Listeners appear here once Slack is set up. Agents you run yourself, like Claude Code or a scheduled script, appear as soon as they post their first run.
         </EmptyState>
       )}
-      {rows && rows.length > 0 && <AgentList rows={rows} days={range.days.length} arrived={arrived} nestName={scope.nestName} knownNest={(id) => scope.nests.some((n) => n.id === id)} showNest={!nestId && scope.nests.length > 1} />}
+      {rows && rows.length > 0 && <AgentList rows={rows} days={range.days.length} arrived={arrived} nestName={scope.nestName} knownNest={(id) => scope.nests.some((n) => n.id === id)} showNest={!nestId && scope.nests.length > 1} onSaved={() => setSaves((n) => n + 1)} />}
       <ConnectCard scope={scope} onManageKeys={onManageKeys} />
     </div>
   );
@@ -66,6 +71,7 @@ function AgentList({
   nestName,
   knownNest,
   showNest,
+  onSaved,
 }: {
   rows: AgentRow[];
   days: number;
@@ -74,6 +80,7 @@ function AgentList({
   /** Nests the reader can name; a private nest stays unnamed (N1). */
   knownNest: (id: string) => boolean;
   showNest: boolean;
+  onSaved: () => void;
 }) {
   const now = Date.now();
   return (
@@ -110,6 +117,7 @@ function AgentList({
                     <span className="hidden min-[801px]:inline">{SOURCE_TEXT[a.source] ?? "Reports to the ledger."}</span>
                     {showNest && a.nestId && knownNest(a.nestId) && <span> · {nestName(a.nestId)}</span>}
                   </div>
+                  {a.source === "surfaces" && <ListenerSettings nodeId={a.nodeId} nestId={a.nestId} onSaved={onSaved} />}
                 </div>
               </div>
               <div className="hidden min-[801px]:block">
@@ -125,7 +133,7 @@ function AgentList({
                 <div className="tabular-nums">{usd(a.totals.cost_usd)}</div>
                 <div className="inline-flex items-center gap-1.5 tabular-nums">
                   <i className={cn("h-2 w-2 rounded-full", fresh ? "bg-green-600" : "bg-zinc-400")} aria-hidden />
-                  <span>{fmtWhen(a.lastAt)}</span>
+                  <span>{a.lastAt ? fmtWhen(a.lastAt) : "No conversations yet"}</span>
                   <span className="sr-only">{fresh ? "(reported in the last 90 minutes)" : ""}</span>
                 </div>
               </div>

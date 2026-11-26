@@ -400,6 +400,8 @@ export interface AdminSettings {
   /** Write-only: the buffer key to set, or null to clear. */
   surfaces_buffer_key?: string | null;
   surfaces_judge_model?: string;
+  /** Minutes a conversation must be quiet before it is judged; empty = built-in default. */
+  surfaces_quiet_minutes?: number | string | null;
   /** Default monthly Surfaces spend cap per nest, in dollars; null = built-in default. */
   surfaces_default_cap_usd?: number | string | null;
   surfaces_org_name?: string;
@@ -408,8 +410,7 @@ export interface AdminSettings {
   distill_enabled?: boolean;
   /** Any person may connect their own Slack workspace to a nest they own. */
   surfaces_slack_self_serve?: boolean;
-  /** Hosted one-click Slack app (FEATURE_SURFACES_SLACK_HOSTED) and its credentials. */
-  surfaces_slack_hosted_enabled?: boolean;
+  /** The server's one Slack app: its credentials. */
   surfaces_slack_hosted_client_id?: string;
   surfaces_slack_hosted_client_secret_set?: boolean;
   surfaces_slack_hosted_signing_secret_set?: boolean;
@@ -700,9 +701,9 @@ export async function getAdminLicense() {
 }
 
 /** Models this server's credential can reach (admin), and the one Hootie uses now. */
-export async function getAdminModels() {
+export async function getAdminModels(nestId?: string | null) {
   return request<{ models: string[]; current: string; source: "own" | "promptowl" | null; own_models?: string[]; providers?: Record<string, string>; error?: string }>(
-    "/admin/models",
+    `/admin/models${nestId ? `?nest_id=${encodeURIComponent(nestId)}` : ""}`,
   );
 }
 
@@ -2071,7 +2072,8 @@ export async function getNestCensus(nestId: string) {
 /** Per-node comment (annotation thread) counts for sorting the document list. */
 export async function getCommentCounts(nestId: string) {
   return request<{
-    counts: Record<string, { count: number; lastAt: string | null }>;
+    /** Threads, unresolved threads and messages per document. */
+    counts: Record<string, { count: number; open: number; comments: number; lastAt: string | null }>;
   }>(`/nests/${nestId}/comment-counts`);
 }
 
@@ -2635,9 +2637,10 @@ export async function withdrawDeletionRequest(nestId: string, id: string) {
   );
 }
 
-/** Create a folder with nothing in it — no placeholder document. */
+/** Create a folder with nothing in it — no placeholder document. `created` is
+ *  false when it was already there. */
 export async function createFolder(nestId: string, folder: string) {
-  return request<{ folder: string }>(`/nests/${nestId}/folders`, {
+  return request<{ folder: string; created: boolean }>(`/nests/${nestId}/folders`, {
     method: "POST",
     body: JSON.stringify({ folder }),
   });
@@ -2799,6 +2802,8 @@ export type ActivityLogType =
   | "commented"
   | "comment_resolved"
   | "deleted"
+  | "moved"
+  | "tags_changed"
   | "read"
   | "retrieved"
   | "exported";
@@ -2977,6 +2982,8 @@ export interface AnnotationComment {
   createdAt: string;
   /** Set when an agent run posted it: links to its trace. */
   runId?: string;
+  /** When its author last edited it. */
+  editedAt?: string;
 }
 
 export interface AnnotationThread {
@@ -3087,6 +3094,28 @@ export async function createAnnotation(
   return request<{ thread: AnnotationThread; comment_id?: string; mentions?: PostedMention[] }>(
     `/nests/${nestId}/nodes/${nodeId}/annotations`,
     { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+/** Change one's own comment. */
+export async function editAnnotationComment(
+  nestId: string,
+  nodeId: string,
+  threadId: string,
+  commentId: string,
+  body: string,
+) {
+  return request<{ thread: AnnotationThread | null }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/comments/${commentId}/edit`,
+    { method: "POST", body: JSON.stringify({ body }) },
+  );
+}
+
+/** Remove one's own comment; `thread` is null when nothing is left in it. */
+export async function deleteAnnotationComment(nestId: string, nodeId: string, threadId: string, commentId: string) {
+  return request<{ thread: AnnotationThread | null }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/comments/${commentId}/delete`,
+    { method: "POST", body: JSON.stringify({}) },
   );
 }
 
@@ -3599,7 +3628,11 @@ export interface ChannelMembers {
   channel: ChannelSummary;
   private: boolean;
   members: ChatMember[];
+  /** Public channel: who can read and post without having joined. Absent on an older server. */
+  audience?: { email: string; name: string }[];
 }
+
+export type ContainerMembers = Pick<ChannelMembers, "members" | "audience">;
 
 export async function listChannelMembers(nestId: string, name: string) {
   return request<ChannelMembers>(`${channelPath(nestId, name)}/members`);
@@ -3727,6 +3760,8 @@ export type ActivityType =
   | "edit_proposed"
   | "review_requested"
   | "review_resolved"
+  | "moved"
+  | "tags_changed"
   | "task_activity";
 
 export interface ActivityEntry {
@@ -4423,6 +4458,11 @@ export interface AssignedItem {
   assigned_at: string | null;
   /** Open blockers (task relations); absent when nothing open blocks it. */
   open_blockers?: number;
+  /** Lowercase tags without `#` — the stage (`stage:doing`) among them. */
+  tags?: string[];
+  /** True on a finished task; only present when Done tasks were asked for. */
+  done?: true;
+  completed_at?: string | null;
 }
 
 /**
@@ -4465,8 +4505,15 @@ export async function markMentionDone(threadId: string) {
   );
 }
 
-export async function getMyWork(opts?: { limit?: number; offset?: number; mentionsOffset?: number }) {
+export async function getMyWork(opts?: {
+  limit?: number;
+  offset?: number;
+  mentionsOffset?: number;
+  /** Also list finished tasks in `assigned` (the Done / All task filter). */
+  doneTasks?: boolean;
+}) {
   const q = new URLSearchParams();
+  if (opts?.doneTasks) q.set("assigned_done", "1");
   if (opts?.limit != null) q.set("limit", String(opts.limit));
   if (opts?.offset != null) q.set("offset", String(opts.offset));
   if (opts?.mentionsOffset != null) q.set("mentions_offset", String(opts.mentionsOffset));
@@ -4665,6 +4712,9 @@ export interface RunSummary {
   /** Write-tier only; null for read-tier callers. */
   trace?: { error?: string; [k: string]: unknown } | null;
 }
+
+/** A listener run stored as succeeded before its unusable verdict counted as a failure. */
+export const unusableVerdict = (r: Pick<RunSummary, "trace">) => r.trace?.kind === "surfaces_judge" && r.trace?.verdict === "error_schema";
 
 /** A run is only really running once a runner has claimed it. */
 export const isQueued = (r: Pick<RunSummary, "status" | "claimed_by">) =>
@@ -5419,6 +5469,8 @@ export interface MetacognitionNotifyConfig {
 }
 
 export interface MetacognitionAgent extends Omit<MetacognitionAgentConfig, "persona"> {
+  /** Set on a Slack listener: changed in Control room → Setup, read-only here. */
+  managed_by?: { kind: "slack"; channel: string | null; status: string; folders: string[] } | null;
   node_id: string;
   enabled: boolean;
   persona: { name: string; avatar: string | null; email: string };
@@ -5574,7 +5626,29 @@ export interface SurfacesStatus {
   bindings: { total: number; active: number; paused_guard: number; paused_by_member: number; removed: number };
   org_name: string | null;
   slack_hosted: boolean;
+  /** This server hosts several organizations. */
+  shared_deployment?: boolean;
   disclosure: string;
+  /** po-1444: server admins only. What Slack setup needs from this server. */
+  readiness?: {
+    /** null when Slack can reach the public base URL. */
+    public_url: { problem: string; steps: string[] } | null;
+    redirect_url: string | null;
+    buffer_key: boolean;
+    model_key: boolean;
+  };
+}
+
+export interface SurfacesJudgeTuning {
+  name: string | null;
+  avatar: string | null;
+  folders: string[] | null;
+  max_turns: number | null;
+  max_items: number | null;
+  model: string | null;
+  max_output_tokens: number | null;
+  temperature: number | null;
+  timeout_seconds: number | null;
 }
 
 export interface SurfacesBinding {
@@ -5584,6 +5658,18 @@ export interface SurfacesBinding {
   conversation_id: string;
   conversation_name?: string | null;
   status: "active" | "paused_guard" | "paused_by_member" | "removed";
+  /** A nest admin paused it on purpose (po-1437). */
+  paused_by_admin?: boolean;
+  listener_agent_node_id?: string | null;
+  /** The listener's own settings; null = the default. */
+  judge?: SurfacesJudgeTuning;
+  /** What each unset setting means right now. */
+  judge_defaults?: SurfacesJudgeTuning;
+  /** The folders its starter gave it: what `judge.folders` may narrow. */
+  listener_folders?: string[];
+  /** What the listener is called; null = no better name than its id. */
+  listener_name?: string | null;
+  conversation_kind?: string;
   [k: string]: unknown;
 }
 
@@ -5610,8 +5696,16 @@ export interface SurfacesBindingPreview {
   disclosure: string;
   /** po-1432: names for the preview caller only (absent on older servers). */
   people?: {
-    absent_readers: Array<{ user_id: string | null; name: string | null; email: string | null; reason: "not_in_channel" | "no_slack_link" | "no_account" }>;
-    members_not_readers: Array<{ surface_user_id: string; name: string | null; community_user_id: string | null; email: string | null }>;
+    /** `not_linked` (po-1467): a channel member has their email but the link was refused; `match_reason` says why. */
+    absent_readers: Array<{
+      user_id: string | null;
+      name: string | null;
+      email: string | null;
+      reason: "not_in_channel" | "no_slack_link" | "no_account" | "not_linked";
+      match_reason?: string | null;
+    }>;
+    /** `slack_email`: the confirmed email Slack has, for a member with no account match (po-1445). `is_bot`: another app's bot. */
+    members_not_readers: Array<{ surface_user_id: string; name: string | null; community_user_id: string | null; email: string | null; slack_email?: string | null; is_bot?: boolean }>;
     universe_cause: "public" | "link" | "shared_deployment" | null;
   };
 }
@@ -5622,7 +5716,7 @@ export interface SurfacesChannel {
   is_private: boolean;
   is_ext_shared: boolean;
   num_members: number | null;
-  binding: { id: string; nest_id: string; status: string } | null;
+  binding: { id: string; nest_id: string; status: string; paused_by_admin?: boolean } | null;
 }
 
 export interface SurfacesSeedRef {
@@ -5667,6 +5761,13 @@ export const createSlackInstall = (homeNestId: string) =>
   request<{ install_id: string; manifest: unknown }>("/surfaces/slack/installs", surfacesJson({ home_nest_id: homeNestId }));
 export const getSlackInstall = (id: string) =>
   request<{ install: SurfacesInstallRef & { credentials: Record<string, boolean> }; manifest: unknown | null }>(`/surfaces/slack/installs/${encodeURIComponent(id)}`);
+/** The server's one Slack app: manifest, the addresses it must keep, which keys are saved. */
+export const getSlackApp = () =>
+  request<{
+    manifest: unknown;
+    urls: { events: string; interactions: string; commands: string; redirect: string };
+    credentials: { client_id: boolean; client_secret: boolean; signing_secret: boolean };
+  }>("/surfaces/slack/app");
 /** Write-only: values go to the server and never come back. */
 export const putSlackCredentials = (id: string, creds: { client_id?: string; client_secret?: string; signing_secret?: string }) =>
   request<{ stored: string[]; credentials: Record<string, boolean> }>(`/surfaces/slack/installs/${encodeURIComponent(id)}/credentials`, {
@@ -5675,7 +5776,7 @@ export const putSlackCredentials = (id: string, creds: { client_id?: string; cli
   });
 /** Admin disconnect: revokes the token, drops bindings; approved nodes and the audit stay. */
 export const disconnectSurfacesInstall = (id: string) =>
-  request<{ disconnected: boolean; withdrawn: number; kept: string[] }>(`/surfaces/installs/${encodeURIComponent(id)}`, { method: "DELETE" });
+  request<{ disconnected: boolean; withdrawn: number; told?: number; kept: string[] }>(`/surfaces/installs/${encodeURIComponent(id)}`, { method: "DELETE" });
 /** Browser navigations (the server answers with a redirect to Slack). */
 export const slackOAuthStartUrl = (installId: string) => `/surfaces/slack/installs/${encodeURIComponent(installId)}/oauth/start`;
 export const slackHostedOAuthStartUrl = (homeNestId: string) => `/surfaces/slack/hosted/oauth/start?home_nest_id=${encodeURIComponent(homeNestId)}`;
@@ -5683,7 +5784,43 @@ export const listSlackChannels = (installId: string) =>
   request<{ channels: SurfacesChannel[]; truncated: boolean }>(`/surfaces/slack/installs/${encodeURIComponent(installId)}/channels`);
 export const previewSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
   request<SurfacesBindingPreview>("/surfaces/bindings/preview", surfacesJson(b));
-export const createSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean }) =>
+/** po-1437: manage an existing channel → nest binding (nest owner/admin). */
+// Pause, resume and remove need a reason (3–500 characters); it goes on the binding's history.
+const bindingAction = (id: string, action: "pause" | "resume", reason: string) =>
+  request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}/${action}`, surfacesJson({ reason }));
+export const pauseSurfacesBinding = (id: string, reason: string) => bindingAction(id, "pause", reason);
+export const resumeSurfacesBinding = (id: string, reason: string) => bindingAction(id, "resume", reason);
+export const updateSurfacesListener = (bindingId: string, judge: SurfacesJudgeTuning) =>
+  request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(bindingId)}`, { method: "PATCH", body: JSON.stringify({ judge }) });
+/** `movedToNestId`: the nest the channel is moving to; the server looks up its name for the history. */
+export const removeSurfacesBinding = (id: string, reason: string, movedToNestId?: string) =>
+  request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    body: JSON.stringify({ reason, ...(movedToNestId ? { moved_to_nest_id: movedToNestId } : {}) }),
+  });
+export interface SurfacesBindingHistoryEntry {
+  action: "started" | "paused" | "resumed" | "removed" | "moved";
+  reason: string | null;
+  at: string;
+  /** null = Nest itself (a reader check, a member's /nest leave, a disconnect). */
+  by: { user_id: string; email: string | null; name: string | null } | null;
+}
+export const getSurfacesBindingHistory = (id: string) =>
+  request<{ history: SurfacesBindingHistoryEntry[] }>(`/surfaces/bindings/${encodeURIComponent(id)}/history`).then((r) => r.history);
+/** po-1446: counts only, over `days`. `skipped` is keyed by the gate's reason (too_short, bot_or_system, …). */
+export interface SurfacesBindingActivity {
+  days: number;
+  since: string;
+  received: number;
+  buffered: number;
+  skipped: Record<string, number>;
+  waiting: number;
+  judged: { proposed: number; nothing_kept: number; failed: number };
+  cards: { posted: number; queued: number; held: number };
+}
+export const getSurfacesBindingActivity = (id: string) =>
+  request<SurfacesBindingActivity>(`/surfaces/bindings/${encodeURIComponent(id)}/activity`);
+export const createSurfacesBinding = (b: { install_id: string; conversation_id: string; nest_id: string; ext_capture_enabled?: boolean; reason?: string }) =>
   request<{ binding: SurfacesBinding; notice?: "posted" | "already_posted" | "not_needed" | "failed" }>("/surfaces/bindings", surfacesJson(b));
 export const listSurfacesSeeds = (nestId: string) =>
   request<{ seeds: SurfacesSeedRef[] }>(`/surfaces/seeds?nest_id=${encodeURIComponent(nestId)}`).then((r) => r.seeds);

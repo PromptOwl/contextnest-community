@@ -157,7 +157,7 @@ function folders(v: unknown, field: string): string[] {
  * would be fetched by every reviewer's browser that renders the persona: a
  * tracking pixel that reports who read the agent's proposals, and when.
  */
-function avatarGlyph(v: unknown): string {
+export function avatarGlyph(v: unknown): string {
   const s = str(v, "persona.avatar", 32);
   const glyphs = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(s)].length;
   if (glyphs > 4 || /[<>"'`\\/:]/.test(s) || /\s/.test(s)) {
