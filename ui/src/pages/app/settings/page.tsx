@@ -2507,10 +2507,14 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                 <div className="flex items-center justify-between gap-4">
                   <span className="text-sm">
                     Self-serve: anyone signed in can connect their own Slack
-                    workspace to a nest they own ({draft.surfaces_slack_self_serve ? "on" : "off"})
+                    workspace to a nest they own ({draft.surfaces_slack_hosted_enabled && draft.surfaces_slack_self_serve ? "on" : "off"})
+                    {!draft.surfaces_slack_hosted_enabled && (
+                      <span className="block text-xs text-muted-foreground">Turn on the Hosted Slack app first.</span>
+                    )}
                   </span>
+                  {/* Self-serve runs only through the hosted app, so show its real state; the saved value returns with the app. */}
                   <Switch
-                    checked={!!draft.surfaces_slack_self_serve}
+                    checked={!!draft.surfaces_slack_hosted_enabled && !!draft.surfaces_slack_self_serve}
                     disabled={!draft.surfaces_slack_hosted_enabled}
                     onCheckedChange={(v) => set({ surfaces_slack_self_serve: v })}
                     aria-label="Self-serve Slack"

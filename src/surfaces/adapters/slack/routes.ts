@@ -390,7 +390,7 @@ slackAdminRoutes.get("/hosted/oauth/self-serve", async (c) => {
   const userId = c.get("userId");
   if (!credentialMayContribute(c)) return c.json({ error: "Connecting Slack needs your own full credential (a browser session)." }, 403);
   const admin = await isOrgAdmin(userId);
-  if (!config.SURFACES_SLACK_SELF_SERVE && !admin) return c.json({ error: "A server admin must turn on self-serve Slack first." }, 403);
+  if (!config.SURFACES_SLACK_SELF_SERVE && !admin) return c.json({ error: "Self-serve Slack is not turned on for this server. Contact your server admin to turn it on." }, 403);
   const nestId = c.req.query("home_nest_id") ?? "";
   const nest = nestId ? ((await getDb().get("SELECT user_id FROM nests WHERE id = ? AND archived_at IS NULL", [nestId])) as { user_id: string } | undefined) : undefined;
   // Your own nest only (a server admin may target any nest, as on the admin path).

@@ -167,7 +167,7 @@ export async function slackState(userId: string, nestId: string | null): Promise
   const canConnect = configured && (selfServe || admin) && !!nestId;
   let reason: string | null = null;
   if (!configured) reason = "A server admin must configure the Slack app on this server first.";
-  else if (!selfServe && !admin) reason = "A server admin must turn on self-serve Slack, or connect the workspace for you.";
+  else if (!selfServe && !admin) reason = "Self-serve Slack is not turned on for this server. Contact your server admin to turn it on, or to connect Slack for you.";
   else if (!nestId) reason = "Create your nest first.";
   return {
     configured,
