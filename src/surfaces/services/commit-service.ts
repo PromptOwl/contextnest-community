@@ -49,6 +49,20 @@ import { canReviewAll, eligibleReviewers } from "./routing-service.js";
 import { guardKey } from "./window-guard-key.js";
 import { safeErrorMessage } from "./judge-failure.js";
 import { AppError, ReviewRefusal } from "../../shared/errors.js";
+import { logCaught } from "../log.js";
+
+/** Edit rights for one item; a failed check counts as "no" and leaves a line (po-1447). */
+const mayEdit = (nestId: string, nodeId: string, email: string) =>
+  canUserEdit(nestId, nodeId, email).catch((err) => {
+    logCaught("commit", err, { nest: nestId, call: "can_edit" }, "warn");
+    return { allowed: false };
+  });
+/** The approved version after a commit, or null; a failed read leaves a line. */
+const approvedVersion = (nestId: string, nodeId: string) =>
+  getApprovedVersion(nestId, nodeId).catch((err) => {
+    logCaught("commit", err, { nest: nestId, call: "approved_version" }, "warn");
+    return null;
+  });
 
 const iso = (ms = Date.now()) => new Date(ms).toISOString();
 export const HOLD_MS = 7 * 24 * 3600_000;
@@ -208,7 +222,7 @@ export async function authorize(req: Omit<CommitRequest, "interactionId"> & { in
   // before any dialog opens.
   if (req.verb === "edit") {
     for (const it of target) {
-      if (!it.node_id || !(await canUserEdit(it.nest_id, it.node_id, u.email).catch(() => ({ allowed: false }))).allowed) {
+      if (!it.node_id || !(await mayEdit(it.nest_id, it.node_id, u.email)).allowed) {
         await req.responder.note("You can approve or reject this; editing needs edit rights on the document.");
         return { ok: false };
       }
@@ -358,7 +372,7 @@ async function approveOne(req: CommitRequest, a: Extract<Authorized, { ok: true 
     await releaseClaim(item.id);
     return { ok: false, why: "failed", reason: refusalText(err) };
   }
-  const version = (await getApprovedVersion(item.nest_id, item.node_id).catch(() => null)) ?? null;
+  const version = (await approvedVersion(item.nest_id, item.node_id)) ?? null;
   // L6: the item, the audit row and the claim finalise land in ONE
   // transaction. A crash before it leaves an in_progress claim that the
   // sweep reconciles from the review row (reconcileStuckClaims).
@@ -484,7 +498,7 @@ export async function reconcileStuckClaims(nowMs = Date.now()): Promise<number> 
     if (review?.status === "approved" && p) {
       const approver = resolver;
       if (!approver) continue; // resolved by something we can't attribute: leave the claim for an admin to see
-      const version = item.node_id ? ((await getApprovedVersion(item.nest_id, item.node_id).catch(() => null)) ?? null) : null;
+      const version = item.node_id ? ((await approvedVersion(item.nest_id, item.node_id)) ?? null) : null;
       await db.transaction(async (tx) => {
         const r = (await tx.run(
           "UPDATE surface_proposal_items SET state = 'approved', decided_by_user_id = ?, decided_at = ?, version = ?, updated_at = ? WHERE id = ? AND state = 'pending'",
@@ -604,7 +618,7 @@ export async function commit(req: CommitRequest): Promise<CommitResult> {
         const err = await validateEdit(a, it, edits[it.id], req.deadlineMs);
         if (err === "deferred") return { status: "deferred" };
         if (err) errors[`${err.field}:${it.id}`] = err.message;
-        if (it.node_id && !(await canUserEdit(it.nest_id, it.node_id, a.email).catch(() => ({ allowed: false }))).allowed) {
+        if (it.node_id && !(await mayEdit(it.nest_id, it.node_id, a.email)).allowed) {
           errors[`title:${it.id}`] = "Edit & approve needs edit rights on this document too.";
         }
       }
@@ -660,7 +674,8 @@ async function validateEdit(a: Extract<Authorized, { ok: true }>, it: ItemRow, e
   let guard: WindowGuard | null = null;
   try {
     guard = a.p.window_guard ? (JSON.parse(a.p.window_guard) as WindowGuard) : null;
-  } catch {
+  } catch (err) {
+    logCaught("commit", err, { proposal: a.p.id, call: "window_guard" });
     guard = null;
   }
   const index = (await getDb().all("SELECT node_id AS id, title FROM node_index WHERE nest_id = ? AND node_id <> ?", [it.nest_id, it.node_id ?? ""])) as Array<{
@@ -678,8 +693,8 @@ async function validateEdit(a: Extract<Authorized, { ok: true }>, it: ItemRow, e
     try {
       const d = await storage.readDocument(o.id);
       texts.push(`${o.title}\n${d.body ?? ""}`);
-    } catch {
-      /* unreadable node: skip */
+    } catch (err) {
+      logCaught("commit", err, { nest: it.nest_id, call: "edit_check_read" }, "warn"); // unreadable node: skip
     }
   }
   const r = checkEdit(e, { guard, key: guardKey(), otherNodeTexts: texts, peopleFolder: people.includes(it.target_folder), kind: it.item_kind });
@@ -704,7 +719,8 @@ export async function editableItems(items: ItemRow[]): Promise<Array<{ id: strin
         body = String(d.body ?? "");
         const cut = body.lastIndexOf("\n\n---\n_Source:");
         if (cut >= 0) body = body.slice(0, cut);
-      } catch {
+      } catch (err) {
+        logCaught("commit", err, { nest: it.nest_id, call: "edit_draft_read" }, "warn");
         body = "";
       }
     }

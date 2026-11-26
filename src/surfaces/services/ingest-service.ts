@@ -20,6 +20,7 @@ import { recordPurge } from "./purge-audit.js";
 import { encryptText } from "./buffer-crypto.js";
 import { enqueueFetch } from "./fetch-queue.js";
 import type { BindingRow } from "./binding-service.js";
+import { logCaught } from "../log.js";
 
 export const ASKS_PER_DAY = 10;
 export const FORCED_THREAD_MAX = 20;
@@ -40,8 +41,8 @@ export async function count(metric: string, binding: { id: string; nest_id: stri
        ON CONFLICT (binding_id, day, metric) DO UPDATE SET value = surface_counters.value + 1`,
       [ORG_ID, binding?.nest_id ?? null, bindingKey, day(), metric, new Date().toISOString()],
     );
-  } catch {
-    /* counters never fail ingestion */
+  } catch (err) {
+    logCaught("ingest", err, { install: installId, metric, call: "counter" }, "warn"); // counters never fail ingestion
   }
 }
 
@@ -52,7 +53,10 @@ async function bindingFor(installId: string, conversation: string): Promise<Bind
 /** G4: a fetched profile; anything unreadable is `unknown` (dropped). */
 export async function authorStatus(install: InstallRow, userId: string | null): Promise<AuthorStatus> {
   if (!userId) return "unknown";
-  const p = await getProfile(install.id, userId).catch(() => null);
+  const p = await getProfile(install.id, userId).catch((err) => {
+    logCaught("ingest", err, { install: install.id, call: "profile" }, "warn");
+    return null;
+  });
   if (!p) return "unknown";
   if (p.is_bot) return "bot";
   if (p.deleted || p.is_restricted || p.is_ultra_restricted || p.is_stranger) return "guest_or_external";
@@ -137,6 +141,7 @@ async function ingestMessage(install: InstallRow, m: SurfaceMessage, duplicate: 
   } catch (err) {
     // Paused under us (round 2, L2), no buffer key, or the DB refused: fail
     // closed — nothing kept.
+    if (!(err instanceof BindingNotCapturing)) logCaught("ingest", err, { install: install.id, binding: binding?.id, call: "buffer" });
     await count(err instanceof BindingNotCapturing ? "drop_paused" : "drop_buffer_error", binding, install.id);
   }
 }
@@ -189,8 +194,8 @@ async function note(install: InstallRow, b: BindingRow, user: string, text: stri
   if (!c?.sendNote) return;
   try {
     await c.sendNote({ id: b.id, install_id: b.install_id, conversation_id: b.conversation_id, nest_id: b.nest_id }, user, text, thread);
-  } catch {
-    /* best effort */
+  } catch (err) {
+    logCaught("ingest", err, { install: install.id, binding: b.id, call: "note" }, "warn");
   }
 }
 
@@ -243,7 +248,7 @@ async function ingestAsk(install: InstallRow, m: SurfaceMessage): Promise<void> 
     await note(install, binding, requester, REFUSE_LIMIT, replyThread);
     return;
   }
-  const authorName = target.author ? ((await getProfile(install.id, target.author).catch(() => null))?.display_name ?? "a teammate") : "this thread";
+  const authorName = target.author ? ((await getProfile(install.id, target.author).catch((err) => void logCaught("ingest", err, { install: install.id, call: "profile" }, "warn")))?.display_name ?? "a teammate") : "this thread";
   await note(install, binding, requester, `🧠 Drafting from ${target.author ? `${authorName}'s` : "this thread's"} message. It'll appear in this thread.`, replyThread);
 
   const db = getDb();
@@ -339,7 +344,8 @@ async function ingestDm(install: InstallRow, binding: BindingRow, m: SurfaceMess
     }
     await bufferMessage(lite(binding), { ...msg, thread: m.thread });
     await count("buffered", binding, install.id);
-  } catch {
+  } catch (err) {
+    if (!(err instanceof BindingNotCapturing)) logCaught("ingest", err, { install: install.id, binding: binding.id, call: "buffer_dm" });
     await count("drop_buffer_error", binding, install.id);
   }
 }

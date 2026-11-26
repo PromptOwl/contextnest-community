@@ -10,6 +10,7 @@
 import { Hono, type Context } from "hono";
 import { createHmac, timingSafeEqual } from "crypto";
 import type { AuthEnv } from "../auth/middleware.js";
+import { logCaught } from "./log.js";
 import { getSessionIdFromRequest } from "../auth/sessions.js";
 import { credentialMayContribute } from "../governance/org-contribution.js";
 import { AppError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
@@ -302,7 +303,10 @@ surfacesRoutes.post("/bindings/:id/resume", async (c) => {
     // consent — send them the one-tap "Allow Nest back" prompt.
     if (err instanceof AppError && err.statusCode === 409 && /hasn't agreed/.test(err.message)) {
       const { askBooterConsent: ask } = await import("./services/boot-consent.js");
-      const sent = await ask(c.req.param("id")).catch(() => false);
+      const sent = await ask(c.req.param("id")).catch((e) => {
+        logCaught("lifecycle", e, { binding: c.req.param("id"), call: "booter_consent" }, "warn");
+        return false;
+      });
       return c.json(
         {
           error: sent

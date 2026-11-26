@@ -14,6 +14,8 @@ import { engineCache } from "../../nodes/engine.js";
 import { canUserApprove } from "../../governance/stewardship-service.js";
 import { isOrgAdmin } from "./binding-service.js";
 import { personalNestRefusal, surfacesPersonalOwner } from "../draft-visibility.js";
+import { DocumentNotFoundError } from "@promptowl/contextnest-engine";
+import { logCaught } from "../log.js";
 
 const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
 
@@ -28,7 +30,8 @@ export async function draftPage(itemId: string, userId: string): Promise<{ statu
   let level = 0;
   try {
     level = permissionLevel(await resolveNestPermission(it.nest_id, userId));
-  } catch {
+  } catch (err) {
+    logCaught("card", err, { nest: it.nest_id, call: "draft_page_permission" }, "warn");
     level = 0;
   }
   if (level < permissionLevel("read")) return { status: 403, error: "Only readers of this nest can open this draft." };
@@ -39,7 +42,12 @@ export async function draftPage(itemId: string, userId: string): Promise<{ statu
     return { status: 200, html: page("Proposal", `<p>This proposal was ${esc(String(it.state))}. ${it.state === "approved" ? "It is in the nest now." : "The draft was deleted."}</p>`) };
   }
   const u = (await getDb().get("SELECT email FROM users WHERE id = ?", [userId])) as { email: string } | undefined;
-  const reviewer = !!u && (await canUserApprove(it.nest_id, it.node_id, u.email).catch(() => ({ allowed: false }))).allowed;
+  const reviewer = !!u && (
+      await canUserApprove(it.nest_id, it.node_id, u.email).catch((err) => {
+        logCaught("card", err, { nest: it.nest_id, call: "draft_page_can_approve" }, "warn");
+        return { allowed: false };
+      })
+    ).allowed;
   if (!reviewer && !(await isOrgAdmin(userId))) {
     return { status: 200, html: page("Pending review", "<p>Pending review — available once approved.</p>") };
   }
@@ -48,7 +56,8 @@ export async function draftPage(itemId: string, userId: string): Promise<{ statu
     const { storage } = await engineCache.get(it.nest_id);
     const d = await storage.readDocument(it.node_id);
     body = String(d.body ?? "");
-  } catch {
+  } catch (err) {
+    if (!(err instanceof DocumentNotFoundError)) logCaught("card", err, { nest: it.nest_id, call: "draft_page_read" }, "warn");
     return { status: 404, error: "Not found" };
   }
   return {

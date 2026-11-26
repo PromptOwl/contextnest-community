@@ -11,6 +11,7 @@ import { isLicenseAdminEmail } from "../../auth/license.js";
 import { isSuperAdmin } from "../../governance/access-service.js";
 import { sendEmailToRecipient } from "../../notify/email.js";
 import { ORG_ID } from "../flags.js";
+import { logCaught } from "../log.js";
 
 export interface NoticeInput {
   kind: string;
@@ -52,7 +53,8 @@ export async function recordNotice(n: NoticeInput): Promise<string> {
         { status: "agent_notify", docTitle: n.subject, path: "Surfaces", actor: "ContextNest Surfaces", note: n.text, link: "" },
         { senderKind: "system", senderId: null, noNest: true },
       );
-    } catch {
+    } catch (err) {
+      logCaught("notice", err, { kind: n.kind, binding: n.bindingId, call: "email" }, "warn");
       outcome = "failed";
     }
   }

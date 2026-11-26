@@ -14,6 +14,7 @@ import { nestName, bindingRef } from "./card-service.js";
 import { escapeMrkdwn } from "../adapters/slack/blockkit.js";
 import { aboutSurfacesUrl } from "../about-page.js";
 import { getSettings } from "./settings-service.js";
+import { errorCode } from "../log.js";
 
 /** Nest names are capped in the notice so a long one can't crowd out the disclosure and the link. */
 export const NOTICE_NEST_MAX = 80;
@@ -62,8 +63,8 @@ export async function postEnableNotice(bindingId: string): Promise<NoticeOutcome
     await c.postNotice(bindingRef(b), enableNotice(await nestName(b.nest_id), aboutSurfacesUrl(), ttl, install!.bot_user_id));
     return "posted";
   } catch (err) {
-    // No message text or names: the binding id and the error's message only.
-    console.warn(`[surfaces] enable notice not posted for binding ${b.id}: ${err instanceof Error ? err.message : String(err)}`);
+    // No message text or names: the binding id and the error's code only (po-1447).
+    console.warn(`[surfaces] enable notice not posted for binding ${b.id}: code=${errorCode(err)}`);
     await getDb().run("UPDATE surface_bindings SET notice_posted_at = NULL WHERE id = ?", [b.id]);
     return "failed";
   }
