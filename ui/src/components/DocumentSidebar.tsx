@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import { NodeTypeGlyph } from "./nest/NodeTypeIcon";
 import { reads } from "../lib/queries";
-import { nestChat, railChatTarget } from "../lib/chat-harness";
+import { nestChat } from "../lib/chat-harness";
 import { ChatCount, useChatSummary } from "./chat/ChatEntry";
 import { nestRelation, nestRelationText } from "../lib/dashboard-scope";
 import { ANON_USER_ID } from "../lib/constants";
@@ -113,7 +113,10 @@ export function DocumentSidebar({
   // One rail everywhere: the nest list is the same on the dashboard as inside
   // a nest. Only the current nest is unfolded.
   const nests = useQuery({ ...reads.nestList() });
-  const { isAdmin, authMode } = useAuth();
+  const { isAdmin, authMode, hootieEnabled, runnerKeyConfigured, docStreamEnabled } = useAuth();
+  // Chat is here for a member somewhere, for anyone who can ask Hootie, and
+  // for a reader who only has Updates.
+  const chatAvailable = (chat.data?.nests.length ?? 0) > 0 || docStreamEnabled || (hootieEnabled && (runnerKeyConfigured || isAdmin));
   // Which nests are unfolded. The current one always is; others open on click
   // and load their tree on demand.
   const [openNests, setOpenNests] = useState<Set<string>>(
@@ -200,31 +203,25 @@ export function DocumentSidebar({
         <LayoutGrid className={ROW_ICON} />
         All nests
       </button>
-      {/* Chat across nests: when chat is on and I am in it somewhere, one row
-          into the nest on screen, or where my mentions wait. */}
-      {onOpenChat &&
-        (() => {
-          const target = railChatTarget(chat.data, nestId);
-          if (!target) return null;
-          const n = (nests.data?.nests ?? []).find((x: any) => x.id === target.nestId);
-          return (
-            <button
-              type="button"
-              onClick={() => onOpenChat(n ? nestTarget(n) : { nestId: target.nestId, nestName: target.nestName, isOwner: false, isAnonOwned: false })}
-              className={cn(ROW, ROW_IDLE, "mx-2 mt-0.5 w-auto")}
-              title={`Chat in ${target.nestName}`}
-              data-testid="document-sidebar-chat"
-            >
-              <MessagesSquare className={ROW_ICON} />
-              Chat
-              {/* The sum of the per-nest numbers, so it always agrees with the rows below. */}
-              <ChatCount
-                counts={chat.data ? chat.data.nests.reduce((t, x) => ({ unread: t.unread + x.unread, mentions: t.mentions + x.mentions }), { unread: 0, mentions: 0 }) : null}
-                className="ml-auto"
-              />
-            </button>
-          );
-        })()}
+      {/* Chat across every nest (One chat 1 and 2). */}
+      {onOpenDashboardTab && chatAvailable && (
+        <button
+          type="button"
+          onClick={() => onOpenDashboardTab?.("chat")}
+          aria-current={dashboardTab === "chat" ? "page" : undefined}
+          className={cn(ROW, dashboardTab === "chat" ? ROW_ACTIVE : ROW_IDLE, "mx-2 mt-0.5 w-auto")}
+          title="Chat in every nest"
+          data-testid="document-sidebar-chat"
+        >
+          <MessagesSquare className={ROW_ICON} />
+          Chat
+          {/* The sum of the per-nest numbers, so it always agrees with the rows below. */}
+          <ChatCount
+            counts={chat.data ? chat.data.nests.reduce((t, x) => ({ unread: t.unread + x.unread, mentions: t.mentions + x.mentions }), { unread: 0, mentions: 0 }) : null}
+            className="ml-auto"
+          />
+        </button>
+      )}
       {(nests.data?.nests?.length ?? 0) > 1 && (
         <div className="relative mx-2 mt-1 mb-2">
           <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />

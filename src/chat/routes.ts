@@ -57,6 +57,7 @@ import { inviteChannelMember, joinChannel, leaveChannel, listChannelMembers, set
 import { getNestChatSettings, nestChatEnabled, setNestChat } from "./settings.js";
 import { activePresence, heartbeat, parseStatus, PRESENCE_TTL_MS, typing } from "./presence.js";
 import { canReadContainer, getPreferences, setPreference } from "./preferences.js";
+import { myAgents } from "./my-agents.js";
 import { chatUnreadSummary } from "./unread.js";
 import { containerReadVerdict } from "./containers.js";
 import { heartbeatMs, latestEventId, mayOpenStream, replaySince, subscribeChat, type StoredChatEvent } from "./events.js";
@@ -302,6 +303,16 @@ meChatRoutes.put("/preferences", async (c) => {
   const body = await jsonObject(c);
   const userId = c.get("userId");
   return c.json(await setPreference({ userId, userEmail: await resolveCallerEmail(userId) }, { nest_id: body.nest_id, conversation: body.conversation, level: body.level }));
+});
+
+/** What the agents that write under my login have said (One chat 8). */
+meChatRoutes.get("/agents", async (c) => {
+  const userId = c.get("userId");
+  // Its own bucket: reading this list must not use up the unread badge's reads.
+  if (!tryConsume(`chat-agents:${userId}`, UNREAD_BUDGET)) {
+    return c.json({ error: "Too many reads — every 30 s is plenty." }, 429, { "Retry-After": "10" });
+  }
+  return c.json(await myAgents({ userId, email: await resolveCallerEmail(userId) }));
 });
 
 meChatRoutes.get("/unread", async (c) => {

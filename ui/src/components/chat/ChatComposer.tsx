@@ -125,7 +125,7 @@ export function ChatComposer({
             <>Enter adds a line. Tap the arrow to send.</>
           ) : (
             <>
-              <kbd className="font-sans font-medium">Enter</kbd> to send, <kbd className="font-sans font-medium">Shift+Enter</kbd> for a new line. Type @ to
+              <kbd className="font-sans font-medium">Enter</kbd> to send, <kbd className="font-sans font-medium">Ctrl+Enter</kbd> or <kbd className="font-sans font-medium">Shift+Enter</kbd> for a new line. Type @ to
               mention a person or an agent.
             </>
           )}

@@ -29,6 +29,8 @@ import { RequestAccessHost } from "./components/RequestAccessDialog";
 import { BillingConfirmHost } from "./components/BillingConfirmDialog";
 import { HootiePanel, type HootieScope } from "./components/HootiePanel";
 import { ChatLauncher } from "./components/chat/ChatLauncher";
+import { HeaderChat } from "./components/chat/HeaderChat";
+import { setSidePanel } from "./lib/side-panel";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
@@ -1793,6 +1795,13 @@ export default function App() {
             />
           )}
 
+          {adminStatus?.me && !readerMode && view.page !== "docs" && (
+            <HeaderChat
+              nestId={"nestId" in view ? view.nestId : null}
+              onChatPage={view.page === "channels" || (view.page === "dashboard" && view.tab === "chat")}
+              onOpenPage={() => setView({ page: "dashboard", tab: "chat" })}
+            />
+          )}
           {withSidebar && adminStatus?.me && !readerMode && (
             <div className="hidden md:block">
               <TopBarTools
@@ -2366,6 +2375,7 @@ export default function App() {
       {(authenticated || authMode === "open") && (
         <HootiePanel
           page={hootieScope}
+          onOpenChat={agentStreamEnabled ? () => setSidePanel("chat", "open") : undefined}
           onOpenNode={(nestId, nodeId) => void openNodeFromHootie(nestId, nodeId)}
           onOpenSettings={
             isAdmin ? () => setView({ page: "dashboard", tab: "settings" }) : undefined
@@ -2378,7 +2388,7 @@ export default function App() {
         <ChatLauncher
           nestId={"nestId" in view ? view.nestId : null}
           nestName={"nestId" in view ? view.nestName : null}
-          onChatPage={view.page === "channels"}
+          onChatPage={view.page === "channels" || (view.page === "dashboard" && view.tab === "chat")}
           onOpenFull={(t, channel, thread) => {
             const here = "nestId" in view && view.nestId === t.nestId ? view : null;
             // Off a nest: the nav's own route, which reads ownership first.

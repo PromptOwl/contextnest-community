@@ -26,7 +26,7 @@ import remarkGfm from "remark-gfm";
 import { Bold, Bot, Heading, List, ListOrdered } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "../auth/AuthContext";
-import { COARSE_POINTER, enterSends } from "../lib/composer-keys";
+import { COARSE_POINTER, enterAddsLine, enterSends } from "../lib/composer-keys";
 import { linkWikilinks, type MessageWikilink } from "../lib/message-wikilinks";
 import { useMediaQuery } from "../lib/use-media-query";
 import type { ArtifactCard } from "../lib/api";
@@ -262,6 +262,14 @@ export const MentionTextarea = forwardRef<
               setOpen(false);
               return;
             }
+          }
+          if (onEnterSend && enterAddsLine({ key: e.key, altKey: e.altKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, isComposing: e.nativeEvent.isComposing, keyCode: e.keyCode })) {
+            e.preventDefault();
+            const el = e.currentTarget;
+            const at = el.selectionStart;
+            onValueChange(`${value.slice(0, at)}\n${value.slice(el.selectionEnd)}`);
+            requestAnimationFrame(() => el.setSelectionRange(at + 1, at + 1));
+            return;
           }
           if (
             onEnterSend &&

@@ -26,5 +26,11 @@ export function enterSends(e: KeyLike, opts: { coarsePointer: boolean }): boolea
   return !opts.coarsePointer;
 }
 
+/** Ctrl+Enter or Cmd+Enter adds a line (One chat 9). The browser does nothing
+ *  with those chords in a textarea, so the box inserts the line itself. */
+export function enterAddsLine(e: KeyLike): boolean {
+  return e.key === "Enter" && (!!e.ctrlKey || !!e.metaKey) && !e.altKey && !e.isComposing && e.keyCode !== 229;
+}
+
 /** The media query for "the main pointer is a finger". */
 export const COARSE_POINTER = "(pointer: coarse)";

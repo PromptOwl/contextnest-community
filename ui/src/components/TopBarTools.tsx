@@ -28,8 +28,6 @@ import { reads, useNestMeta } from "../lib/queries";
 import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
 import { useAuth } from "../auth/AuthContext";
 import { nestSidebarViews, type NestSidebarView } from "../lib/doc-page";
-import { nestChat } from "../lib/chat-harness";
-import { ChatCount, useChatSummary } from "./chat/ChatEntry";
 
 const MAX_PICKER = 12;
 
@@ -109,15 +107,12 @@ export function TopBarTools({
         : [],
     [caps, workflowPlaneEnabled, agentStreamEnabled, isMember, chatOn, stewardshipEnabled, pending],
   );
-  const chatSummary = useChatSummary();
   // Dashboard: the nests to pick from.
   const nestList = useQuery({ ...reads.nestList(), enabled: !nestId });
 
   if (nestId && caps?.isReaderView) return null;
 
   const review = views.find((v) => v.id === "review");
-  // Chat is its own button beside My Work (PO-1200), not one of the Views.
-  const chatView = views.find((v) => v.id === "channels");
   const grouped = views.filter((v) => v.group === "views" && v.id !== "channels");
   const viewActive =
     grouped.some((v) => v.id === activeView) ||
@@ -130,25 +125,6 @@ export function TopBarTools({
 
   return (
     <div className="flex shrink-0 items-center gap-0.5" data-testid="top-bar-tools">
-      {nestId && chatView && (
-        <Button
-          variant="ghost"
-          size="sm"
-          className={cn(
-            "h-9 gap-1.5 px-2 text-sm font-normal text-muted-foreground hover:text-accent-foreground lg:px-2.5",
-            activeView === "channels" && "bg-accent font-medium text-accent-foreground",
-          )}
-          onClick={() => onOpen(chatView)}
-          aria-current={activeView === "channels" ? "page" : undefined}
-          aria-label="Chat"
-          title="Chat"
-          data-testid="top-bar-chat"
-        >
-          <MessagesSquare className="h-4 w-4 shrink-0" aria-hidden />
-          <span className="hidden whitespace-nowrap bar-md:inline">Chat</span>
-          <ChatCount counts={nestChat(chatSummary.data, nestId)} />
-        </Button>
-      )}
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <Button
@@ -258,8 +234,8 @@ export function TopBarTools({
         data-testid="top-bar-connect"
       >
         <Plug className="h-4 w-4 shrink-0" aria-hidden />
-        {/* Inside a nest Chat takes the room; Connect keeps its icon and title. */}
-        <span className={cn("hidden", nestId && chatView ? "bar-2xl:inline" : "bar-xl:inline")}>Connect</span>
+        {/* Inside a nest the tools take the room; Connect keeps its icon and title. */}
+        <span className={cn("hidden", nestId ? "bar-2xl:inline" : "bar-xl:inline")}>Connect</span>
       </Button>
       {/* Same button on every screen. With no nest open it acts on the one you
           last had open. Hidden only where the open nest is read-only. */}

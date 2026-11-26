@@ -100,18 +100,23 @@ export interface HootiePanelProps {
   onOpenNode: (nestId: string, nodeId: string) => void;
   /** Where the admin turns the key on; shown only to admins. */
   onOpenSettings?: () => void;
+  /** Drawn in place (the Hootie row in Chat) instead of as the side panel. */
+  inline?: boolean;
+  /** The side panel's way to the chat beside it, when there is one. */
+  onOpenChat?: () => void;
 }
 
 const MAX_TURNS_SENT = 20;
 
-export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelProps) {
+export function HootiePanel({ page, onOpenNode, onOpenSettings, inline = false, onOpenChat }: HootiePanelProps) {
   const { hootieEnabled, hootieBrand, runnerKeyConfigured, isAdmin } = useAuth();
   const name = hootieBrand.name;
   const logo = hootieBrand.logo_url || hootieIcon;
   const accent = hootieAccentStyle(hootieBrand.accent_color);
   // One side panel at a time: opening the chat closes Hootie and the other
   // way round (lib/side-panel.ts, PO-1200).
-  const [open, setOpen] = useSidePanel("hootie");
+  const [panelOpen, setOpen] = useSidePanel("hootie");
+  const open = inline || panelOpen;
   const [width, setWidth] = useState<number>(() => readPanelWidth());
   const [viewport, setViewport] = useState<number>(() =>
     typeof window === "undefined" ? 1440 : window.innerWidth,
@@ -123,21 +128,23 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
   }, []);
   // Opened from elsewhere in the app (the welcome screen's Hootie tile).
   useEffect(() => {
+    if (inline) return;
     const onOpen = () => setOpen(true);
     window.addEventListener(HOOTIE_OPEN_EVENT, onOpen);
     return () => window.removeEventListener(HOOTIE_OPEN_EVENT, onOpen);
-  }, []);
-  const push = open && pushesContent(viewport);
+  }, [inline, setOpen]);
+  const push = !inline && open && pushesContent(viewport);
   // On wide screens the open panel sits beside the page instead of over it:
   // the app shell pads its right side by --hootie-inset (App.tsx).
   useEffect(() => {
+    if (inline) return;
     const root = document.documentElement;
     if (push) root.style.setProperty("--hootie-inset", `${width}px`);
     else root.style.removeProperty("--hootie-inset");
     return () => {
       root.style.removeProperty("--hootie-inset");
     };
-  }, [push, width]);
+  }, [push, width, inline]);
 
   // Drag the left edge to resize; the width is remembered per browser.
   const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -354,29 +361,6 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
 
   return (
     <>
-      {/* Launcher: a slim tab on the right edge, out of the way of the page. */}
-      {!open && (
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          aria-label={`Open ${name}`}
-          title={`Ask ${name}`}
-          data-testid="hootie-launcher"
-          style={accent ?? undefined}
-          className={cn(
-            "fixed right-0 top-1/2 z-40 flex -translate-y-1/2 flex-col items-center gap-2 rounded-l-xl py-3 pl-1.5 pr-1 shadow-lg transition-all hover:pl-2.5 focus:outline-none focus-visible:ring-4 focus-visible:ring-primary/30",
-            !accent && "bg-primary text-primary-foreground",
-          )}
-        >
-          <span className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-background">
-            <img src={logo} alt="" referrerPolicy="no-referrer" className="h-6 w-6 object-contain" />
-          </span>
-          <span className="max-h-40 overflow-hidden text-xs font-medium [writing-mode:vertical-rl]">
-            {name}
-          </span>
-        </button>
-      )}
-
       {/* Panel: slides in from the right edge; resizable from its left edge. */}
       {open && (
         <aside
@@ -384,13 +368,15 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
           aria-label={name}
           data-testid="hootie-panel"
           data-pushes={push ? "true" : "false"}
-          style={{ width: pushesContent(viewport) ? width : undefined }}
+          style={{ width: !inline && pushesContent(viewport) ? width : undefined }}
           className={cn(
-            "fixed inset-y-0 right-0 z-40 flex max-w-full flex-col border-l bg-background shadow-2xl animate-in slide-in-from-right duration-200",
-            !pushesContent(viewport) && "w-full sm:w-[420px]",
+            inline
+              ? "flex h-full min-h-0 flex-col bg-background"
+              : "fixed inset-y-0 right-0 z-40 flex max-w-full flex-col border-l bg-background shadow-2xl animate-in slide-in-from-right duration-200",
+            !inline && !pushesContent(viewport) && "w-full sm:w-[420px]",
           )}
         >
-          {pushesContent(viewport) && (
+          {!inline && pushesContent(viewport) && (
             <div
               role="separator"
               aria-orientation="vertical"
@@ -447,7 +433,12 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
                 <RotateCcw className="h-4 w-4" />
               </button>
             )}
-            <button
+            {!inline && onOpenChat && (
+              <button type="button" onClick={onOpenChat} data-testid="hootie-to-chat" className="rounded-md px-2 py-1 text-xs opacity-90 hover:bg-black/10">
+                Chat
+              </button>
+            )}
+            {!inline && <button
               type="button"
               onClick={() => setOpen(false)}
               aria-label={`Close ${name}`}
@@ -456,7 +447,7 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
               className="rounded-md p-1.5 opacity-75 hover:bg-black/10 hover:opacity-100"
             >
               <PanelRightClose className="h-4 w-4" />
-            </button>
+            </button>}
           </header>
 
           {!runnerKeyConfigured ? (
@@ -576,14 +567,14 @@ export function HootiePanel({ page, onOpenNode, onOpenSettings }: HootiePanelPro
                           return;
                         }
                       }
-                      if (e.key === "Enter" && !e.shiftKey) {
+                      if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.nativeEvent.isComposing) {
                         e.preventDefault();
                         // A "/" draft is a nest search, never a question —
                         // with nothing matched, Enter does nothing (the send
                         // button is disabled for the same reason).
                         if (slash === null) void send();
                       }
-                      if (e.key === "Escape") setOpen(false);
+                      if (e.key === "Escape" && !inline) setOpen(false);
                     }}
                   />
                   <button
