@@ -1,6 +1,6 @@
 /**
  * Where Save should leave the user. Creating a document (`nodeId === "new"`)
- * has no page to stay on, so it lands back on the nest. Publishing a draft
+ * opens the document it made (PO-1548). Publishing a draft
  * opened from somewhere (the Board, the review queue) returns there, so the
  * next task is a click away. Any other save of an existing document leaves
  * the editor open on it — otherwise the app view moves to the nest Overview
@@ -9,9 +9,9 @@
  */
 export function saveDestination(
   nodeId: string,
-  opts: { publishedDraft?: boolean; hasReturnTo?: boolean } = {},
-): "nest" | "return" | "stay" {
-  if (nodeId === "new") return "nest";
+  opts: { publishedDraft?: boolean; hasReturnTo?: boolean; savedId?: string } = {},
+): "document" | "nest" | "return" | "stay" {
+  if (nodeId === "new") return opts.savedId ? "document" : "nest";
   if (opts.publishedDraft && opts.hasReturnTo) return "return";
   return "stay";
 }

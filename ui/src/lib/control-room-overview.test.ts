@@ -7,6 +7,7 @@ import { describe, it, expect } from "vitest";
 import {
   ZERO_TOTALS,
   agentRows,
+  withIdleListeners,
   channelRows,
   distillationSeries,
   formatDuration,
@@ -158,5 +159,18 @@ describe("agents and formatting", () => {
     expect(usd(0.004)).toBe("$0.004");
     expect(usd(11.42)).toBe("$11.42");
     expect(sumRows([{ cost_usd: 0.1 }, { cost_usd: 0.2 }]).cost_usd).toBe(0.3);
+  });
+});
+
+describe("withIdleListeners: a connected listener shows before its first conversation", () => {
+  const b = (over: Record<string, unknown> = {}) => ({ nest_id: "n1", status: "active", listener_agent_node_id: "nodes/nest-listener-a1", listener_name: "general nest agent a1", conversation_kind: "public_channel", ...over });
+  it("adds it with zero runs and no last report", () => {
+    expect(withIdleListeners([], [b()], null)).toMatchObject([{ nodeId: "nodes/nest-listener-a1", name: "general nest agent a1", source: "surfaces", lastAt: "", totals: { entries: 0 } }]);
+  });
+  it("never twice, and not a removed channel, a direct message or another nest", () => {
+    const [row] = withIdleListeners([], [b()], null);
+    expect(withIdleListeners([row], [b()], null)).toHaveLength(1);
+    expect(withIdleListeners([], [b({ status: "removed" }), b({ conversation_kind: "dm" }), b({ listener_agent_node_id: null })], null)).toEqual([]);
+    expect(withIdleListeners([], [b()], "n2")).toEqual([]);
   });
 });

@@ -31,7 +31,8 @@ import { PICKABLE_REASONS, type RejectReason } from "../../core/card-model.js";
 import { COMMIT_VERBS, type CommitVerb } from "../../core/identity-rules.js";
 import { ACTION, VIEW, renderBootModal, renderEditModal, renderRejectModal, validateView } from "./blockkit.js";
 import { botToken } from "./connector.js";
-import { slackCall } from "./api.js";
+import { slackCall, slackErrorCode } from "./api.js";
+import { logCaught } from "../../log.js";
 
 export interface HandlerResult {
   status: number;
@@ -45,7 +46,8 @@ export async function respondTo(url: string | null | undefined, body: Record<str
   try {
     const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), redirect: "error", signal: AbortSignal.timeout(10_000) });
     return r.ok;
-  } catch {
+  } catch (err) {
+    logCaught("interactions", err, { call: "response_url" }, "warn");
     return false;
   }
 }
@@ -55,8 +57,8 @@ async function dm(install: InstallRow, user: string, text: string, blocks?: unkn
     const tk = await botToken(install.id);
     const ch = String((await slackCall("conversations.open", { users: user }, { token: tk })).channel?.id ?? "");
     if (ch) await slackCall("chat.postMessage", { channel: ch, text, ...(blocks ? { blocks: JSON.stringify(blocks) } : {}) }, { token: tk });
-  } catch {
-    /* best effort */
+  } catch (err) {
+    logCaught("interactions", err, { install: install.id, call: "dm" }, "warn");
   }
 }
 
@@ -73,8 +75,8 @@ function responder(install: InstallRow, p: Record<string, any>): Responder {
         if (channel) await slackCall("chat.postEphemeral", { channel, user, text, ...(blocks ? { blocks: JSON.stringify(blocks) } : {}) }, { token: tk });
         // App Home has no channel: the note (and any confirm buttons) go by DM.
         else await dm(install, user, text, blocks);
-      } catch {
-        /* best effort */
+      } catch (err) {
+        logCaught("interactions", err, { install: install.id, call: "ephemeral" }, "warn");
       }
     },
   };
@@ -132,12 +134,18 @@ export function readMeta(raw: unknown): Meta | null {
   }
 }
 
+const DIALOG_FAILED_NOTE = "Couldn't open the dialog. Try again.";
+
 async function openView(install: InstallRow, triggerId: string, view: Record<string, any>): Promise<boolean> {
-  if (validateView(view, "modal").length) return false;
+  if (validateView(view, "modal").length) {
+    console.warn(`[surfaces] dialog not opened: code=view_over_limits install=${install.id}`);
+    return false;
+  }
   try {
     await slackCall("views.open", { trigger_id: triggerId, view: JSON.stringify(view) }, { token: await botToken(install.id) });
     return true;
-  } catch {
+  } catch (err) {
+    console.warn(`[surfaces] dialog not opened: code=${slackErrorCode(err)} install=${install.id}`);
     return false;
   }
 }
@@ -205,7 +213,7 @@ async function openDialog(install: InstallRow, p: Record<string, any>, verb: "ed
   const nest = await nestName(a.p.nest_id);
   const target = a.binding.conversation_kind === "dm" ? `${a.items[0]?.target_folder ?? ""} (your private nest)` : (a.items[0]?.target_folder ?? "");
   const view = verb === "edit" ? renderEditModal(await editableItems(a.items), meta, nest, target) : renderRejectModal(meta);
-  await openView(install, String(p.trigger_id ?? ""), view);
+  if (!(await openView(install, String(p.trigger_id ?? ""), view))) await responder(install, p).note(DIALOG_FAILED_NOTE);
 }
 
 async function generalRefusal(install: InstallRow): Promise<string> {
@@ -236,7 +244,7 @@ export async function startBoot(install: InstallRow, binding: BindingRow, user: 
     return;
   }
   const meta = signMeta({ k: "boot", b: binding.id, u: user, t: install.team_id, x: Date.now() + 30 * 60_000 });
-  if (!meta || !(await openView(install, triggerId, renderBootModal(meta, binding.conversation_name)))) await note("Couldn't open the dialog. Try `/nest leave` again.");
+  if (!meta || !(await openView(install, triggerId, renderBootModal(meta, binding.conversation_name)))) await note(DIALOG_FAILED_NOTE);
 }
 
 async function onBlockAction(install: InstallRow, p: Record<string, any>): Promise<void> {
@@ -254,7 +262,7 @@ async function onBlockAction(install: InstallRow, p: Record<string, any>): Promi
     return;
   }
   const after = async () => {
-    if (home) await publishHome(install.id, user).catch(() => {});
+    if (home) await publishHome(install.id, user).catch((err) => logCaught("home", err, { install: install.id }, "warn"));
   };
   switch (id) {
     case ACTION.approve:
@@ -499,5 +507,8 @@ export async function handleCommand(install: InstallRow, raw: string): Promise<H
     await setPersonalDm(install, user, text === "dm on");
     return say(text === "dm on" ? "Your DM capture is on again." : "Your DM capture is off. Anything Nest was holding from our DMs was deleted, and DM proposals waiting for you were withdrawn.");
   }
-  return say("Try `/nest leave` (remove Nest from this conversation), `/nest invite` (bring it back after a member removed it), or `/nest dm off` / `/nest dm on`.");
+  // The command is whatever this Slack app registered (a dev app may not own /nest).
+  const sent = f.get("command") ?? "";
+  const cmd = /^\/[^\s`<>&]{1,31}$/.test(sent) ? sent : "/nest";
+  return say(`Try \`${cmd} leave\` (remove Nest from this conversation), \`${cmd} invite\` (bring it back after a member removed it), or \`${cmd} dm off\` / \`${cmd} dm on\`.`);
 }

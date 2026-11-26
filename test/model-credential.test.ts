@@ -300,6 +300,16 @@ describe("the Hootie model picks the key (own providers, byok)", () => {
     expect(await routeFor({ features: ["byok"], gateway: GATEWAY }).then((r) => r("default-openai/gpt-4o"))).toBeNull(); // no own key
   });
 
+  it("resolveModelCall: an own provider key first, else credits; a nest or server key keeps the call", async () => {
+    await boot({ features: ["byok"], gateway: GATEWAY, ownGateway: OWN_GW });
+    const { resolveModelCall, resolveModelCredential } = await import("../src/shared/model-credential.js");
+    const credits = resolveModelCredential()!;
+    expect(await resolveModelCall(credits, "default-openai/gpt-5.5")).toEqual({ credential: OWN_CRED, model: "community-lic1-openai/gpt-5.5" });
+    expect(await resolveModelCall(credits, "default-grok/grok-4")).toEqual({ credential: credits, model: "default-grok/grok-4" });
+    const nestKey = { apiKey: "sk-nest", baseUrl: null, source: "own" as const, defaultModel: null };
+    expect(await resolveModelCall(nestKey, "default-openai/gpt-5.5")).toEqual({ credential: nestKey, model: "default-openai/gpt-5.5" });
+  });
+
   it("/admin/models adds the own-provider models and names them", async () => {
     const { app, owner } = await boot({ features: ["byok"], gateway: GATEWAY, ownGateway: OWN_GW });
     const realFetch = globalThis.fetch;

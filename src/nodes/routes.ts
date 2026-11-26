@@ -1,3 +1,4 @@
+import { personaNames } from "../metacognition/managed.js";
 import { recordNodeAccess } from "../governance/access-log.js";
 import { approvedOnlyForSurfaceEdit } from "../surfaces/draft-visibility.js";
 import { parseTaskFieldsFilter, taskFieldsFromInput } from "./task-fields.js";
@@ -728,6 +729,8 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     ).get(nodeId);
     if (people) {
       response.author = people.author;
+      const agentName = people.author ? (await personaNames([people.author])).get(people.author) : undefined;
+      if (agentName) response.author_name = agentName;
       response.collaborators = people.collaborators;
     }
   }

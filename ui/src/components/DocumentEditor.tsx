@@ -410,6 +410,7 @@ export function DocumentEditor({
   // Creator + everyone else with a hand in the doc (version authors ∪
   // document-scope grantees) — server-resolved on GET /nodes/:id.
   const [author, setAuthor] = useState<string | null>(null);
+  const [agentAuthor, setAgentAuthor] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   // Who sealed the latest version — human and agent (node detail `last_edit`).
   const [lastEdit, setLastEdit] = useState<LastEdit | null>(null);
@@ -471,7 +472,7 @@ export function DocumentEditor({
     ...reads.mentionable(nestId),
     enabled: !!nestId && !isNew && !!adminStatus?.me,
   });
-  const authorName = author ? displayNameFor(author, roster?.people) : null;
+  const authorName = author ? agentAuthor || displayNameFor(author, roster?.people) : null;
   const lastEditBy = lastEditParts(lastEdit, roster?.people);
   // Who deletes outright: the nest admin/owner tier, plus the person who wrote
   // the document — asking permission to delete your own work is the wrong
@@ -1217,6 +1218,7 @@ export function DocumentEditor({
       setStatus(node?.status ?? null);
       setArchivedDoc(((node as any)?.archived ?? null) as api.ArchivedDocument | null);
       setAuthor(node?.author ?? null);
+      setAgentAuthor((node as any)?.author_name ?? null);
       setUpdatedAt(node?.updated_at ?? null);
       setLastEdit(((node as any)?.last_edit ?? null) as LastEdit | null);
       loadedUpdatedAtRef.current = node?.updated_at ?? null;
@@ -3227,7 +3229,7 @@ export function DocumentEditor({
                     >
                     {author && (
                       <span className="inline-flex items-center gap-1.5">
-                        Created by <span className="font-medium text-foreground/80" title={author}>{authorName}</span>
+                        Created by <span className="font-medium text-foreground/80" title={agentAuthor ?? author ?? undefined}>{authorName}</span>
                       </span>
                     )}
                     {/* Last edited by: the human, then the agent the write
@@ -3238,7 +3240,7 @@ export function DocumentEditor({
                         data-testid="document-last-edited-by"
                       >
                         Last edited by{" "}
-                        <span className="font-medium text-foreground/80" title={lastEdit?.edited_by}>
+                        <span className="font-medium text-foreground/80" title={lastEdit?.edited_by_system ?? lastEdit?.edited_by}>
                           {lastEditBy.human}
                         </span>
                         {lastEditBy.agent && (

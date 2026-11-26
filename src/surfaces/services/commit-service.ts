@@ -47,6 +47,22 @@ import { listenerFolders, listenerFor } from "./listener-service.js";
 import { getItems, getProposal, mentionFor, nestName, updateCardOnce, type ItemRow, type ProposalRow } from "./card-service.js";
 import { canReviewAll, eligibleReviewers } from "./routing-service.js";
 import { guardKey } from "./window-guard-key.js";
+import { safeErrorMessage } from "./judge-failure.js";
+import { AppError, ReviewRefusal } from "../../shared/errors.js";
+import { logCaught } from "../log.js";
+
+/** Edit rights for one item; a failed check counts as "no" and leaves a line (po-1447). */
+const mayEdit = (nestId: string, nodeId: string, email: string) =>
+  canUserEdit(nestId, nodeId, email).catch((err) => {
+    logCaught("commit", err, { nest: nestId, call: "can_edit" }, "warn");
+    return { allowed: false };
+  });
+/** The approved version after a commit, or null; a failed read leaves a line. */
+const approvedVersion = (nestId: string, nodeId: string) =>
+  getApprovedVersion(nestId, nodeId).catch((err) => {
+    logCaught("commit", err, { nest: nestId, call: "approved_version" }, "warn");
+    return null;
+  });
 
 const iso = (ms = Date.now()) => new Date(ms).toISOString();
 export const HOLD_MS = 7 * 24 * 3600_000;
@@ -206,7 +222,7 @@ export async function authorize(req: Omit<CommitRequest, "interactionId"> & { in
   // before any dialog opens.
   if (req.verb === "edit") {
     for (const it of target) {
-      if (!it.node_id || !(await canUserEdit(it.nest_id, it.node_id, u.email).catch(() => ({ allowed: false }))).allowed) {
+      if (!it.node_id || !(await mayEdit(it.nest_id, it.node_id, u.email)).allowed) {
         await req.responder.note("You can approve or reject this; editing needs edit rights on the document.");
         return { ok: false };
       }
@@ -294,7 +310,28 @@ async function maybeDecided(proposalId: string): Promise<void> {
 
 const firstName = (n: string | null, email: string) => (n?.trim().split(/\s+/)[0] || email.split("@")[0]);
 
-async function approveOne(req: CommitRequest, a: Extract<Authorized, { ok: true }>, item: ItemRow, edit: EditedFields | null): Promise<{ ok: true; version: number | null } | { ok: false; why: string }> {
+const REFUSED = "the nest refused the change. Try again from the nest.";
+/**
+ * Why the nest refused, for the person who clicked: the refusal's own words
+ * (an AppError below 500, or a ReviewRefusal). Anything else is internal: it
+ * stays general here and is only in the log.
+ */
+export function refusalText(err: unknown): string {
+  const m = err instanceof Error ? err.message.trim() : "";
+  const said = err instanceof ReviewRefusal || (err instanceof AppError && err.statusCode < 500);
+  if (err instanceof Error && m === "prime") return "this document can't be edited and approved in one step. Approve or reject it, or edit it in the nest.";
+  return said && m ? m : REFUSED;
+}
+
+/** One log line per refusal: ids and the reason, with the item's own words masked. */
+function logRefusal(action: string, item: ItemRow, err: unknown, edit?: EditedFields | null): void {
+  const words = [item.title ?? "", item.summary ?? "", edit?.title ?? "", edit?.summary ?? "", edit?.body ?? ""];
+  console.error(
+    `[surfaces] ${action} of item ${item.id} refused: ${err instanceof Error ? err.constructor.name : "error"} nest=${item.nest_id} proposal=${item.proposal_id} detail=${JSON.stringify(safeErrorMessage(err, words) ?? "")}`,
+  );
+}
+
+async function approveOne(req: CommitRequest, a: Extract<Authorized, { ok: true }>, item: ItemRow, edit: EditedFields | null): Promise<{ ok: true; version: number | null } | { ok: false; why: string; reason?: string }> {
   if (!item.node_id) return { ok: false, why: "missing draft" };
   if (!(await claimItem(item.id, edit ? "edit_approve" : req.verb, { surfaceUserId: req.surfaceUserId, userId: a.userId, surface: a.install.surface }))) {
     return { ok: false, why: "already" };
@@ -330,11 +367,12 @@ async function approveOne(req: CommitRequest, a: Extract<Authorized, { ok: true 
       client: clientMeta(req, a, item, !!edit),
       ...(edit ? { withEdits: true } : {}),
     });
-  } catch {
+  } catch (err) {
+    logRefusal(edit ? "edit_approve" : req.verb, item, err, edit);
     await releaseClaim(item.id);
-    return { ok: false, why: "failed" };
+    return { ok: false, why: "failed", reason: refusalText(err) };
   }
-  const version = (await getApprovedVersion(item.nest_id, item.node_id).catch(() => null)) ?? null;
+  const version = (await approvedVersion(item.nest_id, item.node_id)) ?? null;
   // L6: the item, the audit row and the claim finalise land in ONE
   // transaction. A crash before it leaves an in_progress claim that the
   // sweep reconciles from the review row (reconcileStuckClaims).
@@ -460,7 +498,7 @@ export async function reconcileStuckClaims(nowMs = Date.now()): Promise<number> 
     if (review?.status === "approved" && p) {
       const approver = resolver;
       if (!approver) continue; // resolved by something we can't attribute: leave the claim for an admin to see
-      const version = item.node_id ? ((await getApprovedVersion(item.nest_id, item.node_id).catch(() => null)) ?? null) : null;
+      const version = item.node_id ? ((await approvedVersion(item.nest_id, item.node_id)) ?? null) : null;
       await db.transaction(async (tx) => {
         const r = (await tx.run(
           "UPDATE surface_proposal_items SET state = 'approved', decided_by_user_id = ?, decided_at = ?, version = ?, updated_at = ? WHERE id = ? AND state = 'pending'",
@@ -508,7 +546,8 @@ async function rejectOne(req: CommitRequest, a: Extract<Authorized, { ok: true }
   if (!(await claimItem(item.id, `reject:${reason ?? "none"}`, { surfaceUserId: req.surfaceUserId, userId: a.userId, surface: a.install.surface }))) return false;
   try {
     await reject({ nestId: item.nest_id, nodeId: item.node_id, rejectedBy: a.email, note: reason ? REASON_LABELS[reason] : "Rejected from Slack", baseUrl: config.PUBLIC_BASE_URL || undefined });
-  } catch {
+  } catch (err) {
+    logRefusal("reject", item, err);
     await releaseClaim(item.id);
     return false;
   }
@@ -579,7 +618,7 @@ export async function commit(req: CommitRequest): Promise<CommitResult> {
         const err = await validateEdit(a, it, edits[it.id], req.deadlineMs);
         if (err === "deferred") return { status: "deferred" };
         if (err) errors[`${err.field}:${it.id}`] = err.message;
-        if (it.node_id && !(await canUserEdit(it.nest_id, it.node_id, a.email).catch(() => ({ allowed: false }))).allowed) {
+        if (it.node_id && !(await mayEdit(it.nest_id, it.node_id, a.email)).allowed) {
           errors[`title:${it.id}`] = "Edit & approve needs edit rights on this document too.";
         }
       }
@@ -595,10 +634,12 @@ export async function commit(req: CommitRequest): Promise<CommitResult> {
   const kept: Array<{ path: string; version: number | null }> = [];
   const notKept: string[] = [];
   let already = 0;
+  let refused: string | undefined;
   for (const it of toApprove) {
     const r = await approveOne(req, a, it, req.verb === "edit" ? (req.edits?.[it.id] ?? null) : null);
     if (r.ok) kept.push({ path: nodePath(it.target_folder, it.node_id ?? it.title ?? ""), version: r.version });
     else if (r.why === "already") already++;
+    else refused ??= r.reason;
   }
   const rejected: RejectReason[] = [];
   for (const { item, reason } of toReject) {
@@ -609,7 +650,7 @@ export async function commit(req: CommitRequest): Promise<CommitResult> {
   }
   await maybeDecided(a.p.id);
   if (!kept.length && !notKept.length) {
-    await req.responder.note(already ? await alreadyNote(a.install, await getItems(a.p.id)) : "Nothing was saved: the nest refused the change. Try again from the nest.");
+    await req.responder.note(already ? await alreadyNote(a.install, await getItems(a.p.id)) : `Nothing was saved: ${refused ?? REFUSED}`);
     return { status: "stopped" };
   }
   const editedBy = req.verb === "edit" ? firstName(a.name, a.email) : null;
@@ -633,7 +674,8 @@ async function validateEdit(a: Extract<Authorized, { ok: true }>, it: ItemRow, e
   let guard: WindowGuard | null = null;
   try {
     guard = a.p.window_guard ? (JSON.parse(a.p.window_guard) as WindowGuard) : null;
-  } catch {
+  } catch (err) {
+    logCaught("commit", err, { proposal: a.p.id, call: "window_guard" });
     guard = null;
   }
   const index = (await getDb().all("SELECT node_id AS id, title FROM node_index WHERE nest_id = ? AND node_id <> ?", [it.nest_id, it.node_id ?? ""])) as Array<{
@@ -651,8 +693,8 @@ async function validateEdit(a: Extract<Authorized, { ok: true }>, it: ItemRow, e
     try {
       const d = await storage.readDocument(o.id);
       texts.push(`${o.title}\n${d.body ?? ""}`);
-    } catch {
-      /* unreadable node: skip */
+    } catch (err) {
+      logCaught("commit", err, { nest: it.nest_id, call: "edit_check_read" }, "warn"); // unreadable node: skip
     }
   }
   const r = checkEdit(e, { guard, key: guardKey(), otherNodeTexts: texts, peopleFolder: people.includes(it.target_folder), kind: it.item_kind });
@@ -677,7 +719,8 @@ export async function editableItems(items: ItemRow[]): Promise<Array<{ id: strin
         body = String(d.body ?? "");
         const cut = body.lastIndexOf("\n\n---\n_Source:");
         if (cut >= 0) body = body.slice(0, cut);
-      } catch {
+      } catch (err) {
+        logCaught("commit", err, { nest: it.nest_id, call: "edit_draft_read" }, "warn");
         body = "";
       }
     }

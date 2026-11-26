@@ -31,6 +31,7 @@ import { config } from "../config.js";
 import { isServerAdminUserId, resolveNestPermission, permissionLevel } from "../shared/access.js";
 import { PRIVATE_CONVERSATION, PRIVATE_TITLE, n1Redacts, personalOwners } from "../surfaces/n1.js";
 import { outcomeOf } from "../metacognition/stats.js";
+import { managedAgents } from "../metacognition/managed.js";
 import { AGENT_API_VERSION } from "../workflow/agent-event-schema.js";
 import { CodedError, NotFoundError } from "../shared/errors.js";
 
@@ -496,6 +497,13 @@ async function labelsFor(rows: Array<{ nest_id: string; agent_node: string | nul
       }
     }
   }
+  // A listener has no document: its channel (or the name an admin gave it) names it.
+  for (const n of uniq(rows.filter((r) => r.agent_node?.startsWith("nodes/nest-listener-")).map((r) => r.nest_id))) {
+    for (const [id, m] of await managedAgents(n)) {
+      const k = `${n}\u0000${id}`;
+      if (m.name && !agents.has(k)) agents.set(k, m.name);
+    }
+  }
   const bindings = new Map<string, BindingLabel>();
   for (const b of await allIn<BindingLabel & { id: string }>(
     (ph) => `SELECT b.id, b.conversation_name, b.conversation_id, i.surface, COALESCE(i.team_id, i.tenant_key) AS team
@@ -617,13 +625,15 @@ function serialise(
     entry_id: r.entry_id,
     at: r.at,
     nest: { id: r.nest_id, label: opts.n1 ? PRIVATE_TITLE : labels.nest(r.nest_id) },
-    agent: { node_id: r.agent_node, name: labels.agent(r.nest_id, r.agent_node), source: r.source },
+    agent: { node_id: r.agent_node, name: opts.n1 ? (r.agent_node?.split("/").pop() ?? null) : labels.agent(r.nest_id, r.agent_node), source: r.source },
     run: r.run_id
       ? {
           id: r.run_id,
           outcome: r.run_status ? outcomeOf(r.run_status, trace as any) : null,
           cost_usd: costMicros / 1_000_000,
           external_ref: r.external_ref,
+          // Write tier, like the run's trace: why it failed, in words.
+          ...(opts.detail && typeof trace?.error === "string" ? { error: trace.error.slice(0, 500) } : {}),
         }
       : null,
     verdict: {

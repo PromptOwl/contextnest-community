@@ -10,6 +10,7 @@ import { getConnector } from "../registry.js";
 import { botToken } from "../adapters/slack/connector.js";
 import { slackCall } from "../adapters/slack/api.js";
 import { ACTION } from "../adapters/slack/blockkit.js";
+import { logCaught } from "../log.js";
 
 /** `inviterSurfaceUserId` set → a member asked (/nest invite); null → an admin's re-bind. */
 export async function askBooterConsent(bindingId: string, inviterSurfaceUserId: string | null = null): Promise<boolean> {
@@ -38,7 +39,8 @@ export async function askBooterConsent(bindingId: string, inviterSurfaceUserId: 
       { token: tk },
     );
     return true;
-  } catch {
+  } catch (err) {
+    logCaught("lifecycle", err, { binding: bindingId, call: "booter_consent_dm" }, "warn");
     return false;
   }
 }

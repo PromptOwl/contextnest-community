@@ -8,6 +8,7 @@
  * Request changes takes a required reason inline. Edit draft hands off to the
  * document editor, where the edit-and-approve flow (CU-wdqcq04wnw) lives.
  */
+import { displayNameFor } from "../../lib/person-name";
 import { useEffect, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -248,8 +249,9 @@ export function ReviewPane({
   const changeSummary =
     hasPublished && publishedBody != null ? summarizeChange(publishedBody, body || "").text : null;
 
+  const requester = displayNameFor(request.requestedByName ?? request.requestedBy);
   const provenance = provenanceRows({
-    requestedBy: request.requestedBy,
+    requestedBy: requester,
     requestedAt: request.requestedAt,
     runId: request.runId,
     lastEdit: (node as { last_edit?: any } | undefined)?.last_edit ?? null,
@@ -258,7 +260,7 @@ export function ReviewPane({
   const callout = verdict?.resolutionNote
     ? { tone: "back" as const, title: `${verdict.resolvedBy} ${verdict.resolutionKind === "reject" ? "rejected this" : "asked for changes"}`, text: verdict.resolutionNote as string }
     : request.requestNote
-      ? { tone: "note" as const, title: `${request.requestedBy}’s note · submitted ${since(request.requestedAt)}`, text: request.requestNote }
+      ? { tone: "note" as const, title: `${requester}’s note · submitted ${since(request.requestedAt)}`, text: request.requestNote }
       : null;
 
   const decision = lockedReason ? (
@@ -502,7 +504,7 @@ export function ReviewPane({
             )}
           </div>
           <p className="mt-1.5 text-sm text-muted-foreground">
-            <span className="font-medium text-foreground/80">{request.requestedBy}</span>
+            <span className="font-medium text-foreground/80">{requester}</span>
             {" · "}
             {hasPublished ? `based on v${approvedVersion}` : approvedVersion == null ? "first version" : "published"}
             {" · "}v{pendingVersion}
@@ -569,7 +571,7 @@ export function ReviewPane({
               <ol className="space-y-3">
                 {reviewActivity(
                   (versions?.versions ?? []) as any[],
-                  state === "review" ? { by: request.requestedBy, at: request.requestedAt, note: request.requestNote } : null,
+                  state === "review" ? { by: requester, at: request.requestedAt, note: request.requestNote } : null,
                 ).map((e) => {
                   const Icon = { edited: Plus, submitted: Send, approved: CheckCircle2, changes: CornerUpLeft, rejected: X }[e.kind];
                   return (
@@ -624,7 +626,7 @@ export function ReviewPane({
         <div className="min-w-0 flex-1">
           <h2 className="text-xl font-semibold leading-tight">{title}</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            From <span className="font-medium text-foreground/80">{request.requestedBy}</span> ·{" "}
+            From <span className="font-medium text-foreground/80">{requester}</span> ·{" "}
             {since(request.requestedAt)}
             {" · "}
             {hasPublished
@@ -655,7 +657,7 @@ export function ReviewPane({
           <Send className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
           <div className="min-w-0">
             <p className="text-xs font-medium text-blue-800 dark:text-blue-300">
-              {request.requestedBy}&rsquo;s note
+              {requester}&rsquo;s note
             </p>
             <p className="mt-0.5 whitespace-pre-wrap">{request.requestNote}</p>
           </div>
@@ -663,7 +665,7 @@ export function ReviewPane({
       )}
 
       <ReviewProvenance
-        requestedBy={request.requestedBy}
+        requestedBy={requester}
         requestedAt={request.requestedAt}
         runId={request.runId}
         lastEdit={(node as { last_edit?: any } | undefined)?.last_edit ?? null}
