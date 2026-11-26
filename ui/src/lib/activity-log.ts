@@ -22,6 +22,8 @@ export const ACTIVITY_LABELS: Record<ActivityLogType, string> = {
   commented: "commented",
   comment_resolved: "resolved a comment",
   deleted: "deleted",
+  moved: "moved",
+  tags_changed: "changed tags",
   read: "read",
   retrieved: "pulled into a search / answer",
   exported: "exported",
@@ -30,7 +32,7 @@ export const ACTIVITY_LABELS: Record<ActivityLogType, string> = {
 /** Filter groups for the type picker. */
 export const ACTIVITY_FILTERS: Array<{ id: string; label: string; types: ActivityLogType[] }> = [
   { id: "all", label: "Everything", types: [] },
-  { id: "changes", label: "Changes", types: ["created", "edited", "restored", "deleted"] },
+  { id: "changes", label: "Changes", types: ["created", "edited", "restored", "moved", "tags_changed", "deleted"] },
   { id: "reviews", label: "Reviews", types: ["review_requested", "approved", "rejected", "review_cancelled"] },
   { id: "comments", label: "Comments", types: ["commented", "comment_resolved"] },
   { id: "access", label: "Reads & pulls", types: ["read", "retrieved", "exported"] },

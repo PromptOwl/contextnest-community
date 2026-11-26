@@ -41,6 +41,7 @@ import {
   nestCensus,
   RUNNABLE_NODE_TYPES,
   createEmptyFolder,
+  vaultFolderExists,
   folderToSegments,
   moveFolder,
   isDerivedAnnotationsNode,
@@ -557,8 +558,11 @@ queryRoutes.post("/folders", async (c) => {
   const path = folderToSegments(body.folder).join("/");
   const adminOnly = await adminFolderPathRefusal(c.req.param("nestId")!, [path], await resolveCallerEmail(c.get("userId")));
   if (adminOnly) throw new ForbiddenError(adminOnly);
+  // Creating what exists changes nothing and stays harmless to retry; `created`
+  // says which it was, so no caller announces a folder that was already there.
+  const existed = !!path && (await vaultFolderExists(c.req.param("nestId")!, path));
   const folder = await createEmptyFolder(c.req.param("nestId")!, body.folder);
-  return c.json({ folder }, 201);
+  return c.json({ folder, created: !existed }, 201);
 });
 
 // POST /nests/:nestId/folders/move  { "folder": "projects/acme", "to": "archive/acme" }

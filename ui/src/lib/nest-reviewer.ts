@@ -6,7 +6,7 @@
 export type NestReviewerState =
   | { kind: "none" }
   | { kind: "reviewer"; stewardId: string }
-  /** A different nest-wide steward role — changed on the Stewards tab, not by
+  /** A different nest-wide steward role — changed under Stewards (Collaborators tab), not by
    *  the switch, so flipping it never silently drops that role. */
   | { kind: "other"; role: string };
 

@@ -85,7 +85,7 @@ export function ShareNestDialog({
             anyone a steward.{" "}
             {stewardshipEnabled ? (
               <>To restrict who can touch an individual document, assign
-              stewards on the nest's Stewards tab instead.</>
+              stewards, under Stewards on the Collaborators tab, instead.</>
             ) : (
               <>Per-document control comes from stewards, which need
               Stewardship &amp; Approval Workflow turned on in Nest settings.</>

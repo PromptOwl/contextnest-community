@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Gauge, RefreshCw } from "lucide-react";
 import { PageTitle } from "@/components/ui/page-title";
+import { SearchableSelect } from "@/components/SearchableSelect";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { useAppNav } from "../../../lib/app-nav";
@@ -22,7 +23,7 @@ import { HowItWorks } from "./HowItWorks";
 import { Overview } from "./Overview";
 import { Ledger } from "./Ledger";
 import { Agents } from "./Agents";
-import type { ControlRoomScope, NestRef } from "./scope";
+import { ALL_NESTS, nestOptions, type ControlRoomScope, type NestRef } from "./scope";
 
 const TABS = ["overview", "ledger", "agents", "setup", "how"] as const;
 /** `?section=` (App owns `?tab=` and strips it on every navigation). */
@@ -138,20 +139,19 @@ export default function ControlRoomPage() {
         actions={
           dataTab ? (
             <div className="flex flex-wrap items-center gap-2">
-              <select
-                aria-label="Nest"
-                className="h-9 max-w-[12rem] rounded-md border bg-background px-2 text-sm"
-                value={nestId ?? ""}
-                onChange={(e) => setNestId(e.target.value || null)}
-                data-testid="cr-nest-select"
-              >
-                <option value="">All nests</option>
-                {nests.map((n) => (
-                  <option key={n.id} value={n.id}>
-                    {n.name}
-                  </option>
-                ))}
-              </select>
+              {/* Not a native select: its popup grows to the longest nest name. */}
+              <SearchableSelect
+                ariaLabel="Nest"
+                value={nestId ?? ALL_NESTS}
+                onChange={(v) => setNestId(v === ALL_NESTS ? null : v)}
+                options={nestOptions(nests)}
+                searchValues={false}
+                searchPlaceholder="Search nests…"
+                emptyText="No nests match."
+                className="w-44 sm:w-56"
+                buttonClassName="h-9 px-2"
+                testId="cr-nest-select"
+              />
               <select
                 aria-label="Range"
                 className="h-9 rounded-md border bg-background px-2 text-sm"

@@ -446,7 +446,7 @@ export async function getDocStream(params: {
         `SELECT t.nest_id, t.node_id, COUNT(c.id) AS n
            FROM annotation_threads t
            JOIN annotation_comments c ON c.thread_id = t.id
-          WHERE t.status = 'open' AND (${pageDocs
+          WHERE t.status = 'open' AND c.deleted_at IS NULL AND (${pageDocs
             .map(() => "(t.nest_id = ? AND t.node_id = ?)")
             .join(" OR ")})
           GROUP BY t.nest_id, t.node_id`,

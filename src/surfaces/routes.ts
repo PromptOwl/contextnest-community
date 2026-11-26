@@ -10,6 +10,7 @@
 import { Hono, type Context } from "hono";
 import { createHmac, timingSafeEqual } from "crypto";
 import type { AuthEnv } from "../auth/middleware.js";
+import { logCaught } from "./log.js";
 import { getSessionIdFromRequest } from "../auth/sessions.js";
 import { credentialMayContribute } from "../governance/org-contribution.js";
 import { AppError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
@@ -50,7 +51,7 @@ import { listInstalls } from "./services/install-store.js";
 import { bufferKeyConfigured } from "./services/buffer-crypto.js";
 import { publicUrlProblem, slackUrls } from "./adapters/slack/manifest.js";
 import { resolveModelCredential } from "../shared/model-credential.js";
-import { createBindingWithListener } from "./services/listener-service.js";
+import { createBindingWithListener, setListenerJudge } from "./services/listener-service.js";
 
 type C = Context<AuthEnv>;
 
@@ -141,6 +142,8 @@ surfacesRoutes.get("/status", async (c) => {
       // the one the public member page shows; hosted = one-click install on.
       org_name: config.SURFACES_ORG_NAME ?? null,
       slack_hosted: hostedEnabled(),
+      // Accounts are matched to Slack members only within the connection's email domains.
+      shared_deployment: config.SHARED_DEPLOYMENT,
       disclosure: SERVER_ADMIN_DISCLOSURE,
       // po-1444: what Slack setup needs from this server, for the admin's
       // checklist. Booleans and the public URL only, never a secret.
@@ -223,6 +226,11 @@ surfacesRoutes.patch("/bindings/:id", async (c) => {
     await scopedRow(c, c.req.param("id"));
     const b = await readBody(c);
     refuseListener(b);
+    // The listener's model settings are saved on their own: the guard has nothing to re-check.
+    if (b.judge !== undefined) {
+      if (Object.keys(b).length > 1) throw new UnprocessableError("Send judge on its own.");
+      return c.json(await setListenerJudge(c.req.param("id"), c.get("userId"), b.judge));
+    }
     return c.json(
       await updateBinding(c.req.param("id"), c.get("userId"), {
         explicitPublicBind: bool(b.explicit_public_bind, "explicit_public_bind"),
@@ -295,7 +303,10 @@ surfacesRoutes.post("/bindings/:id/resume", async (c) => {
     // consent — send them the one-tap "Allow Nest back" prompt.
     if (err instanceof AppError && err.statusCode === 409 && /hasn't agreed/.test(err.message)) {
       const { askBooterConsent: ask } = await import("./services/boot-consent.js");
-      const sent = await ask(c.req.param("id")).catch(() => false);
+      const sent = await ask(c.req.param("id")).catch((e) => {
+        logCaught("lifecycle", e, { binding: c.req.param("id"), call: "booter_consent" }, "warn");
+        return false;
+      });
       return c.json(
         {
           error: sent

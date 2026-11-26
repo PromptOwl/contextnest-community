@@ -152,6 +152,35 @@ describe("archive", () => {
   });
 });
 
+describe("po-1394: reads that take an id", () => {
+  const routes = ["versions", "versions/1", "relations", "comments", "annotations"];
+  const status = async (route: string, key: string) =>
+    (await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${id}/${route}`, undefined, key)).status;
+
+  it("answer not found to a reader and a writer, and as before to a steward", async () => {
+    await post(`${id}/archive`, { reason: "Old" });
+    for (const who of [reader, writer]) {
+      for (const tool of ["context_versions", "context_relations"]) {
+        const r = await mcp(who.apiKey, tool, { id });
+        expect([tool, r.isError]).toEqual([tool, true]);
+        expect(r.text).toMatch(/not found/i);
+      }
+      for (const r of routes) expect([r, await status(r, who.apiKey)]).toEqual([r, 404]);
+    }
+    for (const tool of ["context_versions", "context_relations"]) {
+      expect((await mcp(owner.apiKey, tool, { id })).isError).toBe(false);
+    }
+    for (const r of routes) expect([r, await status(r, owner.apiKey)]).toEqual([r, 200]);
+  });
+
+  it("open again once the document is restored", async () => {
+    await post(`${id}/archive`, { reason: "Old" });
+    await post(`${id}/unarchive`);
+    expect((await mcp(reader.apiKey, "context_versions", { id })).isError).toBe(false);
+    for (const r of routes) expect([r, await status(r, reader.apiKey)]).toEqual([r, 200]);
+  });
+});
+
 describe("move", () => {
   it("moves a pdf with its binary", async () => {
     const form = new FormData();

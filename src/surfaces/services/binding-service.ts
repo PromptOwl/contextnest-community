@@ -8,6 +8,10 @@
  * on every binding (§12 R1).
  */
 import { v4 as uuid } from "uuid";
+import { DEFAULT_LISTENER_NAME, DEFAULT_MAX_ITEMS, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT_SECONDS, readJudgeTuning, starterFolders, type JudgeTuning } from "./judge-tuning.js";
+import { hootieModel } from "../../shared/model-credential.js";
+import { listenerName } from "../../metacognition/managed.js";
+import { getAgent } from "../../metacognition/store.js";
 import { getDb } from "../../db/client.js";
 import { config } from "../../config.js";
 import { AppError, ConflictError, ForbiddenError, NotFoundError } from "../../shared/errors.js";
@@ -23,6 +27,7 @@ import { effectiveReaders } from "./readers.js";
 import { evaluateAutoMatch, getProfile, resolveIdentity } from "./identity-service.js";
 import { runPauseHooks, runSurfaceOkLostHooks, type PauseReason } from "./pause-hooks.js";
 import { recordNotice } from "./notices.js";
+import { logCaught } from "../log.js";
 
 export { SERVER_ADMIN_DISCLOSURE };
 
@@ -119,7 +124,7 @@ export async function canAdministerNest(nestId: string, userId: string): Promise
   return permissionLevel(await resolveNestPermission(nestId, userId)) >= permissionLevel("admin");
 }
 
-async function assertNestAdmin(nestId: string, userId: string): Promise<void> {
+export async function assertNestAdmin(nestId: string, userId: string): Promise<void> {
   if (!(await canAdministerNest(nestId, userId))) {
     throw new ForbiddenError("Only an owner or admin of this nest can manage its conversation bindings.");
   }
@@ -241,6 +246,8 @@ export async function bindingView(row: BindingRow) {
   } catch {
     detail = {};
   }
+  const channel = row.conversation_kind === "dm" ? null : row.conversation_name;
+  const listener = row.listener_agent_node_id ? await getAgent(row.nest_id, row.listener_agent_node_id) : null;
   return {
     id: row.id,
     install_id: row.install_id,
@@ -251,6 +258,21 @@ export async function bindingView(row: BindingRow) {
     is_general: !!row.is_general,
     dm_owner_user_id: row.dm_owner_user_id,
     listener_agent_node_id: row.listener_agent_node_id,
+    judge: readJudgeTuning(listener?.config),
+    listener_folders: starterFolders(listener?.config),
+    listener_name: listener ? listenerName(listener.persona.name, channel, listener.node_id) : null,
+    // What each unset setting means right now, so the dialog can show the values in use.
+    judge_defaults: {
+      name: (listener && listenerName(null, channel, listener.node_id)) ?? DEFAULT_LISTENER_NAME,
+      avatar: null,
+      folders: null,
+      max_turns: DEFAULT_MAX_TURNS,
+      max_items: DEFAULT_MAX_ITEMS,
+      model: config.SURFACES_JUDGE_MODEL || hootieModel(),
+      max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      temperature: 0,
+      timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
+    } satisfies JudgeTuning,
     explicit_public_bind: !!row.explicit_public_bind,
     is_ext_shared: !!row.is_ext_shared,
     ext_capture_enabled: !!row.ext_capture_enabled,
@@ -380,9 +402,13 @@ async function previewPeople(nestId: string, ev: Evaluation) {
   const present = new Set(people.map((m) => m.community_user_id).filter(Boolean));
   // At most PEOPLE_CAP names per list; guard.detail keeps the full counts.
   const absentIds = readers.users.filter((u) => !present.has(u)).slice(0, PEOPLE_CAP);
-  const outsiders = people
-    .filter((m) => !m.community_user_id || (!readers.users.includes(m.community_user_id) && !readers.serverAdmins.includes(m.community_user_id)))
-    .slice(0, PEOPLE_CAP);
+  // Other apps' bots in this workspace count against surface_ok too, so name them (they can't be added).
+  const home = homeTenant(install);
+  const bots = ev.mapped.filter((m) => m.is_bot && !m.is_external && m.home_tenant === home && m.surface_user_id !== install.bot_user_id);
+  const outsiders = [
+    ...people.filter((m) => !m.community_user_id || (!readers.users.includes(m.community_user_id) && !readers.serverAdmins.includes(m.community_user_id))),
+    ...bots,
+  ].slice(0, PEOPLE_CAP);
   const ids = [...absentIds, ...outsiders.map((m) => m.community_user_id)].filter((u): u is string => !!u && !u.includes(":"));
   const users = new Map(
     (ids.length
@@ -394,12 +420,17 @@ async function previewPeople(nestId: string, ev: Evaluation) {
   const members_not_readers = [];
   for (const m of outsiders) {
     const u = m.community_user_id ? users.get(m.community_user_id) : undefined;
-    const profile = u?.name ? null : await getProfile(install.id, m.surface_user_id).catch(() => null);
+    const profile = u?.name
+      ? null
+      : await getProfile(install.id, m.surface_user_id).catch((err) => {
+          logCaught("guard", err, { install: install.id, call: "profile" }, "warn");
+          return null;
+        });
     const name = u?.name ?? profile?.display_name ?? null;
     // po-1445: the email Slack has for someone with no account match, so the
     // admin can spot a mismatch. Only a confirmed one; preview only, never stored.
     const slack_email = !u && profile?.email_confirmed ? (profile.email ?? null) : null;
-    members_not_readers.push({ surface_user_id: m.surface_user_id, name, community_user_id: m.community_user_id, email: u?.email ?? null, slack_email });
+    members_not_readers.push({ surface_user_id: m.surface_user_id, name, community_user_id: m.community_user_id, email: u?.email ?? null, slack_email, is_bot: m.is_bot });
   }
   // po-1467: an unmatched member whose confirmed Slack email is a reader's is in
   // the channel; the identity rules refused the link. Say why, not "not in channel".
@@ -518,7 +549,9 @@ export async function createBinding(input: BindInput) {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 1, 1, ?)`,
         [...values, id, install.id, ORG_ID, input.conversationId, now, now, now],
       );
-    } catch {
+    } catch (err) {
+      // Usually the unique index (already bound); the line says if it was not.
+      logCaught("guard", err, { install: install.id, call: "insert_binding" }, "warn");
       throw new ConflictError("This conversation is already bound.");
     }
   }
@@ -639,7 +672,7 @@ export async function recheckBinding(id: string): Promise<BindingRow> {
     });
     await bindingTestHooks.afterEvaluate?.(id);
   } catch (err) {
-    console.error(`[surfaces] guard re-check failed for binding ${id}; failing closed`, err instanceof Error ? err.message : err);
+    logCaught("guard", err, { binding: id, call: "recheck" }); // failing closed
     await failClosed(row);
     return rowOrThrow(id);
   }
@@ -949,6 +982,33 @@ export async function markRemoved(row: BindingRow, systemWhy: string | null = SY
   if (r.changes > 0) {
     if (systemWhy) await recordBindingHistory(row, "removed", systemWhy, null);
     await pause(row, "removed", "removed");
+  }
+}
+
+/**
+ * A nest going away stops its channels. Archive pauses the listening ones as an
+ * admin pause (only an admin Resume restarts them); delete removes them, since
+ * there is no nest left to resume into.
+ */
+export async function stopNestBindings(nestId: string, how: "archived" | "deleted"): Promise<void> {
+  const rows = (await getDb().all(
+    `SELECT * FROM surface_bindings WHERE nest_id = ? AND status ${how === "archived" ? "= 'active'" : "<> 'removed'"}`,
+    [nestId],
+  )) as BindingRow[];
+  for (const row of rows) {
+    if (how === "deleted") {
+      await markRemoved(row, "Removed by Nest: the nest was deleted.");
+      continue;
+    }
+    const now = nowIso();
+    const r = await getDb().run(
+      `UPDATE surface_bindings SET status = 'paused_guard', pause_reason = '${ADMIN_PAUSE}', status_changed_at = ?, version = version + 1, updated_at = ?
+        WHERE id = ? AND status = 'active'`,
+      [now, now, row.id],
+    );
+    if (r.changes === 0) continue;
+    await recordBindingHistory(row, "paused", "Paused by Nest: the nest was archived.", null);
+    await pause(row, "paused_guard", "admin");
   }
 }
 

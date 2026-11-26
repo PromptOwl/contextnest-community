@@ -181,6 +181,8 @@ export function columnKeysOf(n: NodeResponse, c: BoardConfig): string[] {
       return [n.status || UNCATEGORIZED];
     case "assignee":
       return [n.assignee ? n.assignee.toLowerCase() : UNCATEGORIZED];
+    case "creator":
+      return [n.author ? n.author.toLowerCase() : UNCATEGORIZED];
     case "priority":
       return [n.priority || UNCATEGORIZED];
     case "field":
@@ -191,7 +193,8 @@ export function columnKeysOf(n: NodeResponse, c: BoardConfig): string[] {
       const tags = (n.tags ?? []).map(stripHash);
       const values = ns
         ? tags.filter((t) => t.startsWith(`${ns}:`)).map((t) => t.slice(ns.length + 1)).filter(Boolean)
-        : tags.filter(Boolean);
+        : // A ticket number is one card's ID, not a group.
+          tags.filter((t) => t && !ticketFromTag(t));
       return values.length > 0 ? [...new Set(values)] : [UNCATEGORIZED];
     }
   }
@@ -217,6 +220,7 @@ export function columnLabel(key: string, c: BoardConfig): string {
     return key;
   }
   if (key === UNCATEGORIZED) {
+    if (c.dimension === "creator") return "Unknown";
     return c.dimension === "assignee" ? "Unassigned" : c.dimension === "priority" ? "No priority" : "Uncategorized";
   }
   if (c.dimension === "priority") return levelsOf(c).find((p) => p.key === key)?.label ?? key;
@@ -228,7 +232,7 @@ export function columnLabel(key: string, c: BoardConfig): string {
 export interface BoardListFilters {
   /** Lower-cased emails, plus "unassigned"; empty = everyone. */
   assignees?: string[];
-  /** Case-insensitive title substring. */
+  /** Case-insensitive substring of the title or the ticket number. */
   q?: string;
   now?: number;
 }
@@ -262,7 +266,10 @@ export function filterForBoard(
       if (!def) continue;
       if (!appliesTo(def, n.type) || !matchesFieldFilter(def, n.fields?.[key], wanted)) return false;
     }
-    if (q && !String(n.title ?? "").toLowerCase().includes(q)) return false;
+    if (q) {
+      const ticket = ticketFromTag(ticketTagOf(n.tags ?? []) ?? "") ?? "";
+      if (![String(n.title ?? ""), ticket].some((s) => s.toLowerCase().includes(q))) return false;
+    }
     return true;
   });
 }

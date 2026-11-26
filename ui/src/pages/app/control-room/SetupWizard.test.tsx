@@ -36,11 +36,12 @@ describe("ConnectStep readiness", () => {
     return renderToStaticMarkup(<ConnectStep state={s} next={() => {}} />);
   };
 
-  it("all ready: every line is ready, the redirect URL shows, and Open Slack is enabled", () => {
+  it("all ready: every line is ready, the Slack app card shows, and the only block is the unsaved keys", () => {
     const out = withReadiness(ready);
     expect(out).not.toContain(`data-ok="false"`);
-    expect(out).toContain("https://nest.acme.com/surfaces/slack/oauth/callback");
+    expect(out).toContain(`data-testid="slack-app-card"`);
     expect(out).not.toContain("setup-url-blocked");
+    expect(out).toContain("setup-keys-needed");
   });
 
   it("a localhost URL: the fix steps and a Server settings link show, and Open Slack is off", () => {
@@ -54,6 +55,17 @@ describe("ConnectStep readiness", () => {
     expect(out).toContain(`href="/settings"`);
     expect(out).toContain("setup-url-blocked");
     expect(out).not.toContain("setup-redirect-url");
+  });
+
+  it("one Slack app: its card (manifest, keys), then the nest picker, then approve; even a leftover manifest install shows no per-install steps", () => {
+    const s = state({ id: "i1", surface: "slack", mode: "manifest", status: "pending", home_nest_id: "n1" }) as any;
+    s.status = { ...s.status, readiness: ready };
+    s.nests = [{ id: "n1", name: "Ops" }];
+    const out = renderToStaticMarkup(<ConnectStep state={s} next={() => {}} />);
+    const at = ["Download manifest", "slack-app-keys", "setup-home-nest", "Open Slack to approve"].map((t) => out.indexOf(t));
+    expect(at.every((i) => i >= 0)).toBe(true);
+    expect(at).toEqual([...at].sort((a, b) => a - b));
+    expect(out).not.toContain("setup-credentials");
   });
 
   it("a page opened at another address than the public base URL is flagged", () => {

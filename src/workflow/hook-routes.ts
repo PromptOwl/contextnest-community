@@ -6,11 +6,13 @@
  * that knows a platform's wire format:
  *
  *   slack   — slash commands (form-encoded `text`) AND Events API
- *             (@agent mentions): answers the url_verification challenge,
- *             verifies X-Slack-Signature when SLACK_SIGNING_SECRET is in the
- *             nest env store, acks inside Slack's 3s window.
- *   teams   — outgoing webhook JSON; HMAC-verified when
- *             TEAMS_WEBHOOK_SECRET is set; acks {type:"message", text}.
+ *             (@agent mentions): every request, the url_verification
+ *             challenge included, must be signed with the nest env store's
+ *             SLACK_SIGNING_SECRET (none saved → 401); acks inside Slack's
+ *             3s window.
+ *   teams   — outgoing webhook JSON; must be HMAC-signed with the nest env
+ *             store's TEAMS_WEBHOOK_SECRET (none saved → 401); acks
+ *             {type:"message", text}.
  *   webhook — raw JSON body becomes the run inputs verbatim.
  *
  * Every face converges on the same artifact: an unclaimed run row a polling
@@ -177,11 +179,17 @@ function teamsSignatureValid(
   rawBody: string,
 ): boolean {
   if (!authHeader?.startsWith("HMAC ")) return false;
-  const mine = createHmac("sha256", Buffer.from(secret, "base64"))
+  const key = Buffer.from(secret, "base64");
+  // Not base64 → an empty key, which anyone could sign with.
+  if (!key.length) return false;
+  const mine = createHmac("sha256", key)
     .update(rawBody, "utf8")
     .digest("base64");
   return safeEqual(mine, authHeader.slice(5).trim());
 }
+
+const missingSecret = (key: string) =>
+  `This trigger refuses requests until an admin sets ${key} in the nest's Tool environment`;
 
 /** Strip Slack `<@U123>` / Teams `<at>…</at>` mention markup from the ask. */
 function stripMentions(text: string): string {
@@ -241,20 +249,19 @@ hookFireRoutes.post("/:token", async (c) => {
   let ack: (runId: string) => Response;
 
   if (hook.preset === "slack") {
-    // Events API handshake happens before any signature or run logic —
-    // Slack sends it when you first save the endpoint URL.
+    // Fail closed: with no readable secret nothing can be verified.
+    const secret = env.SLACK_SIGNING_SECRET?.trim();
+    if (!secret) return c.json({ error: missingSecret("SLACK_SIGNING_SECRET") }, 401);
+    const ok = slackSignatureValid(
+      secret,
+      c.req.header("x-slack-request-timestamp"),
+      c.req.header("x-slack-signature"),
+      raw,
+    );
+    if (!ok) return c.json({ error: "bad signature" }, 401);
+    // Events API handshake (signed too), sent when the endpoint URL is saved.
     if (payload.type === "url_verification") {
       return c.json({ challenge: payload.challenge });
-    }
-    const secret = env.SLACK_SIGNING_SECRET;
-    if (secret) {
-      const ok = slackSignatureValid(
-        secret,
-        c.req.header("x-slack-request-timestamp"),
-        c.req.header("x-slack-signature"),
-        raw,
-      );
-      if (!ok) return c.json({ error: "bad signature" }, 401);
     }
     if (payload.type === "event_callback") {
       const ev = payload.event ?? {};
@@ -277,8 +284,9 @@ hookFireRoutes.post("/:token", async (c) => {
         });
     }
   } else if (hook.preset === "teams") {
-    const secret = env.TEAMS_WEBHOOK_SECRET;
-    if (secret && !teamsSignatureValid(secret, c.req.header("authorization"), raw)) {
+    const secret = env.TEAMS_WEBHOOK_SECRET?.trim();
+    if (!secret) return c.json({ error: missingSecret("TEAMS_WEBHOOK_SECRET") }, 401);
+    if (!teamsSignatureValid(secret, c.req.header("authorization"), raw)) {
       return c.json({ error: "bad signature" }, 401);
     }
     inputs = { input: stripMentions(String(payload.text ?? "")), from: payload.from?.name };

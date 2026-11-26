@@ -40,6 +40,7 @@ export interface ReviewRequest {
   title?: string;
   version: number;
   requestedBy: string;
+  requestedByName?: string;
   requestedAt: string;
   requestNote?: string;
   priority: ReviewRequestPriority;
@@ -229,6 +230,22 @@ export function ReviewQueue({
         </CardHeader>
       )}
       <CardContent>
+        {/* The two numbers a reviewer scans first: everything waiting in the
+            nest, and the part of it that is theirs to decide. */}
+        <div className="mb-3 grid grid-cols-2 gap-2" data-testid="review-queue-counts">
+          <div className="rounded-lg border px-3 py-2">
+            <p className="text-xs text-muted-foreground">Pending approvals</p>
+            <p className="text-2xl font-semibold text-amber-600" data-testid="review-queue-pending-count">
+              {requests.length}
+            </p>
+          </div>
+          <div className="rounded-lg border px-3 py-2">
+            <p className="text-xs text-muted-foreground">Your review queue</p>
+            <p className="text-2xl font-semibold text-blue-600" data-testid="review-queue-mine-count">
+              {requests.filter((r) => r.canReview !== false).length}
+            </p>
+          </div>
+        </div>
         {rows.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-8 text-center">
             <CheckCircle2 className="h-10 w-10 text-green-500 mb-3" />
@@ -350,10 +367,10 @@ export function ReviewQueue({
                       <div className="flex items-center gap-1">
                         <Avatar className="h-4 w-4">
                           <AvatarFallback className="text-[8px]">
-                            {request.requestedBy[0]?.toUpperCase() || "?"}
+                            {(request.requestedByName ?? request.requestedBy)[0]?.toUpperCase() || "?"}
                           </AvatarFallback>
                         </Avatar>
-                        <span>{request.requestedBy}</span>
+                        <span>{request.requestedByName ?? request.requestedBy}</span>
                         {request.requestedByOrgContributor && (
                           <Badge
                             variant="outline"

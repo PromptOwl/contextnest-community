@@ -29,6 +29,13 @@ export interface SearchableOption {
   group?: string;
 }
 
+/** Does a typed search keep this option? The label always counts; the value
+ *  (a path worth remembering) only when `searchValues`. */
+export function optionMatches(o: SearchableOption | undefined, search: string, searchValues = true): boolean {
+  if (!o) return false;
+  return (searchValues ? `${o.label} ${o.value}` : o.label).toLowerCase().includes(search.trim().toLowerCase());
+}
+
 export function SearchableSelect({
   value,
   onChange,
@@ -36,9 +43,13 @@ export function SearchableSelect({
   placeholder = "Select…",
   searchPlaceholder = "Search…",
   emptyText = "No matches.",
+  searchValues = true,
   disabled,
   id,
   testId,
+  ariaLabel,
+  className,
+  buttonClassName,
 }: {
   value: string;
   onChange: (next: string) => void;
@@ -46,9 +57,15 @@ export function SearchableSelect({
   placeholder?: string;
   searchPlaceholder?: string;
   emptyText?: string;
+  /** Off when values are opaque ids: a search then matches labels only. */
+  searchValues?: boolean;
   disabled?: boolean;
   id?: string;
   testId?: string;
+  ariaLabel?: string;
+  /** The wrapper: sets the width of the field and its list. */
+  className?: string;
+  buttonClassName?: string;
 }) {
   const [open, setOpen] = useState(false);
   // Open upward when the field sits too low for the list (search + 300px list).
@@ -93,16 +110,20 @@ export function SearchableSelect({
   }, [open]);
 
   return (
-    <div ref={wrapRef} className="relative">
+    <div ref={wrapRef} className={cn("relative", className)}>
       <button
         id={id}
         type="button"
         role="combobox"
         aria-expanded={open}
+        aria-label={ariaLabel ? `${ariaLabel}: ${selected?.label ?? placeholder}` : undefined}
         disabled={disabled}
         data-testid={testId}
         onClick={toggle}
-        className="flex h-10 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+        className={cn(
+          "flex h-10 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
+          buttonClassName,
+        )}
       >
         <span
           className={cn("truncate text-left", !selected && "text-muted-foreground")}
@@ -122,11 +143,9 @@ export function SearchableSelect({
           <Command
             // `value` is the id/path — searchable even though it is not shown,
             // so a remembered path still finds the document.
-            filter={(itemValue, search) => {
-              const o = options.find((x) => x.value === itemValue);
-              const hay = `${o?.label ?? ""} ${itemValue}`.toLowerCase();
-              return hay.includes(search.toLowerCase()) ? 1 : 0;
-            }}
+            filter={(itemValue, search) =>
+              optionMatches(options.find((x) => x.value === itemValue), search, searchValues) ? 1 : 0
+            }
           >
             <CommandInput placeholder={searchPlaceholder} autoFocus />
             <CommandList>

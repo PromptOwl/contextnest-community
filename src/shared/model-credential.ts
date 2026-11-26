@@ -107,6 +107,16 @@ export function ownModelRoute(callModel: string): { credential: ModelCredential;
   };
 }
 
+/**
+ * The key and model name one call uses, as Hootie picks them: a nest's own key
+ * or the server's own gateway keeps the call; on PromptOwl's gateway, a provider
+ * the admin added their own key for runs on that key, else on credits.
+ */
+export async function resolveModelCall(base: ModelCredential, picked: string): Promise<{ credential: ModelCredential; model: string }> {
+  const model = await resolveGatewayModel(base, picked);
+  return (base.source === "promptowl" && ownModelRoute(model)) || { credential: base, model };
+}
+
 /** For logs: which key a call uses and why; the key only by its last 4 characters. */
 export function credentialLabel(c: ModelCredential): string {
   const via =

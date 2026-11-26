@@ -33,6 +33,7 @@ import { isLicenseAdminEmail } from "../../auth/license.js";
 import { isSuperAdmin } from "../../governance/access-service.js";
 import { parseSharedTeams } from "../../governance/teams-service.js";
 import type { ReaderSet } from "../core/guard.js";
+import { logCaught } from "../log.js";
 
 export interface EffectiveReaders extends ReaderSet {
   /** Server admins (exempt path), for the surface_ok "can read" check. */
@@ -58,7 +59,10 @@ async function tiedListeners(nestId: string): Promise<Map<string, string>> {
        JOIN surface_bindings b ON b.nest_id = m.nest_id AND b.listener_agent_node_id = m.node_id AND b.status <> 'removed'
       WHERE m.nest_id = ?`,
     [nestId],
-  ).catch(() => [])) as Array<{ node_id: string; config_json: string; enabled: number; binding_id: string }>;
+  ).catch((err) => {
+    logCaught("guard", err, { nest: nestId, call: "tied_listeners" }); // no exemption: fails closed
+    return [];
+  })) as Array<{ node_id: string; config_json: string; enabled: number; binding_id: string }>;
   for (const r of rows) {
     let c: unknown = null;
     try {

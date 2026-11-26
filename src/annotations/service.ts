@@ -10,6 +10,7 @@ import { getDb } from "../db/client.js";
 import { nowMsExpr } from "../db/sql.js";
 import { nowExpr } from "../db/sql.js";
 import * as versions from "../governance/version-service.js";
+import { isChannelNode } from "../channels/channel-node.js";
 import { engineCache } from "../nodes/engine.js";
 import { createNode, updateNode, bodyOnly } from "../nodes/service.js";
 import { NotFoundError } from "../shared/errors.js";
@@ -45,6 +46,7 @@ interface CommentRow {
   body: string;
   created_at: string;
   run_id: string | null;
+  edited_at?: string | null;
   deleted_at?: string | null;
 }
 
@@ -52,7 +54,7 @@ async function loadComments(threadId: string): Promise<AnnotationComment[]> {
   const db = getDb();
   const rows = await db
     .all(
-      "SELECT id, author, body, created_at, run_id, deleted_at FROM annotation_comments WHERE thread_id = ? ORDER BY created_at ASC, id ASC",
+      "SELECT id, author, body, created_at, run_id, edited_at, deleted_at FROM annotation_comments WHERE thread_id = ? ORDER BY created_at ASC, id ASC",
       [threadId],
     ) as Array<Omit<CommentRow, "thread_id">>;
   return rows.map((r) => ({
@@ -61,6 +63,7 @@ async function loadComments(threadId: string): Promise<AnnotationComment[]> {
     body: r.body,
     createdAt: r.created_at,
     ...(r.run_id ? { runId: r.run_id } : {}),
+    ...(r.edited_at ? { editedAt: r.edited_at } : {}),
     ...(r.deleted_at ? { deleted: true as const } : {}),
   }));
 }
@@ -99,23 +102,36 @@ export async function getThread(threadId: string): Promise<AnnotationThread | nu
   return row ? await rowToThread(row) : null;
 }
 
+export interface NodeCommentCounts {
+  count: number;
+  open: number;
+  comments: number;
+  lastAt: string | null;
+}
+
 /**
  * Per-node comment counts for a whole nest — used to sort document lists by
- * "most comments" without N per-node queries. Counts annotation THREADS (each
- * a distinct comment discussion) and the most recent thread time.
+ * "most comments", and for the Board card's comment badge, without N per-node
+ * queries. `count` is THREADS (each a distinct discussion), `open` the
+ * unresolved ones, `comments` every message in them; deleted messages are out.
  */
 export async function countThreadsByNode(
   nestId: string,
-): Promise<Record<string, { count: number; lastAt: string | null }>> {
+): Promise<Record<string, NodeCommentCounts>> {
   const rows = (await getDb().all(
-    `SELECT node_id, CAST(COUNT(*) AS INTEGER) AS count, MAX(created_at) AS last_at
-         FROM annotation_threads
-        WHERE nest_id = ?
-        GROUP BY node_id`,
+    `SELECT t.node_id,
+              CAST(COUNT(DISTINCT t.id) AS INTEGER) AS count,
+              CAST(COUNT(DISTINCT CASE WHEN t.status = 'open' THEN t.id END) AS INTEGER) AS open_count,
+              CAST(COUNT(*) AS INTEGER) AS comments,
+              MAX(t.created_at) AS last_at
+         FROM annotation_threads t
+         JOIN annotation_comments c ON c.thread_id = t.id AND c.deleted_at IS NULL
+        WHERE t.nest_id = ?
+        GROUP BY t.node_id`,
     [nestId],
-  )) as Array<{ node_id: string; count: number; last_at: string | null }>;
-  const out: Record<string, { count: number; lastAt: string | null }> = {};
-  for (const r of rows) out[r.node_id] = { count: r.count, lastAt: r.last_at };
+  )) as Array<{ node_id: string; count: number; open_count: number; comments: number; last_at: string | null }>;
+  const out: Record<string, NodeCommentCounts> = {};
+  for (const r of rows) out[r.node_id] = { count: r.count, open: r.open_count, comments: r.comments, lastAt: r.last_at };
   return out;
 }
 
@@ -125,7 +141,13 @@ export async function listThreads(nestId: string, nodeId: string): Promise<Annot
       "SELECT * FROM annotation_threads WHERE nest_id = ? AND node_id = ? ORDER BY created_at ASC, id ASC",
       [nestId, nodeId],
     ) as ThreadRow[];
-  return Promise.all(rows.map(rowToThread));
+  const threads = await Promise.all(rows.map(rowToThread));
+  // A channel keeps a deleted message's place; on a document it is gone, and a
+  // thread with nothing left goes with it.
+  if (nodeId.startsWith("nodes/conversations/") || (await isChannelNode(nestId, nodeId))) return threads;
+  return threads
+    .map((t) => ({ ...t, comments: t.comments.filter((c) => !c.deleted) }))
+    .filter((t) => t.comments.length > 0);
 }
 
 export async function createThread(

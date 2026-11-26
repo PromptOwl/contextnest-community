@@ -27,6 +27,7 @@ import { config } from "../config.js";
 import { resolveNestAccess } from "../shared/access.js";
 import { canCreateInNest } from "../governance/stewardship-service.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
+import { listNestPeople } from "../nests/people-service.js";
 import { updateNode } from "../nodes/service.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { getReadableChannel, isNestMember, type ChannelView } from "../channels/channel-service.js";
@@ -57,6 +58,9 @@ export interface ChannelMembers {
   channel: string;
   private: boolean;
   members: MemberView[];
+  /** Public channels: the nest's people who can read and post here without
+   *  having joined. Empty for a private channel (its members are all). */
+  audience: { email: string; name: string }[];
 }
 
 /** On create: the creator joins their channel (a read share on the node). The
@@ -80,7 +84,15 @@ async function nestMember(caller: Caller): Promise<void> {
 export async function listChannelMembers(caller: Caller, rawName: unknown): Promise<ChannelMembers> {
   await nestMember(caller);
   const { node } = await getReadableChannel(caller, rawName);
-  return { channel: node.id, private: await isPrivateContainer(caller.nestId, node.id), members: await memberViews(caller.nestId, node.id, node) };
+  const [priv, members] = await Promise.all([isPrivateContainer(caller.nestId, node.id), memberViews(caller.nestId, node.id, node)]);
+  const joined = new Set(members.map((m) => (m.kind === "person" ? m.email.toLowerCase() : "")));
+  // A document share ("grant") or a steward with no account does not reach the channel.
+  const audience = priv
+    ? []
+    : (await listNestPeople(caller.nestId))
+        .filter((p) => p.source !== "grant" && p.userId && !joined.has(p.email.toLowerCase()))
+        .map((p) => ({ email: p.email, name: p.name?.trim() || p.email }));
+  return { channel: node.id, private: priv, members, audience };
 }
 
 /** Invite a person added to the nest (or a known agent): a writer, or a member of the channel. */

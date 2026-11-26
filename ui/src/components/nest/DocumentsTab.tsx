@@ -34,9 +34,10 @@ import {
   CheckCircle2, Send, Loader2,
   Pencil, Trash2, FolderInput,
   Star, X, MoreVertical,
-  FolderOpen, ChevronRight, Share2, Globe, FolderPlus, Activity, Ruler,
+  FolderOpen, ChevronRight, Share2, Globe, Activity, Ruler,
 } from "lucide-react";
 import { FolderTree, prettyFolder, prettyFolderPath, type KnownFolder } from "../FolderTree";
+import { FolderSelect } from "../FolderSelect";
 import { ActivityLogPanel } from "../ActivityLogPanel";
 import { AuthorshipChips } from "../AuthorshipChips";
 import { rowLastEdit } from "@/lib/version-author";
@@ -69,7 +70,7 @@ import {
   DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
-  Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue,
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 
 type Node = any;
@@ -2173,45 +2174,20 @@ export function DocumentsTab({
             Version history, review state, and [[wiki links]] follow the
             document.
           </p>
-          <Select
-            value={
-              moveNewFolder !== null
-                ? "__new__"
-                : moveDest === ""
-                  ? "__root__"
-                  : moveDest
-            }
-            onValueChange={(v) => {
+          <FolderSelect
+            value={moveNewFolder !== null ? "__new__" : moveDest}
+            onChange={(v) => {
               if (v === "__new__") {
                 setMoveNewFolder("");
                 return;
               }
               setMoveNewFolder(null);
-              setMoveDest(v === "__root__" ? "" : v);
+              setMoveDest(v);
             }}
-          >
-            <SelectTrigger data-testid="move-folder-select">
-              <SelectValue placeholder="Choose a folder" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__root__">Nest root</SelectItem>
-              {allFolders.map((f) => (
-                <SelectItem key={f} value={f}>
-                  {prettyFolderPath(f)}
-                </SelectItem>
-              ))}
-              {/* Below the rule: the entries above are destinations, this one
-                  starts a different flow. Undifferentiated, it read as one
-                  more existing folder. */}
-              <SelectSeparator />
-              <SelectItem value="__new__">
-                <span className="inline-flex items-center gap-1.5">
-                  <FolderPlus className="h-3.5 w-3.5" />
-                  New folder…
-                </span>
-              </SelectItem>
-            </SelectContent>
-          </Select>
+            folders={allFolders}
+            extra={[{ value: "__new__", label: "New folder…" }]}
+            testId="move-folder-select"
+          />
           {moveNewFolder !== null && (
             <>
               <Input
