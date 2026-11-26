@@ -172,13 +172,13 @@ describe("ledger aggregates and the page", () => {
     expect(Number(r2.est_cost_micros ?? 0)).toBe(0);
     expect(Number(r2.tokens ?? 0)).toBe(0);
     // The ledger reports the stored totals.
-    const page = await req("GET", `/nests/${N}/ledger?agent=nodes/agents/claude-code-rv&limit=200`, undefined, alice.apiKey);
+    const page = await req("GET", `/nests/${N}/ledger?agent=nodes/agents/claude-code-rv&limit=200`, undefined, writeKey);
     expect(page.data.totals).toMatchObject({ cost_usd: 0.0123, tokens: 1234 });
     expect(page.data.entries.find((e: any) => e.entry_id === id).run.cost_usd).toBe(0.0123);
   });
 
   it("totals and rollups are one SQL aggregate each that never reads run_trace", async () => {
-    const { n, sql, out } = await counting(() => req("GET", `/nests/${N}/ledger?${qs({ ...range, limit: "1" })}`, undefined, alice.apiKey));
+    const { n, sql, out } = await counting(() => req("GET", `/nests/${N}/ledger?${qs({ ...range, limit: "1" })}`, undefined, writeKey));
     expect(out.status).toBe(200);
     expect(out.data.totals).toMatchObject({ entries: 60, proposals: 60, approved: 60, tokens: 30 * 320 });
     expect(Math.round(out.data.totals.cost_usd * 1e6)).toBe(30 * 1500 + 30 * 4000);
@@ -186,7 +186,7 @@ describe("ledger aggregates and the page", () => {
     expect(totalsSql.length).toBe(1);
     expect(totalsSql[0]).not.toMatch(/trace/);
     expect(n).toBeLessThan(25);
-    const roll = await counting(() => req("GET", `/nests/${N}/rollups?${qs({ ...range, grain: "week", by: "agent" })}`, undefined, alice.apiKey));
+    const roll = await counting(() => req("GET", `/nests/${N}/rollups?${qs({ ...range, grain: "week", by: "agent" })}`, undefined, writeKey));
     expect(roll.out.status).toBe(200);
     const rollSql = roll.sql.filter((s) => /COUNT\(\*\) AS entries/.test(s));
     expect(rollSql.length).toBe(1);
@@ -198,7 +198,7 @@ describe("ledger aggregates and the page", () => {
   });
 
   it("a 60-row page costs a fixed number of queries, not a few per row", async () => {
-    const { n, out } = await counting(() => req("GET", `/nests/${N}/ledger?${qs({ ...range, limit: "200" })}`, undefined, alice.apiKey));
+    const { n, out } = await counting(() => req("GET", `/nests/${N}/ledger?${qs({ ...range, limit: "200" })}`, undefined, writeKey));
     expect(out.status).toBe(200);
     expect(out.data.entries.length).toBe(60);
     // Every hop still filled in.
@@ -220,10 +220,10 @@ describe("ledger aggregates and the page", () => {
 describe("ledger export", () => {
   it("a bad request is a 422 that does not spend one of the hourly exports", async () => {
     for (let i = 0; i < 8; i++) {
-      const bad = await req("GET", `/nests/${N}/ledger/export?format=xml`, undefined, alice.apiKey);
+      const bad = await req("GET", `/nests/${N}/ledger/export?format=xml`, undefined, writeKey);
       expect(bad.status).toBe(422);
     }
-    const good = await req("GET", `/nests/${N}/ledger/export?${qs({ ...range, format: "csv" })}`, undefined, alice.apiKey);
+    const good = await req("GET", `/nests/${N}/ledger/export?${qs({ ...range, format: "csv" })}`, undefined, writeKey);
     expect(good.status).toBe(200);
   });
 
@@ -231,7 +231,7 @@ describe("ledger export", () => {
     const { ledgerTestHooks } = await import("../src/governance/ledger-service.js");
     ledgerTestHooks.failExport = true;
     try {
-      const res = await req("GET", `/nests/${N}/ledger/export?${qs({ ...range, format: "ndjson" })}`, undefined, alice.apiKey);
+      const res = await req("GET", `/nests/${N}/ledger/export?${qs({ ...range, format: "ndjson" })}`, undefined, writeKey);
       expect(res.status).toBe(500);
     } finally {
       ledgerTestHooks.failExport = false;
@@ -244,7 +244,7 @@ describe("ledger export", () => {
   });
 
   it("an export is batched: a fixed number of queries per 200-row page, not ~4 per row", async () => {
-    const { n, out } = await counting(() => req("GET", `/nests/${N}/ledger/export?${qs({ ...range, format: "ndjson" })}`, undefined, alice.apiKey));
+    const { n, out } = await counting(() => req("GET", `/nests/${N}/ledger/export?${qs({ ...range, format: "ndjson" })}`, undefined, writeKey));
     expect(out.status).toBe(200);
     expect(out.text.trim().split("\n").length).toBe(60);
     expect(n).toBeLessThan(30);

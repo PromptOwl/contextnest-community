@@ -26,6 +26,7 @@ import { dateLabel, draftUrl, mentionFor, parseRef, reviewerCanEdit } from "./ca
 import { canReviewAll } from "./routing-service.js";
 import { personalDmOff } from "./dm-service.js";
 import { PRIVATE_NEST_DISCLOSURE } from "../core/card-model.js";
+import { logCaught } from "../log.js";
 
 export const REDACTED_TITLE = "DM · private nest · title hidden";
 
@@ -75,7 +76,8 @@ async function readsAndReviews(nestId: string, userId: string, mail: string): Pr
     if (permissionLevel(await resolveNestPermission(nestId, userId)) < permissionLevel("read")) return false;
     const v = await canUserApprove(nestId, "nodes/__surfaces_scope_probe__", mail, { requestedBy: "surfaces-nobody@invalid" });
     return v.allowed;
-  } catch {
+  } catch (err) {
+    logCaught("home", err, { nest: nestId, call: "reads_and_reviews" }, "warn");
     return false;
   }
 }
@@ -175,7 +177,12 @@ export async function myPending(userId: string, opts: { installId?: string | nul
       const ref = parseRef(p.card_ref);
       const install = ref ? await getInstall(p.install_id) : null;
       const c = install ? getConnector(install.surface) : null;
-      if (ref && install && c?.permalink) permalink = await c.permalink(installRef(install), ref.conversation, ref.message_ref).catch(() => null);
+      if (ref && install && c?.permalink) {
+        permalink = await c.permalink(installRef(install), ref.conversation, ref.message_ref).catch((err) => {
+          logCaught("home", err, { install: install.id, call: "permalink" }, "warn");
+          return null;
+        });
+      }
     }
     const row: PendingRow = {
       proposal_id: p.id,
@@ -232,7 +239,8 @@ export async function buildHomeView(install: InstallRow, surfaceUserId: string):
     let url: string | null = null;
     try {
       url = linkUrl(await issueLinkToken({ installId: install.id, surfaceUserId }));
-    } catch {
+    } catch (err) {
+      logCaught("home", err, { install: install.id, call: "link_token" }, "warn");
       url = null;
     }
     blocks.push(sec("Link your ContextNest account to review what Nest proposes. Linking doesn't approve anything."));

@@ -4,6 +4,7 @@
  * conversation becomes {known:false}; a partial list never escapes.
  */
 import type { ConversationInfo, MembersResult, SurfaceConnector, SurfaceInstallRef, SurfaceMember } from "../contract.js";
+import { logCaught } from "../log.js";
 
 export const MEMBERS_TIMEOUT_MS = 10_000;
 
@@ -56,7 +57,8 @@ export async function safeMembers(
       })),
       conversation: { ...r.conversation, is_general: !!r.conversation.is_general, enumerable: true },
     };
-  } catch {
+  } catch (err) {
+    logCaught("guard", err, { install: install.id, call: "members" }, "warn"); // unknown members: fails closed
     return { known: false, reason: "error" };
   } finally {
     if (timer) clearTimeout(timer);

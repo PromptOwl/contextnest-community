@@ -3,6 +3,7 @@
  * disk + DB stay in lockstep across both surfaces. Handlers stay thin
  * (auth, parse, response shape); this module owns create/update/list.
  */
+import { personaNames } from "../metacognition/managed.js";
 import { adminFolderRefusal, adminFolderPathRefusal } from "../surfaces/admin-folders.js";
 import { surfaceEditsHiddenFor, isHidden as isSurfaceHidden, HIDE_ALL as SURFACE_HIDE_ALL } from "../surfaces/draft-visibility.js";
 import { approvedReadableBody } from "./readable-body.js";
@@ -31,6 +32,7 @@ import { join } from "node:path";
 import { serializeNodeSafe } from "../governance/safe-publish.js";
 import { assertNoViewCollision, batchViewCollisions } from "../views/collision.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
+import { enqueueSeal } from "./seal-queue.js";
 import { timed, withIoStats, withWriteStats } from "./io-stats.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import {
@@ -81,6 +83,7 @@ import {
   ownDraftIds,
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
+import { isHeadlessIdentity } from "../auth/headless.js";
 import { CHANNEL_TAG, hasTag, isChannelDoc } from "../channels/channel-node.js";
 import { isConversationDoc } from "../chat/containers.js";
 import { normalizeTag as normalizeChatTag } from "../governance/tag-index-service.js";
@@ -128,6 +131,7 @@ import {
   type TaskFields,
   type TaskFieldsPatch,
 } from "./task-fields.js";
+import { moveDetail, recordNodeChange, tagChangeDetail } from "./node-changes.js";
 import { openBlockerCounts } from "./relations.js";
 import {
   addComputedFields,
@@ -545,19 +549,16 @@ export interface NodeResponse extends TaskFields {
   /** Creator email — frontmatter author when present, else the author of the
    *  node's first version. Null for old imported docs with neither. */
   author?: string | null;
+  /** The creator's name when it is an agent (its address means nothing to a reader). */
+  author_name?: string;
   /** Everyone else with a hand in the doc: distinct node_versions authors
    *  UNION document-scope grant holders, minus the author, sorted. */
   collaborators?: string[];
   /** Who sealed the latest version: the human and, when the write named one,
-   *  the agent (`client`, spec §9.4). Node detail only, never to a public
-   *  reader — like `collaborators`, it names the nest's people. */
-  last_edit?: {
-    version: number;
-    edited_by: string;
-    edited_by_system?: string;
-    edited_at: string;
-    client?: ClientMetadata;
-  };
+   *  the agent (`client`, spec §9.4). On the node detail and every list row;
+   *  never to a public reader or a headless key — like `collaborators`, it
+   *  names the nest's people. */
+  last_edit?: ReturnType<typeof versions.toLastEdit>;
   description?: string;
   created_at?: string;
   updated_at?: string;
@@ -822,6 +823,23 @@ export async function withComputedFields<T extends NodeResponse>(
   nodes: T[],
 ): Promise<T[]> {
   return addComputedFields(nodes, await listFieldDefinitions(nestId));
+}
+
+/**
+ * May this caller see who edited a document (`last_edit`)? Not a public
+ * reader — like `collaborators`, it names the nest's people — and not a
+ * headless access key, which reads content, never people (po-1213 AC-NH-08).
+ * One rule for the list, the census feed, the node detail and the MCP reads.
+ */
+export async function canSeeEditors(
+  nestId: string,
+  userId: string,
+  /** What the caller already resolved for this request, so the gate does not
+   *  look it up a second time. */
+  known: { publicReader?: boolean } = {},
+): Promise<boolean> {
+  const publicReader = known.publicReader ?? (await isPublicReader(nestId, userId));
+  return !publicReader && !(await isHeadlessIdentity(userId));
 }
 
 export interface NodeAuthorship {
@@ -1344,6 +1362,22 @@ export async function listNodesForCaller(
         frontmatterAuthor: d.frontmatter.author ?? null,
       })),
     );
+  const agentNames = await personaNames([...(authorship?.values() ?? [])].map((a) => a.author));
+  // Who last edited each row — the human and the agent — for the Documents
+  // rows and context_list (po-1213). One query for the list. Same gate as the
+  // roster, plus headless keys: an access key reads content, not people.
+  // A member's REST list shows the live document and its live status, so it
+  // names the LATEST edit, draft included.
+  // A caller served approved content (an agent under stewardship, or
+  // ?approved_only) gets the approved version's writers, as context_get
+  // names them: a hidden draft's author and agent stay behind the gate.
+  const lastEdits = (await canSeeEditors(nestId, userId, { publicReader }))
+    ? await versions.getLatestVersionAttributions(
+        nestId,
+        accessible.map((d) => d.id),
+        approvedFields ? (approvedMap ?? new Map()) : undefined,
+      )
+    : null;
 
   const enriched = await Promise.all(
     accessible.map(async (doc) => {
@@ -1351,8 +1385,11 @@ export async function listNodesForCaller(
       const people = authorship?.get(doc.id);
       if (people) {
         r.author = people.author;
+        if (people.author && agentNames.has(people.author)) r.author_name = agentNames.get(people.author);
         r.collaborators = people.collaborators;
       }
+      const last = lastEdits?.get(doc.id);
+      if (last) r.last_edit = versions.toLastEdit(last);
       // A grant is access, not stewardship, so it shows up in neither the nest
       // permission nor the steward roles. Without it the client cannot tell a
       // write grantee from a viewer on this row.
@@ -1625,11 +1662,18 @@ export interface NestCensus {
   authors: string[];
   /** Documents edited in the last 7 days — the Overview stat tile. */
   editedLast7d: number;
-  /** Newest-first, capped: the "Recently edited" strip. */
-  recent: Array<{ id: string; title: string; type: string; updated_at?: string }>;
+  /** Newest-first, capped: the "Recently edited" feed on Documents. Each item
+   *  names its last editor (`last_edit`), withheld like the list's. */
+  recent: Array<{
+    id: string;
+    title: string;
+    type: string;
+    updated_at?: string;
+    last_edit?: ReturnType<typeof versions.toLastEdit>;
+  }>;
 }
 
-const RECENT_LIMIT = 3;
+const RECENT_LIMIT = 5;
 
 export async function nestCensus(
   nestId: string,
@@ -1718,20 +1762,32 @@ export async function nestCensus(
     ),
   ].sort((a, b) => a.localeCompare(b));
 
-  const recent = visible
+  const recentDocs = visible
     .filter((d) => d.frontmatter.updated_at)
     .sort((a, b) =>
       String(b.frontmatter.updated_at).localeCompare(
         String(a.frontmatter.updated_at),
       ),
     )
-    .slice(0, RECENT_LIMIT)
-    .map((d) => ({
+    .slice(0, RECENT_LIMIT);
+  // Same gate as the list's last_edit: no editor identity for a public
+  // reader or a headless key. No served-version bound (the list's `upTo`):
+  // the census has one caller, REST GET /census, with no approved-content
+  // mode, so everyone who gets here is reading the live nest — the latest
+  // edit, draft included, is the honest editor, as on a member's list.
+  const recentEdits = (await canSeeEditors(nestId, userId))
+    ? await versions.getLatestVersionAttributions(nestId, recentDocs.map((d) => d.id))
+    : null;
+  const recent = recentDocs.map((d) => {
+    const last = recentEdits?.get(d.id);
+    return {
       id: d.id,
       title: String(d.frontmatter.title ?? ""),
       type: d.frontmatter.type || "document",
       updated_at: d.frontmatter.updated_at,
-    }));
+      ...(last ? { last_edit: versions.toLastEdit(last) } : {}),
+    };
+  });
 
   return {
     total: visible.length,
@@ -3373,7 +3429,9 @@ export async function updateNode(
       // the edit lands as a new draft version and the open review repoints to
       // it (see repointPendingReview below), so the steward reviews the final
       // edited version without the author having to withdraw and resubmit.
-      const pendingReview = hasStewards
+      // A reviewer's edit always revises an open review, and a Slack suggestion
+      // opens one on a nest with stewardship off too.
+      const pendingReview = hasStewards || opts.reviewerEdit
         ? await getPendingReview(nestId, nodeId)
         : null;
       // A reviewer's approve-with-edits revises the submission the same way.
@@ -3525,6 +3583,19 @@ export async function updateNode(
         responseVersion = publishedVersion;
       }
 
+      const retagged = patch.tags ? tagChangeDetail(priorTags, currentTags) : null;
+      if (retagged) {
+        // The write already landed: a missing history line must not fail it.
+        await recordNodeChange(getDb(), {
+          nestId,
+          nodeId,
+          kind: "tags_changed",
+          actor: userEmail,
+          detail: retagged,
+          client: patch.client,
+        }).catch((err) => console.error("[node-changes] tag change not recorded", nestId, nodeId, err));
+      }
+
       const nextAssignee = taskFieldsOf(node.frontmatter.metadata).assignee ?? null;
       // Only a published edit notifies: a drafted assignment may be rejected.
       // Approving that draft later doesn't notify either (known gap).
@@ -3637,6 +3708,8 @@ export const NODE_KEYED_TABLES = [
   ["metacognition_agents", "node_id"],
   // Agent/person interactions logged on a task (migration 064).
   ["task_activity", "node_id"],
+  // Who moved it and who changed its tags (migration 102).
+  ["node_changes", "node_id"],
   // Document pins (CU-wdqcq02crw, migration 071) — editorial and personal. A
   // delete takes them with it (no pin on a document that is gone, or on the
   // next one to take its id); a move carries them along.
@@ -3852,6 +3925,13 @@ async function moveNodeInner(
     await db.transaction(async (tx) => {
       await rewriteNodeKeyedRows(tx, nestId, nodeId, newId);
       await rewriteNodeKeyedRows(tx, nestId, oldDerived, newDerived);
+      await recordNodeChange(tx, {
+        nestId,
+        nodeId: newId,
+        kind: "moved",
+        actor: userEmail,
+        detail: moveDetail(nodeId, newId),
+      });
       await tx.run(
         "UPDATE runs SET agent_node = ? WHERE nest_id = ? AND agent_node = ?",
         [newId, nestId, nodeId],
@@ -3887,10 +3967,14 @@ async function moveNodeInner(
     // index, and derived files are regenerated from that truth. Failing the
     // whole move because a generated file could not be rewritten would be the
     // worse outcome; the next mutation, or a reindex, restores them.
+    //
+    // Queued like every other write's index update, so the person moving a
+    // task does not wait for it (po-1247): on a network mount it was about
+    // half of the move's file operations.
     try {
-      await storage.regenerateIndex({ changedIds: [nodeId, newId, oldDerived, newDerived] });
+      for (const id of [nodeId, newId, oldDerived, newDerived]) await enqueueSeal(nestId, id, false);
     } catch (err) {
-      console.error("[move] regenerateIndex failed", nestId, nodeId, newId, err);
+      console.error("[move] could not queue the index update", nestId, nodeId, newId, err);
     }
 
     await trackEvent("node.move", { nestId, nodeId, newId });
@@ -4043,6 +4127,17 @@ async function assertNotArchived(nestId: string, nodeId: string): Promise<void> 
 /** Archiving is a steward's call: nest owners, admins and reviewers of this node. */
 export async function canArchiveNode(nestId: string, nodeId: string, userEmail: string): Promise<boolean> {
   return canApproveWith(await resolveUserRoles(nestId, userEmail, { nodeId }));
+}
+
+/** Archived, and not this caller's to restore: reads by id answer as a miss. */
+export async function isArchivedForCaller(nestId: string, nodeId: string, userEmail: string): Promise<boolean> {
+  let node: ContextNode;
+  try {
+    node = await (await engineCache.get(nestId)).storage.readDocument(nodeId);
+  } catch {
+    return false; // no document: each read answers that its own way
+  }
+  return isArchived(node) && !(await canArchiveNode(nestId, nodeId, userEmail));
 }
 
 /**

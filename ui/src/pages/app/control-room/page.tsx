@@ -3,17 +3,17 @@
  * nest is filling up, the Slack setup and how it all works.
  *
  * CR3 shipped the shell, Setup and How it works; CR2 fills Overview,
- * Decision ledger and Agents from the CR1 ledger and rollups. Who sees what
- * (decision 3, 2026-11-09): a server admin sees every nest and runs Setup;
- * a nest owner or admin sees the nests they administer (the org ledger and
- * rollups narrow themselves server-side) and gets no Setup tab.
+ * Decision ledger and Agents from the CR1 ledger and rollups. Who sees it:
+ * superadmins only (Misha, 2026-11-18, po-1406), replacing the 2026-11-09
+ * owners/admins rule; meta.visible hides it and the page-only reads refuse
+ * everyone else.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Gauge, RefreshCw } from "lucide-react";
 import { PageTitle } from "@/components/ui/page-title";
+import { SearchableSelect } from "@/components/SearchableSelect";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { useAuth } from "@/auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
 import { toast } from "sonner";
 import { listNests } from "../../../lib/api";
@@ -23,7 +23,7 @@ import { HowItWorks } from "./HowItWorks";
 import { Overview } from "./Overview";
 import { Ledger } from "./Ledger";
 import { Agents } from "./Agents";
-import type { ControlRoomScope, NestRef } from "./scope";
+import { ALL_NESTS, nestOptions, type ControlRoomScope, type NestRef } from "./scope";
 
 const TABS = ["overview", "ledger", "agents", "setup", "how"] as const;
 /** `?section=` (App owns `?tab=` and strips it on every navigation). */
@@ -59,19 +59,16 @@ function setParams(p: Record<string, string | null>) {
 }
 
 export default function ControlRoomPage() {
-  const { isAdmin } = useAuth();
   const nav = useAppNav();
   const setup = useSetupState();
   const [tab, setTabNow] = useState<Tab | null>(tabFromUrl);
   const [entry, setEntryNow] = useState<string | null>(() => param(ENTRY_PARAM));
-  // Until the reader picks a tab: a server admin with setup unfinished lands
-  // on Setup; everyone else on Overview — decided once, when the facts load.
+  // Only superadmins reach this page (po-1406, meta.ts). Until the reader picks
+  // a tab: Setup while unfinished, else Overview — decided once, when the facts load.
   useEffect(() => {
-    if (tab !== null) return;
-    if (!isAdmin) setTabNow(entry ? "ledger" : "overview");
-    else if (setup.loaded) setTabNow(entry ? "ledger" : setup.progress.count === 5 ? "overview" : "setup");
-  }, [setup.loaded, tab, setup.progress.count, isAdmin, entry]);
-  const shown: Tab = tab === "setup" && !isAdmin ? "overview" : tab ?? (isAdmin ? "setup" : "overview");
+    if (tab === null && setup.loaded) setTabNow(entry ? "ledger" : setup.progress.count === 5 ? "overview" : "setup");
+  }, [setup.loaded, tab, setup.progress.count, entry]);
+  const shown: Tab = tab ?? "setup";
 
   const setTab = useCallback((t: string) => {
     setTabNow(t as Tab);
@@ -100,7 +97,7 @@ export default function ControlRoomPage() {
       .then((r) =>
         setNests(
           (r.nests ?? [])
-            .filter((n: any) => n && typeof n.id === "string" && (isAdmin || n.is_owner || n.permission === "owner" || n.permission === "admin"))
+            .filter((n: any) => n && typeof n.id === "string")
             .map((n: any) => ({ id: n.id, name: String(n.name ?? n.id) })),
         ),
       )
@@ -108,7 +105,7 @@ export default function ControlRoomPage() {
         setNests([]);
         toast.error(e instanceof Error && e.message ? e.message : "Couldn't load your nests. Reload to try again.");
       });
-  }, [isAdmin]);
+  }, []);
   // A refresh when the reader comes back to the browser tab — a new report is
   // then the only thing that moves (Agents). No polling.
   useEffect(() => {
@@ -124,10 +121,10 @@ export default function ControlRoomPage() {
     (id: string) => nests.find((n) => n.id === id)?.name ?? setup.nests.find((n) => n.id === id)?.name ?? "a nest",
     [nests, setup.nests],
   );
-  const scope: ControlRoomScope = { nestId, days, range, nests, isServerAdmin: isAdmin, nestName, tick };
+  const scope: ControlRoomScope = { nestId, days, range, nests, nestName, tick };
 
-  const onSetup = isAdmin ? () => setTab("setup") : null;
-  const unfinished = isAdmin && setup.loaded && setup.progress.count < 5;
+  const onSetup = () => setTab("setup");
+  const unfinished = setup.loaded && setup.progress.count < 5;
   const dataTab = shown === "overview" || shown === "ledger" || shown === "agents";
 
   const openDoc = (nid: string, nodeId: string) => nav.openReview(nid, nestName(nid), nodeId);
@@ -142,20 +139,19 @@ export default function ControlRoomPage() {
         actions={
           dataTab ? (
             <div className="flex flex-wrap items-center gap-2">
-              <select
-                aria-label="Nest"
-                className="h-9 max-w-[12rem] rounded-md border bg-background px-2 text-sm"
-                value={nestId ?? ""}
-                onChange={(e) => setNestId(e.target.value || null)}
-                data-testid="cr-nest-select"
-              >
-                <option value="">{isAdmin ? "All nests" : "All my nests"}</option>
-                {nests.map((n) => (
-                  <option key={n.id} value={n.id}>
-                    {n.name}
-                  </option>
-                ))}
-              </select>
+              {/* Not a native select: its popup grows to the longest nest name. */}
+              <SearchableSelect
+                ariaLabel="Nest"
+                value={nestId ?? ALL_NESTS}
+                onChange={(v) => setNestId(v === ALL_NESTS ? null : v)}
+                options={nestOptions(nests)}
+                searchValues={false}
+                searchPlaceholder="Search nests…"
+                emptyText="No nests match."
+                className="w-44 sm:w-56"
+                buttonClassName="h-9 px-2"
+                testId="cr-nest-select"
+              />
               <select
                 aria-label="Range"
                 className="h-9 rounded-md border bg-background px-2 text-sm"
@@ -182,17 +178,15 @@ export default function ControlRoomPage() {
             <TabsTrigger value="overview" className="px-3 py-1.5">Overview</TabsTrigger>
             <TabsTrigger value="ledger" className="px-3 py-1.5">Decision ledger</TabsTrigger>
             <TabsTrigger value="agents" className="px-3 py-1.5">Agents</TabsTrigger>
-            {isAdmin && (
-              <TabsTrigger value="setup" className="gap-1.5 px-3 py-1.5">
-                Setup
-                {unfinished && (
-                  <>
-                    <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden />
-                    <span className="sr-only">, not finished</span>
-                  </>
-                )}
-              </TabsTrigger>
-            )}
+            <TabsTrigger value="setup" className="gap-1.5 px-3 py-1.5">
+              Setup
+              {unfinished && (
+                <>
+                  <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden />
+                  <span className="sr-only">, not finished</span>
+                </>
+              )}
+            </TabsTrigger>
             <TabsTrigger value="how" className="px-3 py-1.5">How it works</TabsTrigger>
           </TabsList>
         </div>
@@ -206,11 +200,9 @@ export default function ControlRoomPage() {
         <TabsContent value="agents" className="mt-5">
           {shown === "agents" && <Agents scope={scope} onManageKeys={nav.manageKeys} />}
         </TabsContent>
-        {isAdmin && (
-          <TabsContent value="setup" className="mt-5">
-            <SetupWizard state={setup} onDone={() => setTab("overview")} onHow={() => setTab("how")} />
-          </TabsContent>
-        )}
+        <TabsContent value="setup" className="mt-5">
+          <SetupWizard state={setup} onDone={() => setTab("overview")} onHow={() => setTab("how")} />
+        </TabsContent>
         <TabsContent value="how" className="mt-5">
           <HowItWorks settings={setup.settings} orgName={setup.status?.org_name ?? null} onAgents={() => setTab("agents")} />
         </TabsContent>

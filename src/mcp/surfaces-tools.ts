@@ -31,6 +31,7 @@ import {
   removeBinding,
   resumeBinding,
   updateBinding,
+  NO_REASON_MCP,
 } from "../surfaces/services/binding-service.js";
 import {
   clearAutoMatchBlock,
@@ -44,7 +45,7 @@ import type { McpToolContext, ToolResult } from "./tools.js";
 import { randomBytes } from "crypto";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
-import { createBindingWithListener } from "../surfaces/services/listener-service.js";
+import { createBindingWithListener, setListenerJudge } from "../surfaces/services/listener-service.js";
 import { createInstall, getInstall } from "../surfaces/services/install-store.js";
 import { listInstallChannels, channelListFailure, TRUNCATED_NOTE, SlackChannelsListInput } from "../surfaces/adapters/slack/channels.js";
 import { mcpInputSchema } from "../workflow/agent-event-schema.js";
@@ -102,13 +103,19 @@ export const SURFACES_TOOL_DEFINITIONS = [
   },
   {
     name: "context_surfaces_binding_update",
-    description: "Change a binding's explicit_public_bind or ext_capture_enabled setting. The guard re-runs and may pause it. Admin only.",
+    description:
+      "Change a binding's explicit_public_bind or ext_capture_enabled setting (the guard re-runs and may pause it), or, on its own, `judge`: the listener's own settings. Admin only.",
     inputSchema: {
       type: "object",
       properties: {
         binding_id: BINDING_ID,
         explicit_public_bind: BIND_FIELDS.explicit_public_bind,
         ext_capture_enabled: BIND_FIELDS.ext_capture_enabled,
+        judge: {
+          type: "object",
+          description:
+            "The listener's settings: name, avatar (an emoji or up to 4 letters), folders (some of its starter folders), max_turns (2-8), max_items (1-3 suggestions per run), model (a model name), max_output_tokens (500-8000), temperature (0-1), timeout_seconds (60-300). null clears one to its default; a key left out is kept.",
+        },
       },
       required: ["binding_id"],
     },
@@ -420,6 +427,11 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
       case "context_surfaces_binding_update": {
         refuseListener(args);
         const row = await bindingInNest(reqStr(args.binding_id, "binding_id"), ctx);
+        if (args.judge !== undefined) {
+          if (args.explicit_public_bind !== undefined || args.ext_capture_enabled !== undefined) throw new ValidationError("Send judge on its own.");
+          const set = await setListenerJudge(row.id, ctx.userId, args.judge);
+          return { text: `Updated the listener settings of ${row.id}.`, data: set };
+        }
         const out = await updateBinding(row.id, ctx.userId, {
           explicitPublicBind: optBool(args.explicit_public_bind, "explicit_public_bind"),
           extCaptureEnabled: optBool(args.ext_capture_enabled, "ext_capture_enabled"),
@@ -428,7 +440,7 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
       }
       case "context_surfaces_binding_delete": {
         const row = await bindingInNest(reqStr(args.binding_id, "binding_id"), ctx);
-        const out = await removeBinding(row.id, ctx.userId);
+        const out = await removeBinding(row.id, ctx.userId, NO_REASON_MCP);
         return { text: `Removed ${row.id}.`, data: out };
       }
       case "context_surfaces_binding_recheck": {
@@ -439,7 +451,7 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
       }
       case "context_surfaces_binding_resume": {
         const row = await bindingInNest(reqStr(args.binding_id, "binding_id"), ctx);
-        const out = await resumeBinding(row.id, ctx.userId);
+        const out = await resumeBinding(row.id, ctx.userId, NO_REASON_MCP);
         return { text: `Resumed ${row.id}.`, data: out };
       }
       case "context_surfaces_links_list": {
@@ -568,7 +580,7 @@ export async function runSurfacesTool(toolName: string, args: Record<string, any
       }
       case "context_surfaces_disconnect": {
         await requireOrgAdmin(ctx);
-        const out = await disconnectInstall(reqStr(args.install_id, "install_id"));
+        const out = await disconnectInstall(reqStr(args.install_id, "install_id"), ctx.userId);
         return { text: `Disconnected. ${out.withdrawn} pending proposal item(s) withdrawn. Approved nodes and the commit audit stay.`, data: { disconnected: true, ...out } };
       }
       case "context_surfaces_seed_apply": {

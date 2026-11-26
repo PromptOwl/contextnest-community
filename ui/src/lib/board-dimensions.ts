@@ -19,6 +19,7 @@ import {
   fieldValueForMove,
   type FieldDefinition,
 } from "./custom-fields";
+import { isTicketTag } from "./ticket";
 import { prettyFolder } from "../components/FolderTree";
 
 /** The bucket for nodes that don't carry a value for the active dimension. */
@@ -33,6 +34,8 @@ export interface BoardNode {
   status: string;
   /** Board fields + timestamps, from the node listing (src/nodes/task-fields.ts). */
   assignee?: string;
+  /** Who created it (email), server-resolved. */
+  author?: string | null;
   assigned_at?: string;
   due?: string;
   priority?: string;
@@ -52,7 +55,12 @@ export interface BoardNode {
   status_since?: string;
 }
 
-export type DimensionKind = "folder" | "status" | "tag" | "assignee" | "priority" | "field";
+export type DimensionKind = "folder" | "status" | "tag" | "assignee" | "priority" | "field" | "creator";
+
+/** Dimensions whose columns are people, keyed by email. */
+export function isPersonDimension(d: DimensionKind): boolean {
+  return d === "assignee" || d === "creator";
+}
 
 /** Field-valued dimensions: a column is a value of a board field, and a drag
  *  between columns sets that field (Linear's group-by-assignee/priority). */
@@ -434,6 +442,8 @@ export function cardColumnKeys(node: BoardNode, config: BoardConfig): string[] {
       return [node.status || UNCATEGORIZED];
     case "assignee":
       return [node.assignee ? node.assignee.toLowerCase() : UNCATEGORIZED];
+    case "creator":
+      return [node.author ? node.author.toLowerCase() : UNCATEGORIZED];
     case "priority":
       return [node.priority || UNCATEGORIZED];
     case "field":
@@ -450,10 +460,16 @@ export function cardColumnKeys(node: BoardNode, config: BoardConfig): string[] {
             .filter((t) => t.startsWith(`${ns}:`))
             .map((t) => t.slice(ns.length + 1))
             .filter(Boolean)
-        : tags.filter(Boolean);
+        : // A ticket number is one card's ID, not a group.
+          tags.filter((t) => t && !isTicketTag(t));
       return values.length > 0 ? [...new Set(values)] : [UNCATEGORIZED];
     }
   }
+}
+
+/** A board saved before ticket numbers left the tag columns may still list some. */
+function isTicketColumn(key: string, config: BoardConfig): boolean {
+  return config.dimension === "tag" && !namespaceOf(config) && isTicketTag(key);
 }
 
 /**
@@ -491,6 +507,7 @@ function shownKeys(
 function uncategorizedLabel(d: DimensionKind, field?: FieldDefinition): string {
   if (d === "field" && field) return fieldKeyLabel(field, UNCATEGORIZED);
   if (d === "assignee") return "Unassigned";
+  if (d === "creator") return "Unknown";
   if (d === "priority") return "No priority";
   return "Uncategorized";
 }
@@ -519,9 +536,9 @@ function labelFor(key: string, config: BoardConfig): string {
  * have no such chip to match, so they keep the capitalize styling.
  */
 export function capitalizeColumnHeader(dimension: DimensionKind): boolean {
-  // Assignee columns are email addresses — capitalizing them misspells them.
+  // Person columns are email addresses — capitalizing them misspells them.
   // Field values are what the admin typed — keep their casing.
-  return dimension !== "tag" && dimension !== "assignee" && dimension !== "field";
+  return dimension !== "tag" && !isPersonDimension(dimension) && dimension !== "field";
 }
 
 function titleFor(key: string, config: BoardConfig): string {
@@ -547,7 +564,7 @@ export function buildColumns(
   // Explicit-column board: the columns ARE columnOrder (minus hidden), in that
   // order — nothing auto-appears, nothing trails. An empty order = empty board.
   if (config.explicitColumns) {
-    const order = config.columnOrder ?? [];
+    const order = (config.columnOrder ?? []).filter((k) => !isTicketColumn(k, config));
     const listed = new Set(order.filter((k) => !isColumnPattern(k)));
     // Tag values on the board's cards, for patterns to expand against.
     const tagged = new Set<string>();
@@ -595,7 +612,7 @@ export function buildColumns(
   const ordered: string[] = [];
   const seen = new Set<string>();
   for (const key of config.columnOrder ?? []) {
-    if (hidden.has(key) || key === UNCATEGORIZED || seen.has(key)) continue;
+    if (hidden.has(key) || key === UNCATEGORIZED || seen.has(key) || isTicketColumn(key, config)) continue;
     seen.add(key);
     ordered.push(key);
     present.delete(key);
@@ -766,6 +783,8 @@ export function planMove(
         reason:
           "Status changes go through the review workflow, not the board — open the doc and submit for review.",
       };
+    case "creator":
+      return { kind: "unsupported", reason: "Who created a document doesn't change." };
     case "field": {
       const def = config.field;
       if (!def) return { kind: "unsupported", reason: "This field no longer exists." };
@@ -824,6 +843,7 @@ export function newCardPlacement(
       return { tags: [withHash(ns ? `${ns}:${columnKey}` : columnKey)] };
     }
     case "status":
+    case "creator":
       return null;
   }
 }
@@ -897,4 +917,34 @@ export function laneFields(
   }
   const v = laneKey === UNCATEGORIZED ? null : laneKey;
   return { [lane]: v };
+}
+
+const CREATING = "creating:";
+let creatingSeq = 0;
+
+/** Is this the stand-in for a task the server is still creating? It has no
+ *  document yet, so it cannot be opened, dragged or edited. */
+export function isCreatingCard(id: string): boolean {
+  return id.includes(CREATING);
+}
+
+/** The card to show at once for a create request, in the column, lane and
+ *  folder the request puts it in. */
+export function creatingCard(payload: Record<string, any>): BoardNode {
+  const leaf = `${CREATING}${++creatingSeq}`;
+  const now = new Date().toISOString();
+  return {
+    id: payload.folder ? `nodes/${payload.folder}/${leaf}` : `nodes/${leaf}`,
+    title: payload.title,
+    type: payload.type,
+    tags: payload.tags ?? [],
+    status: "",
+    assignee: payload.assignee ?? undefined,
+    priority: payload.priority ?? undefined,
+    due: payload.due ?? undefined,
+    parent: payload.parent ?? undefined,
+    fields: payload.fields,
+    created_at: now,
+    updated_at: now,
+  };
 }

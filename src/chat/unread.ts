@@ -32,10 +32,16 @@ export interface ChatUnread {
   }>;
 }
 
-/** A summary is served from memory for this long per person (the dashboard
- *  polls; counts a few seconds old are fine). */
-const CACHE_MS = 5_000;
+/** A summary is served from memory for this long per person. The dashboard
+ *  polls it from every open tab, and on a Cloud Storage mount one build can
+ *  take minutes, so the TTL matches the document-discovery cache
+ *  (DISCOVERY_TTL_MS in nodes/engine.ts). */
+const CACHE_MS = 30_000;
 const cache = new Map<string, { at: number; value: ChatUnread }>();
+/** The build in flight per key. Concurrent polls join it instead of each
+ *  starting their own: without this, every poll that arrived during a slow
+ *  build started another one, and together they filled every request slot. */
+const inflight = new Map<string, Promise<ChatUnread>>();
 
 export async function chatUnreadSummary(params: {
   userId: string;
@@ -50,14 +56,22 @@ export async function chatUnreadSummary(params: {
   const hit = cache.get(cacheKey);
   if (hit && hit.at > Date.now() - CACHE_MS) return hit.value;
   if (cache.size > 2000) for (const [k, v] of cache) if (v.at <= Date.now() - CACHE_MS) cache.delete(k);
-  const value = await build(params, out);
-  cache.set(cacheKey, { at: Date.now(), value });
-  return value;
+  const running = inflight.get(cacheKey);
+  if (running) return running;
+  const run = build(params, out)
+    .then((value) => {
+      cache.set(cacheKey, { at: Date.now(), value });
+      return value;
+    })
+    .finally(() => inflight.delete(cacheKey));
+  inflight.set(cacheKey, run);
+  return run;
 }
 
 /** Tests only. */
 export function _resetUnreadCache(): void {
   cache.clear();
+  inflight.clear();
 }
 
 async function build(
@@ -65,13 +79,16 @@ async function build(
   out: ChatUnread,
 ): Promise<ChatUnread> {
   const { userId, email } = params;
+  // Every nest at once, not one after another: the per-nest checks are
+  // independent, and in sequence their latencies added up per visible nest.
+  const visible = (await listVisibleNests(userId)).filter((n) => !params.onlyNestId || n.id === params.onlyNestId);
+  const eligible = await Promise.all(
+    visible.map(async (n) => (await nestChatEnabled(n.id)) && (await isNestMember(n.id, userId))),
+  );
   const nestNames = new Map<string, string>();
-  for (const n of await listVisibleNests(userId)) {
-    if (params.onlyNestId && n.id !== params.onlyNestId) continue;
-    if (!(await nestChatEnabled(n.id))) continue;
-    if (!(await isNestMember(n.id, userId))) continue;
-    nestNames.set(n.id, n.name ?? n.id);
-  }
+  visible.forEach((n, i) => {
+    if (eligible[i]) nestNames.set(n.id, n.name ?? n.id);
+  });
   if (nestNames.size === 0) return out;
 
   // Open mentions in chat containers, per nest (access-checked by the index read).
@@ -82,7 +99,7 @@ async function build(
     mentionsByNest.set(m.nest_id, (mentionsByNest.get(m.nest_id) ?? 0) + 1);
   }
 
-  for (const [nestId, nestName] of nestNames) {
+  const perNest = await Promise.all([...nestNames].map(async ([nestId, nestName]) => {
     const caller = { nestId, userId, userEmail: email };
     let channelIds: string[] = [];
     try {
@@ -98,9 +115,13 @@ async function build(
     const conversations = convIds.map((id) => ({ id, unread: stats.get(id)?.unread ?? 0 }));
     const unread = [...channels, ...conversations].reduce((s, c) => s + c.unread, 0);
     const mentions = mentionsByNest.get(nestId) ?? 0;
-    out.nests.push({ nest_id: nestId, nest_name: nestName, unread, mentions, channels, conversations });
-    out.total += unread;
-    out.mentions += mentions;
+    return { nest_id: nestId, nest_name: nestName, unread, mentions, channels, conversations };
+  }));
+  // Promise.all keeps input order, so the nests list in the same order as before.
+  for (const n of perNest) {
+    out.nests.push(n);
+    out.total += n.unread;
+    out.mentions += n.mentions;
   }
   return out;
 }

@@ -33,6 +33,7 @@ import { isLicenseAdminEmail } from "../../auth/license.js";
 import { isSuperAdmin } from "../../governance/access-service.js";
 import { parseSharedTeams } from "../../governance/teams-service.js";
 import type { ReaderSet } from "../core/guard.js";
+import { logCaught } from "../log.js";
 
 export interface EffectiveReaders extends ReaderSet {
   /** Server admins (exempt path), for the surface_ok "can read" check. */
@@ -58,7 +59,10 @@ async function tiedListeners(nestId: string): Promise<Map<string, string>> {
        JOIN surface_bindings b ON b.nest_id = m.nest_id AND b.listener_agent_node_id = m.node_id AND b.status <> 'removed'
       WHERE m.nest_id = ?`,
     [nestId],
-  ).catch(() => [])) as Array<{ node_id: string; config_json: string; enabled: number; binding_id: string }>;
+  ).catch((err) => {
+    logCaught("guard", err, { nest: nestId, call: "tied_listeners" }); // no exemption: fails closed
+    return [];
+  })) as Array<{ node_id: string; config_json: string; enabled: number; binding_id: string }>;
   for (const r of rows) {
     let c: unknown = null;
     try {
@@ -207,13 +211,8 @@ export async function effectiveReaders(
       nonUser.push({ kind: "agent", id: node });
     }
   }
-  // outbound connectors (any event)
-  for (const c of (await db.all("SELECT id FROM connectors WHERE nest_id = ? AND enabled = 1", [nestId])) as Array<{ id: string }>) {
-    nonUser.push({ kind: "connector", id: c.id });
-  }
-  // server-wide governance webhooks post every nest's events
-  if (config.SLACK_WEBHOOK_URL) nonUser.push({ kind: "connector", id: "env:SLACK_WEBHOOK_URL" });
-  if (config.MSTEAMS_WEBHOOK_URL) nonUser.push({ kind: "connector", id: "env:MSTEAMS_WEBHOOK_URL" });
+  // Outbound connectors and the server-wide webhooks are not readers: a bound
+  // nest's posts carry no content (boundNest in notify/dispatch + notify, po-1431).
 
   // Server admins (§12 R1): only the server-admin path itself is exempt, so
   // they are never added above for being admins — but one who is ALSO the

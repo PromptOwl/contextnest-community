@@ -545,7 +545,7 @@ describe("M2: withdrawal is a system action", () => {
     R.proposals.proposalTestHooks.afterDraft = async () => {
       if (removed) return;
       removed = true;
-      expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${b6}`, undefined, alice.apiKey)).status).toBe(200);
+      expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${b6}`, { reason: "test remove" }, alice.apiKey)).status).toBe(200);
     };
     try {
       modelImpl = (req) => propose(req, { title: "Office plants get watered Fridays", body: "Decision: plants are watered on Fridays." });
@@ -573,7 +573,7 @@ describe("M2: withdrawal is a system action", () => {
     expect(item.state).toBe("pending");
     R.proposals.proposalTestHooks.failWithdraw = true;
     try {
-      await jsonRequest(app, "DELETE", `/surfaces/bindings/${b7}`, undefined, alice.apiKey);
+      await jsonRequest(app, "DELETE", `/surfaces/bindings/${b7}`, { reason: "test remove" }, alice.apiKey);
       await S.work.waitForSurfacesWork();
     } finally {
       R.proposals.proposalTestHooks.failWithdraw = false;
@@ -1041,7 +1041,7 @@ describe("Round 3: N5 and INFO", () => {
     const before = (await all("SELECT * FROM surface_notices WHERE kind = 'withdraw_failed'")).length;
     R.proposals.proposalTestHooks.failWithdraw = true;
     try {
-      await jsonRequest(app, "DELETE", `/surfaces/bindings/${b9}`, undefined, alice.apiKey);
+      await jsonRequest(app, "DELETE", `/surfaces/bindings/${b9}`, { reason: "test remove" }, alice.apiKey);
       await S.work.waitForSurfacesWork();
       await S.purge.purgeSweep(Date.now());
       await S.purge.purgeSweep(Date.now());

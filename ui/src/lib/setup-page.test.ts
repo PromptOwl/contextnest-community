@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CHOICES, callbackUrl, cloudGuides, cloudServer, connectGuides, detectedTools, initCommand, loginCommand, loopbackCallback } from "./setup-page";
+import { DEFAULT_CHOICES, callbackUrl, cloudGuides, cloudServer, connectGuides, detectedTools, filterGuides, initCommand, loginCommand, loopbackCallback } from "./setup-page";
 
 describe("setup page", () => {
   it("accepts only a loopback /callback", () => {
@@ -49,5 +49,27 @@ describe("setup page", () => {
     expect(detectedTools("#detected=claude,gemini,evil")).toEqual(["claude", "gemini"]);
     expect(detectedTools("#detected=")).toEqual([]);
     expect(detectedTools("")).toBeNull();
+  });
+
+  it("lists every agent plugin for a local vault and for a cloud server", () => {
+    const plugins = ["codex-plugin", "opencode", "grok-build", "muse", "zed"];
+    for (const guides of [connectGuides("my-nest"), cloudGuides("https://nest.example.com", "my-nest")]) {
+      const ids = guides.map((g) => g.id);
+      for (const p of plugins) expect(ids).toContain(p);
+    }
+    const zed = connectGuides("my-nest").find((g) => g.id === "zed")!;
+    expect(zed.steps).toContain("~/.agents/skills");
+    const codex = connectGuides("my-nest").find((g) => g.id === "codex-plugin")!;
+    expect(codex.steps).toContain("CONTEXTNEST_VAULT=my-nest");
+    const unsafe = connectGuides("x; rm -rf ~").find((g) => g.id === "codex-plugin")!;
+    expect(unsafe.steps).not.toContain("rm -rf");
+  });
+
+  it("filters guides by every word, ignoring case", () => {
+    const guides = connectGuides("my-nest");
+    expect(filterGuides(guides, "")).toEqual(guides);
+    expect(filterGuides(guides, "  ZED ").map((g) => g.id)).toEqual(["zed"]);
+    expect(filterGuides(guides, "codex hooks").map((g) => g.id)).toEqual(["codex-plugin"]);
+    expect(filterGuides(guides, "no-such-tool")).toEqual([]);
   });
 });

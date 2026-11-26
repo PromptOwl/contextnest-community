@@ -61,6 +61,8 @@ interface Trace {
   skipped?: string;
   error?: string;
   timeout?: boolean;
+  kind?: string;
+  verdict?: string;
 }
 
 function parse<T>(raw: string | null): T | null {
@@ -88,7 +90,8 @@ export function outcomeOf(status: string, t: Trace | null): RunOutcome {
   if (status === "running") return "running";
   if (t?.timeout || t?.stopped_by === "max_seconds" || t?.stopped_by === "timeout") return "timeout";
   if (status === "cancelled") return t?.skipped ? "skipped" : "cancelled";
-  if (status === "failed") return "failed";
+  // Before the judge recorded a failed verdict as failed, such a run was stored as succeeded.
+  if (status === "failed" || (t?.kind === "surfaces_judge" && t.verdict === "error_schema")) return "failed";
   return "succeeded";
 }
 

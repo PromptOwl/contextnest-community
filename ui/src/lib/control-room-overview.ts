@@ -71,7 +71,7 @@ export interface LedgerEntry {
   at: string;
   nest: { id: string; label: string };
   agent: { node_id: string | null; name: string | null; source: string };
-  run: { id: string; outcome: string | null; cost_usd: number; external_ref?: string | null } | null;
+  run: { id: string; outcome: string | null; cost_usd: number; external_ref?: string | null; error?: string | null } | null;
   verdict: { code: string | null; reason_code: string | null; kinds: string[] | null; message_count: number | null };
   decision: { verdict: string | null; reason_code: string | null; confidence: number | null; summary?: string | null; evidence?: Array<{ kind: string; ref: string }> | null } | null;
   proposal: { id: string | null; title?: string | null; state: string | null; edited: boolean; counts: Record<string, number> } | null;
@@ -136,12 +136,39 @@ const REASON_TEXT: Record<string, string> = {
   no_model: "No model configured",
   nest_unreadable: "Nest not readable",
   target_not_document: "Target isn't a document",
+  owner: "Blocked: the suggested owner isn't in the conversation",
+  due_date: "Blocked: it gave a date the messages don't mention",
+  verbatim: "Blocked: it copied too much of the conversation",
+  leak: "Blocked: it included text from another document",
+  people_rules: "Blocked: not allowed in the people folder",
+  low_confidence: "Not confident enough to suggest",
   new_decision: "New decision",
   duplicate: "Duplicate",
   stale_source: "Source out of date",
   escalated: "Escalated to a person",
   model_timeout: "The model call timed out",
+  // Why a listener's judge run failed (po-1407).
+  model_auth: "The model key was refused",
+  model_billing: "The model account is out of credit",
+  model_rate_limited: "The model is rate-limited",
+  model_rejected: "The model refused the request",
+  model_unavailable: "This model isn't available to the model key",
+  model_error: "The model call failed",
+  slack_fetch_failed: "Couldn't reach Slack",
+  nest_read_failed: "Couldn't read the nest",
+  invalid_output: "The model's decision was invalid",
+  output_limit: "The model ran out of output tokens before it answered",
+  no_verdict: "The model answered without submitting a decision",
+  db_error: "Database error",
+  unknown_error: "Unexpected error (see server log)",
+  // An agent run the server stopped under (po-1452).
+  server_stopped: "The server stopped during the run",
 };
+
+/** A suggestion was made and a safety check stopped it: not the same as nothing to say. */
+const BLOCKED_REASONS = new Set(["owner", "due_date", "verbatim", "leak", "people_rules"]);
+export const isBlocked = (e: Pick<LedgerEntry, "verdict" | "agent">): boolean =>
+  e.agent.source === "surfaces" && e.verdict.code === "no_op" && BLOCKED_REASONS.has(e.verdict.reason_code ?? "");
 
 export function reasonLabel(code: string | null | undefined): string {
   if (!code) return "No reason given";
@@ -437,6 +464,27 @@ export function agentRows(agentRollups: RollupRow[]): AgentRow[] {
   const out = [...m.values()];
   for (const a of out) a.approvedPct = pct(a.totals.approved, a.totals.approved + a.totals.rejected + a.totals.expired);
   return out.sort((a, b) => (a.lastAt < b.lastAt ? 1 : a.lastAt > b.lastAt ? -1 : a.name.localeCompare(b.name)));
+}
+
+/**
+ * The list plus every connected channel's listener that has no row yet, so a new
+ * listener can be seen and set up before its first conversation. `lastAt` "" = none.
+ */
+export function withIdleListeners(
+  rows: AgentRow[],
+  bindings: Array<{ nest_id: string; status: string; listener_agent_node_id?: string | null; listener_name?: string | null; conversation_kind?: string }>,
+  nestId: string | null,
+): AgentRow[] {
+  const have = new Set(rows.map((r) => r.id));
+  const idle: AgentRow[] = [];
+  for (const b of bindings) {
+    const nodeId = b.listener_agent_node_id;
+    const id = `${b.nest_id}\u0000${nodeId}`;
+    if (!nodeId || b.status === "removed" || b.conversation_kind === "dm" || (nestId && b.nest_id !== nestId) || have.has(id)) continue;
+    have.add(id);
+    idle.push({ id, nodeId, nestId: b.nest_id, name: b.listener_name || nodeId.split("/").pop() || nodeId, source: "surfaces", totals: sumRows([]), approvedPct: null, lastAt: "" });
+  }
+  return [...rows, ...idle.sort((a, b) => a.name.localeCompare(b.name))];
 }
 
 /** Rollup table rows, newest bucket first, then by label. */

@@ -107,6 +107,10 @@ import NestSettingsApi from './nest_settings_api.js';
 import ReaderModePage from '../page_factory/app/reader_mode_page.js';
 // REST helper used to arrange Reader Mode preconditions (Reader mode, visibility, shares)
 import ReaderModeApi from './reader_mode_api.js';
+// Document Version History (the history dialog, restore, Compare, the HTML page's version banner)
+import VersionHistoryPage from '../page_factory/app/version_history_page.js';
+// REST helper used to arrange Version History preconditions (versions, reviews, shares)
+import VersionHistoryApi from './version_history_api.js';
 
 /**
  * Global fixtures available to all tests
@@ -547,6 +551,21 @@ const roleFixtures = roleAliases.reduce((acc, roleName) => {
       get readerModeApi() {
         if (!this._readerModeApi) this._readerModeApi = new ReaderModeApi(this.page);
         return this._readerModeApi;
+      },
+
+      // Document page → Version history dialog, Compare menu, HTML page's version banner
+      get versionHistoryPage() {
+        return new VersionHistoryPage(this.page, role.alias);
+      },
+
+      /**
+       * REST helper for the Document Version History suite. One instance per
+       * role and test, so the nests it remembers for cleanup belong to that
+       * test alone.
+       */
+      get versionHistoryApi() {
+        if (!this._versionHistoryApi) this._versionHistoryApi = new VersionHistoryApi(this.page);
+        return this._versionHistoryApi;
       },
 
       /**

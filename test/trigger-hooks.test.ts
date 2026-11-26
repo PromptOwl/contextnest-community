@@ -1,8 +1,8 @@
 /**
  * Inbound trigger hooks: tokenized public URLs that create runs.
  *  - webhook preset: raw JSON → run inputs
- *  - slack preset: url_verification challenge, slash-command form posts,
- *    Events API @mention, signing-secret verification via the nest env store
+ *  - slack and teams presets: nothing is accepted without a valid signature
+ *    for the secret in the nest env store (po-1058)
  *  - management CRUD is nest-scoped + workflow-gated; firing is public
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -67,88 +67,144 @@ describe("webhook preset", () => {
   });
 });
 
-describe("slack preset", () => {
-  it("answers the Events API url_verification challenge", async () => {
-    const hook = await createHook("slack");
-    const res = await fireRaw(hook.id,
-      JSON.stringify({ type: "url_verification", challenge: "c123" }),
-      { "Content-Type": "application/json" });
+const JSON_CT = { "Content-Type": "application/json" };
+const FORM_CT = { "Content-Type": "application/x-www-form-urlencoded" };
+const SECRET = "shhh-secret";
+const TEAMS_SECRET = Buffer.from("teams-secret").toString("base64");
+
+const setEnv = async (key: string, value: string) =>
+  expect((await jsonRequest(app, "PUT", `/nests/${nestId}/env`, { key, value }, alice.apiKey)).status).toBe(201);
+const clearEnv = (key: string) => jsonRequest(app, "DELETE", `/nests/${nestId}/env/${key}`, undefined, alice.apiKey);
+const listRuns = async (): Promise<any[]> =>
+  (await jsonRequest(app, "GET", `/nests/${nestId}/runs`, undefined, alice.apiKey)).data.runs;
+
+const slackSign = (body: string, secret = SECRET, ageSeconds = 0) => {
+  const ts = String(Math.floor(Date.now() / 1000) - ageSeconds);
+  return {
+    "x-slack-request-timestamp": ts,
+    "x-slack-signature": `v0=${createHmac("sha256", secret).update(`v0:${ts}:${body}`).digest("hex")}`,
+  };
+};
+const teamsSign = (body: string, key: Buffer = Buffer.from(TEAMS_SECRET, "base64")) => ({
+  authorization: `HMAC ${createHmac("sha256", key).update(body, "utf8").digest("base64")}`,
+});
+
+/** Refused with 401, and the Runs list is unchanged. */
+const expectRefused = async (hookId: string, body: string, headers: Record<string, string>, error: RegExp) => {
+  const before = (await listRuns()).length;
+  const res = await fireRaw(hookId, body, headers);
+  expect(res.status).toBe(401);
+  const text = await res.text();
+  expect(text).toMatch(error);
+  expect(text).not.toContain("c123");
+  expect((await listRuns()).length).toBe(before);
+};
+
+const MENTION = JSON.stringify({
+  type: "event_callback",
+  event: { type: "app_mention", text: "<@U0AGENT> summarize the week", user: "U0MISHA", channel: "C0GTM" },
+});
+const COMMAND = new URLSearchParams({ text: "foley Q3", user_name: "misha", channel_name: "gtm" }).toString();
+const CHALLENGE = JSON.stringify({ type: "url_verification", challenge: "c123" });
+const EACH = [[MENTION, JSON_CT], [COMMAND, FORM_CT], [CHALLENGE, JSON_CT]] as const;
+
+describe("slack preset with no signing secret", () => {
+  it("refuses events, commands and the URL check, and names the secret to set", async () => {
+    const { id } = await createHook("slack");
+    for (const [body, ct] of EACH) {
+      await expectRefused(id, body, ct, /SLACK_SIGNING_SECRET/);
+      await expectRefused(id, body, { ...ct, ...slackSign(body, "") }, /SLACK_SIGNING_SECRET/);
+    }
+  });
+
+  it("refuses when the saved secret is blank or cannot be decrypted", async () => {
+    const { id } = await createHook("slack");
+    try {
+      await setEnv("SLACK_SIGNING_SECRET", "  ");
+      await expectRefused(id, MENTION, { ...JSON_CT, ...slackSign(MENTION, "  ") }, /SLACK_SIGNING_SECRET/);
+      await setEnv("SLACK_SIGNING_SECRET", SECRET);
+      const { getDb } = await import("../src/db/client.js");
+      await getDb().run(
+        "UPDATE nest_env SET value = ? WHERE nest_id = ? AND key = 'SLACK_SIGNING_SECRET'",
+        ["enc.v1.broken", nestId],
+      );
+      await expectRefused(id, MENTION, { ...JSON_CT, ...slackSign(MENTION) }, /SLACK_SIGNING_SECRET/);
+    } finally {
+      await clearEnv("SLACK_SIGNING_SECRET");
+    }
+  });
+});
+
+describe("slack preset with a signing secret", () => {
+  beforeAll(() => setEnv("SLACK_SIGNING_SECRET", SECRET));
+  afterAll(() => clearEnv("SLACK_SIGNING_SECRET"));
+
+  it("refuses a missing, wrong or stale (>5 min) signature, the URL check included", async () => {
+    const { id } = await createHook("slack");
+    for (const [body, ct] of EACH) {
+      await expectRefused(id, body, ct, /bad signature/);
+      await expectRefused(id, body, { ...ct, ...slackSign(body, "wrong") }, /bad signature/);
+      await expectRefused(id, body, { ...ct, ...slackSign(body, SECRET, 600) }, /bad signature/);
+    }
+  });
+
+  it("answers a signed url_verification challenge", async () => {
+    const { id } = await createHook("slack");
+    const res = await fireRaw(id, CHALLENGE, { ...JSON_CT, ...slackSign(CHALLENGE) });
     expect(res.status).toBe(200);
     expect((await res.json()).challenge).toBe("c123");
   });
 
-  it("slash command: form post → run inputs + ephemeral ack", async () => {
-    const hook = await createHook("webhook"); // separate agent hooks conflict? no — multiple hooks allowed
-    const slack = await createHook("slack");
-    const res = await fireRaw(slack.id,
-      new URLSearchParams({ text: "foley Q3", user_name: "misha", channel_name: "gtm" }).toString(),
-      { "Content-Type": "application/x-www-form-urlencoded" });
+  it("signed slash command: form post → run inputs + ephemeral ack", async () => {
+    const { id } = await createHook("slack");
+    const res = await fireRaw(id, COMMAND, { ...FORM_CT, ...slackSign(COMMAND) });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.response_type).toBe("ephemeral");
     expect(body.text).toContain("Queued");
-
-    const runs = await jsonRequest(app, "GET", `/nests/${nestId}/runs`, undefined, alice.apiKey);
-    const run = runs.data.runs.find((r: any) => r.triggered_by === `hook:slack:${alice.email}`);
+    const run = (await listRuns()).find((r) => r.triggered_by === `hook:slack:${alice.email}`);
     expect(run.inputs.input).toBe("foley Q3");
     expect(run.inputs.from).toBe("misha");
-    void hook;
   });
 
-  it("@mention event: app_mention → run; other events ignored", async () => {
-    const slack = await createHook("slack");
-    const mention = await fireRaw(slack.id,
-      JSON.stringify({
-        type: "event_callback",
-        event: { type: "app_mention", text: "<@U0AGENT> summarize the week", user: "U0MISHA", channel: "C0GTM" },
-      }),
-      { "Content-Type": "application/json" });
-    expect(mention.status).toBe(200);
+  it("signed app_mention → run; other signed events ignored", async () => {
+    const { id } = await createHook("slack");
+    expect((await fireRaw(id, MENTION, { ...JSON_CT, ...slackSign(MENTION) })).status).toBe(200);
+    const runs = await listRuns();
+    expect(runs.find((r) => r.inputs?.input === "summarize the week")).toBeTruthy();
 
-    const runs = await jsonRequest(app, "GET", `/nests/${nestId}/runs`, undefined, alice.apiKey);
-    const run = runs.data.runs.find((r: any) => r.inputs?.input === "summarize the week");
-    expect(run).toBeTruthy();
+    const other = JSON.stringify({ type: "event_callback", event: { type: "reaction_added" } });
+    expect((await fireRaw(id, other, { ...JSON_CT, ...slackSign(other) })).status).toBe(200);
+    expect((await listRuns()).length).toBe(runs.length);
+  });
+});
 
-    const other = await fireRaw(slack.id,
-      JSON.stringify({ type: "event_callback", event: { type: "reaction_added" } }),
-      { "Content-Type": "application/json" });
-    expect(other.status).toBe(200);
-    const runsAfter = await jsonRequest(app, "GET", `/nests/${nestId}/runs`, undefined, alice.apiKey);
-    expect(runsAfter.data.runs.length).toBe(runs.data.runs.length);
+describe("teams preset", () => {
+  const ASK = JSON.stringify({ text: "<at>Agent</at> teams ask", from: { name: "Dana" } });
+
+  it("refuses everything with no secret, or one that is not base64", async () => {
+    const { id } = await createHook("teams");
+    await expectRefused(id, ASK, JSON_CT, /TEAMS_WEBHOOK_SECRET/);
+    try {
+      await setEnv("TEAMS_WEBHOOK_SECRET", "!!!");
+      await expectRefused(id, ASK, { ...JSON_CT, ...teamsSign(ASK, Buffer.alloc(0)) }, /bad signature/);
+    } finally {
+      await clearEnv("TEAMS_WEBHOOK_SECRET");
+    }
   });
 
-  it("verifies the signing secret from the nest env store", async () => {
-    await jsonRequest(app, "PUT", `/nests/${nestId}/env`,
-      { key: "SLACK_SIGNING_SECRET", value: "shhh-secret" }, alice.apiKey);
-    const slack = await createHook("slack");
-    const body = new URLSearchParams({ text: "signed", user_name: "misha" }).toString();
-
-    // Unsigned → 401 now that a secret exists.
-    const unsigned = await fireRaw(slack.id, body,
-      { "Content-Type": "application/x-www-form-urlencoded" });
-    expect(unsigned.status).toBe(401);
-
-    // Properly signed → accepted.
-    const ts = String(Math.floor(Date.now() / 1000));
-    const sig = `v0=${createHmac("sha256", "shhh-secret").update(`v0:${ts}:${body}`).digest("hex")}`;
-    const signed = await fireRaw(slack.id, body, {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "x-slack-request-timestamp": ts,
-      "x-slack-signature": sig,
-    });
-    expect(signed.status).toBe(200);
-
-    // Stale timestamp → rejected (replay fence).
-    const oldTs = String(Math.floor(Date.now() / 1000) - 600);
-    const oldSig = `v0=${createHmac("sha256", "shhh-secret").update(`v0:${oldTs}:${body}`).digest("hex")}`;
-    const replayed = await fireRaw(slack.id, body, {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "x-slack-request-timestamp": oldTs,
-      "x-slack-signature": oldSig,
-    });
-    expect(replayed.status).toBe(401);
-
-    await jsonRequest(app, "DELETE", `/nests/${nestId}/env/SLACK_SIGNING_SECRET`,
-      undefined, alice.apiKey);
+  it("with a secret: unsigned and wrongly signed are refused, signed starts a run", async () => {
+    const { id } = await createHook("teams");
+    await setEnv("TEAMS_WEBHOOK_SECRET", TEAMS_SECRET);
+    try {
+      await expectRefused(id, ASK, JSON_CT, /bad signature/);
+      await expectRefused(id, ASK, { ...JSON_CT, ...teamsSign(ASK, Buffer.from("wrong")) }, /bad signature/);
+      const res = await fireRaw(id, ASK, { ...JSON_CT, ...teamsSign(ASK) });
+      expect(res.status).toBe(200);
+      const run = (await listRuns()).find((r) => r.inputs?.input === "teams ask");
+      expect(run.inputs.from).toBe("Dana");
+    } finally {
+      await clearEnv("TEAMS_WEBHOOK_SECRET");
+    }
   });
 });

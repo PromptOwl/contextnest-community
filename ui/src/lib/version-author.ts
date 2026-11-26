@@ -10,6 +10,7 @@
  */
 import type { ClientAttribution } from "./client-attribution";
 import { displayNameFor } from "./person-name";
+import { parseServerDate } from "./dates";
 
 export interface VersionAuthorLike {
   editedBy?: string | null;
@@ -69,4 +70,46 @@ export function lastEditParts(
   if (!last || !last.edited_by) return null;
   const human = last.edited_by_system || displayNameFor(last.edited_by, people);
   return { human, agent: versionAgent(last) };
+}
+
+/**
+ * What a Documents row and a "Recently edited" item show about the last
+ * edit: when, and who as one string — "<human> via <agent>", the human
+ * first (po-1213). `at` is the document's updated_at, the key the list and
+ * the feed sort on, so the time shown always agrees with the order; the
+ * version's edited_at is the fallback. `editor` is null when the read
+ * withheld `last_edit` (a public reader, a headless key), so nobody is
+ * named. Null when there is nothing to show at all.
+ *
+ * The editor is named only when their version is the write `at` shows. A
+ * move rewrites updated_at without sealing a version, so after one, last_edit
+ * is an older write: naming its editor beside the newer time would credit
+ * them with a change they did not make. The row then shows the time alone.
+ */
+export function rowLastEdit(
+  node: { updated_at?: string | null; last_edit?: LastEdit | null },
+  people: Array<{ email: string; name?: string | null }> = [],
+): { at: string | null; editor: string | null } | null {
+  let parts = lastEditParts(node.last_edit, people);
+  const at = node.updated_at || node.last_edit?.edited_at || null;
+  if (parts && node.updated_at && laterWrite(node.updated_at, node.last_edit?.edited_at)) parts = null;
+  if (!at && !parts) return null;
+  return { at, editor: parts ? (parts.agent ? `${parts.human} via ${parts.agent}` : parts.human) : null };
+}
+
+/** How far apart updated_at and the version's own timestamp may be and still
+ *  be one write: the frontmatter is stamped before the version row is. A
+ *  heuristic: a move rewrites updated_at without sealing a version, and the
+ *  server sends no "this was a move" flag, so a gap over a minute is read as
+ *  a later write that the version's editor did not make (the row then shows
+ *  the time with no name). */
+const SAME_WRITE_MS = 60_000;
+
+/** True when `updatedAt` is a later write than the version sealed at
+ *  `editedAt`. Unparsable or missing times are not evidence of one. */
+function laterWrite(updatedAt: string, editedAt: string | null | undefined): boolean {
+  const u = parseServerDate(updatedAt)?.getTime();
+  const e = parseServerDate(editedAt)?.getTime();
+  if (u === undefined || e === undefined) return false;
+  return u - e > SAME_WRITE_MS;
 }

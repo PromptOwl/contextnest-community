@@ -5,7 +5,9 @@
  * in S2a/S2b; they register here, so the binding state machine (S1) never
  * has to know about them.
  */
-export type PauseReason = "guard" | "member_boot" | "removed";
+import { logCaught } from "../log.js";
+
+export type PauseReason = "guard" | "member_boot" | "removed" | "admin";
 
 export interface PausedBinding {
   id: string;
@@ -74,7 +76,7 @@ export async function runPauseHooks(binding: PausedBinding, reason: PauseReason)
     try {
       await h(binding, reason);
     } catch (err) {
-      console.error(`[surfaces] pause hook failed for binding ${binding.id}:`, err);
+      logCaught("lifecycle", err, { binding: binding.id, reason, call: "pause_hook" });
     }
   }
 }

@@ -19,6 +19,7 @@ import { getSettings } from "./services/settings-service.js";
 import { tryConsume, retryAfterSeconds, type RateLimitConfig } from "../shared/rate-limit.js";
 import { clientIp } from "../shared/request-ip.js";
 import { type SurfaceSettings } from "./core/settings.js";
+import { logCaught } from "./log.js";
 
 export const ABOUT_SURFACES_PATH = "/about/surfaces";
 
@@ -97,7 +98,7 @@ ${logo}<h1>How Nest handles your messages</h1>
 <p><b>It waits</b> until a thread has been quiet for ${s.quiet_minutes} minutes. Then it decides if the thread holds a decision or a fact worth keeping. Usually the answer is no, and nothing happens.</p>
 <p><b>It keeps</b> nothing unless a named teammate approves a short summary. Raw messages are deleted within ${s.buffer_ttl_hours} hours.</p>
 <p><b>It never saves</b> anything about pay, health, performance or personal life.</p>
-<p><b>You can</b> say <code>@Nest skip me</code> to keep your messages out, or ask an admin to remove it from a channel.</p>
+<p><b>You can</b> mention the app and say <code>skip me</code> to keep your messages out, or ask an admin to remove it from a channel.</p>
 <h2>It will never</h2>
 <ul>${never}</ul>
 <footer>This page is the same for everyone. It doesn't know who you are or which channel you came from.</footer>
@@ -123,7 +124,7 @@ aboutSurfacesRoutes.get("/", async (c) => {
   // can't be read, say so (503, never cached) rather than state defaults that
   // may not be true here.
   const settings = await getSettings().catch((err) => {
-    console.warn("[surfaces] about page: settings unreadable", err instanceof Error ? err.message : String(err));
+    logCaught("settings", err, { call: "about_page" }, "warn");
     return null;
   });
   if (!settings) {

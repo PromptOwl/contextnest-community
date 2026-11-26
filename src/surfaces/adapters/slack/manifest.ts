@@ -7,6 +7,8 @@
  * the hosted app uses the same lists. docs/surfaces/slack-app-manifest.json
  * is the same manifest with placeholder URLs, for the customer-owned app.
  */
+import { isPrivateHost } from "../../../shared/private-host.js";
+
 export const BOT_SCOPES: readonly string[] = [
   "channels:history",
   "groups:history",
@@ -47,6 +49,58 @@ export const BOT_EVENTS: readonly string[] = [
   "app_uninstalled",
   "tokens_revoked",
 ];
+
+/** What is wrong with this server's public address for Slack, and how to fix it. */
+export interface PublicUrlProblem {
+  problem: string;
+  steps: string[];
+}
+
+export const PUBLIC_URL_SETTING = "Server settings → Basic → Public base URL";
+
+/**
+ * Null when Slack can reach `baseUrl`: set, https, and not a localhost or
+ * private address. Slack calls the server from its own network, so anything
+ * else fails at Slack with an error page we never see.
+ */
+export function publicUrlProblem(baseUrl: string): PublicUrlProblem | null {
+  let problem: string | null = null;
+  if (!baseUrl) problem = "This server has no public base URL set.";
+  else if (isPrivateHost(baseUrl)) problem = `The public base URL is ${baseUrl}. Slack can't reach a localhost or private network address.`;
+  else if (!/^https:\/\//i.test(baseUrl)) problem = `The public base URL is ${baseUrl}. Slack accepts only https:// addresses.`;
+  if (!problem) return null;
+  return {
+    problem,
+    steps: [
+      "Find the public https address people use to open this server from outside your network, for example https://nest.yourcompany.com. Ask whoever runs this server if you don't know it.",
+      `Open ${PUBLIC_URL_SETTING}, enter that address and click Save. It applies at once.`,
+      "Open this server at that address and sign in again.",
+      "In Control room → Setup, download the manifest again and paste it into your Slack app (api.slack.com/apps → your app → App Manifest), so Slack has the new addresses.",
+      "Click Open Slack to approve again.",
+    ],
+  };
+}
+
+/**
+ * Null when the request reached this server at its public base URL. Slack
+ * sends the browser back to the public base URL, so starting from any other
+ * address (localhost, or another server's domain) can't finish here.
+ * `requestHost` is host[:port] as the request arrived; null = unknown, no check.
+ */
+export function originMismatch(baseUrl: string, requestHost: string | null): PublicUrlProblem | null {
+  if (!requestHost || !baseUrl) return null;
+  let base: URL;
+  try {
+    base = new URL(baseUrl);
+  } catch {
+    return null;
+  }
+  if (base.host.toLowerCase() === requestHost.trim().toLowerCase()) return null;
+  return {
+    problem: `You opened this server at ${requestHost}, but its public base URL is ${baseUrl}. Slack sends you back to the public base URL after approval, so the install can only finish there.`,
+    steps: [`Open ${PUBLIC_URL_SETTING}, enter this server's own public https address and click Save.`],
+  };
+}
 
 export function slackUrls(baseUrl: string, installId: string | "hosted") {
   const base = baseUrl.replace(/\/+$/, "");

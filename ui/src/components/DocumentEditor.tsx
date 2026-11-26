@@ -15,6 +15,7 @@ import { SuggestDialog } from "./OrgContribution";
 import { invalidateForPath, keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { canSaveTagsAlone, saveOutcome } from "../lib/save-outcome";
+import { stripLeadingTitle } from "../lib/reader";
 import { setNavGuard, bypassNavGuard, dropParkedEntries } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { documentLink } from "../lib/nest-url";
@@ -41,9 +42,6 @@ import { NestVisibilityControl } from "./NestVisibilityControl";
 import { PdfDocumentPanel } from "./PdfDocumentPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Dialog,
@@ -113,7 +111,8 @@ import { tableDiffSides } from "../lib/csv-table";
 import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { CodeHighlight } from "./CodeHighlight";
-import { prettyFolder, prettyFolderPath } from "./FolderTree";
+import { prettyFolder } from "./FolderTree";
+import { FolderSelect } from "./FolderSelect";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { PublishDialog } from "./PublishDialog";
 import { shareDocumentLink } from "../lib/share-link";
@@ -411,6 +410,7 @@ export function DocumentEditor({
   // Creator + everyone else with a hand in the doc (version authors ∪
   // document-scope grantees) — server-resolved on GET /nodes/:id.
   const [author, setAuthor] = useState<string | null>(null);
+  const [agentAuthor, setAgentAuthor] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   // Who sealed the latest version — human and agent (node detail `last_edit`).
   const [lastEdit, setLastEdit] = useState<LastEdit | null>(null);
@@ -472,7 +472,7 @@ export function DocumentEditor({
     ...reads.mentionable(nestId),
     enabled: !!nestId && !isNew && !!adminStatus?.me,
   });
-  const authorName = author ? displayNameFor(author, roster?.people) : null;
+  const authorName = author ? agentAuthor || displayNameFor(author, roster?.people) : null;
   const lastEditBy = lastEditParts(lastEdit, roster?.people);
   // Who deletes outright: the nest admin/owner tier, plus the person who wrote
   // the document — asking permission to delete your own work is the wrong
@@ -1218,6 +1218,7 @@ export function DocumentEditor({
       setStatus(node?.status ?? null);
       setArchivedDoc(((node as any)?.archived ?? null) as api.ArchivedDocument | null);
       setAuthor(node?.author ?? null);
+      setAgentAuthor((node as any)?.author_name ?? null);
       setUpdatedAt(node?.updated_at ?? null);
       setLastEdit(((node as any)?.last_edit ?? null) as LastEdit | null);
       loadedUpdatedAtRef.current = node?.updated_at ?? null;
@@ -2214,6 +2215,8 @@ export function DocumentEditor({
       // Owner / nest admin (or server admin) — the people GET /activity-log
       // lets in; the server refuses everyone else regardless.
       canSeeActivity: isAdmin || canSeeActivityLog(permission),
+      // A document that failed to load has no title to name either.
+      isLoading: loading || loadFailed,
     }).map((a) => {
       const base = {
         label: a.label,
@@ -2409,22 +2412,7 @@ export function DocumentEditor({
             Move <strong>{title || nodeId}</strong> to another folder. Version
             history, review state, and [[wiki links]] follow the document.
           </p>
-          <Select
-            value={moveTo === "" ? "__root__" : (moveTo ?? "__root__")}
-            onValueChange={(v) => setMoveTo(v === "__root__" ? "" : v)}
-          >
-            <SelectTrigger data-testid="document-editor-move-select">
-              <SelectValue placeholder="Choose a folder" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__root__">Nest root</SelectItem>
-              {folderOptions.map((f) => (
-                <SelectItem key={f} value={f}>
-                  {prettyFolderPath(f)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <FolderSelect value={moveTo ?? ""} onChange={setMoveTo} folders={folderOptions} testId="document-editor-move-select" />
           <DialogFooter>
             <Button variant="ghost" disabled={moving} onClick={() => setMoveTo(null)}>
               Cancel
@@ -3241,7 +3229,7 @@ export function DocumentEditor({
                     >
                     {author && (
                       <span className="inline-flex items-center gap-1.5">
-                        Created by <span className="font-medium text-foreground/80" title={author}>{authorName}</span>
+                        Created by <span className="font-medium text-foreground/80" title={agentAuthor ?? author ?? undefined}>{authorName}</span>
                       </span>
                     )}
                     {/* Last edited by: the human, then the agent the write
@@ -3252,7 +3240,7 @@ export function DocumentEditor({
                         data-testid="document-last-edited-by"
                       >
                         Last edited by{" "}
-                        <span className="font-medium text-foreground/80" title={lastEdit?.edited_by}>
+                        <span className="font-medium text-foreground/80" title={lastEdit?.edited_by_system ?? lastEdit?.edited_by}>
                           {lastEditBy.human}
                         </span>
                         {lastEditBy.agent && (
@@ -4329,8 +4317,10 @@ export function DocumentEditor({
                                same tokens the editor's code blocks use. */
                             <CodeHighlight code={content} data-testid="tool-source-view" />
                           ) : (
+                            // The title bar is right above: a first heading that
+                            // repeats it is not shown again. The body keeps it.
                             <DocumentViewer
-                              content={content}
+                              content={stripLeadingTitle(content, title)}
                               onWikiLinkClick={(title, displayText) =>
                                 handleWikiLinkClick(title, null, displayText)
                               }
@@ -4595,10 +4585,12 @@ export function DocumentEditor({
                           className="h-8 text-muted-foreground"
                           disabled={discarding}
                           onClick={() => setConfirmDiscard(true)}
+                          aria-label="Discard draft"
+                          title="Discard draft"
                           data-testid="document-editor-discard"
                         >
                           <Undo2 className="h-4 w-4 sm:mr-1.5" />
-                          <span className="hidden sm:inline">{discarding ? "Discarding…" : "Discard draft"}</span>
+                          <span className="hidden sm:inline bar-max-xl:hidden">{discarding ? "Discarding…" : "Discard draft"}</span>
                         </Button>
                       )}
                     {showSubmit && (
@@ -4607,11 +4599,12 @@ export function DocumentEditor({
                         size="sm"
                         className="h-8"
                         onClick={() => setShowSubmitModal(true)}
+                        aria-label="Submit for review"
                         data-testid="document-editor-submit"
                         title="Saves your changes and sends them to a steward for approval."
                       >
                         <Send className="h-4 w-4 sm:mr-1.5" />
-                        <span className="hidden sm:inline">Submit for review</span>
+                        <span className="hidden sm:inline bar-max-xl:hidden">Submit for review</span>
                       </Button>
                     )}
                     {/* Own pending submission auto-saves — a status line, not a Save button. */}

@@ -333,6 +333,9 @@ describe("/admin/settings — validation", () => {
     expect(refused.data.fieldErrors).toHaveProperty("surfaces_enabled");
     expect((await jsonRequest(app, "GET", "/surfaces/status", undefined, admin.apiKey)).status).toBe(404);
 
+    // Saving the Slack app's keys checks them with Slack: answer for a good pair, without the network.
+    let slackAnswer = "invalid_code";
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ ok: false, error: slackAnswer }), { headers: { "content-type": "application/json" } }));
     const key = Buffer.alloc(32, 7).toString("base64");
     const on = await jsonRequest(app, "PATCH", "/admin/settings", {
       workflow_plane_enabled: true,
@@ -341,6 +344,7 @@ describe("/admin/settings — validation", () => {
       surfaces_buffer_key: key,
       surfaces_judge_model: "claude-haiku-5-5",
       surfaces_default_cap_usd: "25",
+      surfaces_quiet_minutes: "5",
       surfaces_org_name: "Acme",
       surfaces_slack_hosted_client_id: "123.456",
       surfaces_slack_hosted_client_secret: "cs-secret-value",
@@ -353,6 +357,7 @@ describe("/admin/settings — validation", () => {
       surfaces_buffer_key_set: true,
       surfaces_judge_model: "claude-haiku-5-5",
       surfaces_default_cap_usd: 25,
+      surfaces_quiet_minutes: 5,
       surfaces_org_name: "Acme",
       surfaces_slack_hosted_client_id: "123.456",
       surfaces_slack_hosted_client_secret_set: true,
@@ -370,30 +375,80 @@ describe("/admin/settings — validation", () => {
       surfaces_buffer_key: "too-short",
       surfaces_judge_model: "two words",
       surfaces_default_cap_usd: "-1",
+      surfaces_quiet_minutes: "4",
       surfaces_slack_hosted_client_id: "has space",
     }, admin.apiKey);
     expect(bad.status).toBe(400);
     expect(Object.keys(bad.data.fieldErrors).sort()).toEqual(
-      ["surfaces_buffer_key", "surfaces_default_cap_usd", "surfaces_judge_model", "surfaces_slack_hosted_client_id"],
+      ["surfaces_buffer_key", "surfaces_default_cap_usd", "surfaces_judge_model", "surfaces_quiet_minutes", "surfaces_slack_hosted_client_id"],
     );
+    for (const v of ["241", "5.5", "five"]) {
+      const r = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_quiet_minutes: v }, admin.apiKey);
+      expect(r.data.fieldErrors, v).toHaveProperty("surfaces_quiet_minutes");
+    }
+    // A refused save left it alone, and it is the setting Surfaces itself uses.
+    expect((await jsonRequest(app, "GET", "/surfaces/settings", undefined, admin.apiKey)).data.settings.quiet_minutes).toBe(5);
 
     // Clearing falls back (nothing stored, defaults reported).
     const cleared = await jsonRequest(app, "PATCH", "/admin/settings", {
       surfaces_buffer_key: null,
       surfaces_default_cap_usd: "",
+      surfaces_quiet_minutes: "",
       surfaces_org_name: "",
     }, admin.apiKey);
-    expect(cleared.data.settings).toMatchObject({ surfaces_buffer_key_set: false, surfaces_default_cap_usd: null, surfaces_org_name: "" });
+    expect(cleared.data.settings).toMatchObject({ surfaces_buffer_key_set: false, surfaces_default_cap_usd: null, surfaces_org_name: "", surfaces_quiet_minutes: 20 });
 
-    // Turning Surfaces off disables it live; hosted Slack can't be on without it.
+    // A Client secret Slack refuses is a field error, and the saved one stays.
+    slackAnswer = "bad_client_secret";
+    const wrong = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_slack_hosted_client_secret: "wrong-secret" }, admin.apiKey);
+    expect(wrong.status).toBe(400);
+    expect(wrong.data.fieldErrors.surfaces_slack_hosted_client_secret).toMatch(/Slack refused this Client secret/);
+    expect(await persistedSetting("SURFACES_SLACK_HOSTED_CLIENT_SECRET")).not.toBe(null);
+    // Only a new Client ID typed, the saved secret is the old app's: the error says to paste the secret too.
+    const idOnly = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_slack_hosted_client_id: "777.777" }, admin.apiKey);
+    expect(idOnly.data.fieldErrors.surfaces_slack_hosted_client_secret).toMatch(/saved Client secret doesn't match.*save both/);
+    slackAnswer = "invalid_client_id";
+    expect((await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_slack_hosted_client_id: "999.999" }, admin.apiKey)).data.fieldErrors).toHaveProperty("surfaces_slack_hosted_client_id");
+    expect((await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey)).data.surfaces_slack_hosted_client_id).toBe("123.456");
+    vi.unstubAllGlobals();
+
+    // Clear keys (Setup / Server settings): empty values remove all three, with no Slack check.
+    const cleared3 = await jsonRequest(app, "PATCH", "/admin/settings", {
+      surfaces_slack_hosted_client_id: "",
+      surfaces_slack_hosted_client_secret: "",
+      surfaces_slack_hosted_signing_secret: "",
+    }, admin.apiKey);
+    expect(cleared3.status, JSON.stringify(cleared3.data)).toBe(200);
+    expect(cleared3.data.settings).toMatchObject({
+      surfaces_slack_hosted_client_id: "",
+      surfaces_slack_hosted_client_secret_set: false,
+      surfaces_slack_hosted_signing_secret_set: false,
+    });
+
+    // Turning Surfaces off disables it live.
     const off = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_enabled: false }, admin.apiKey);
     expect(off.data.settings.surfaces_enabled).toBe(false);
     expect((await jsonRequest(app, "GET", "/surfaces/status", undefined, admin.apiKey)).status).toBe(404);
-    const hosted = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_slack_hosted_enabled: true }, admin.apiKey);
-    expect(hosted.data.fieldErrors).toHaveProperty("surfaces_slack_hosted_enabled");
 
     // Non-admins can't change any of it.
     expect((await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_org_name: "Evil" }, stranger.apiKey)).status).toBe(403);
+  });
+
+  it("a quiet window that can't be stored saves nothing else either", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    const { getDb } = await import("../src/db/client.js");
+    await getDb().run("CREATE TRIGGER no_surface_settings BEFORE INSERT ON surface_settings BEGIN SELECT RAISE(ABORT, 'disk full'); END", []);
+    try {
+      const r = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_quiet_minutes: "5", surfaces_org_name: "Half Saved" }, admin.apiKey);
+      expect(r.status).toBe(500);
+      expect(r.data.error).toMatch(/^Nothing was saved/);
+      expect(r.data.settings).toMatchObject({ surfaces_quiet_minutes: 20 });
+      expect(r.data.settings.surfaces_org_name).not.toBe("Half Saved");
+      expect((await persistedSetting("SURFACES_ORG_NAME")) ?? null).not.toBe("Half Saved");
+    } finally {
+      await getDb().run("DROP TRIGGER no_surface_settings", []);
+    }
   });
 
   it("experimental doc stream: its own switch beside plane + metacognition, each reported as set", async () => {

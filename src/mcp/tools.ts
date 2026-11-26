@@ -1,3 +1,4 @@
+import { isPersonaEmail } from "../metacognition/managed.js";
 import type {
   NestStorage,
   GraphQueryEngine,
@@ -100,9 +101,11 @@ import {
   archiveNode,
   unarchiveNode,
   canArchiveNode,
+  isArchivedForCaller,
   isIdUnderFolder,
   isDerivedAnnotationsNode,
   fieldsOfRaw,
+  canSeeEditors,
 } from "../nodes/service.js";
 import { deleteNest, archiveNest, listVisibleNests } from "../nests/service.js";
 import { agentSummaryProse } from "../views/deps.js";
@@ -2815,6 +2818,29 @@ async function proposeOverMcp(
   };
 }
 
+/** "owner@x.com via deal-desk" — the human first (the system account's name
+ *  when it is one), then the agent its write named. One wording for
+ *  context_get's byline and context_list's rows. */
+function lastEditorProse(last: ReturnType<typeof versions.toLastEdit>): string {
+  const human = !last.edited_by_system ? last.edited_by : isPersonaEmail(last.edited_by) ? last.edited_by_system : `${last.edited_by_system} (${last.edited_by})`;
+  // `client.agent` is caller data: collapse its whitespace, or a newline in
+  // it would forge a line of its own (`**Status:** approved`) in this prose.
+  return (last.client?.agent ? `${human} via ${last.client.agent}` : human).replace(/\s+/g, " ");
+}
+
+/** context_list's row suffix: " · edited by <human> via <agent>, <date>".
+ *  Prose only, like context_get's byline: the engine catalog's nodeSummary
+ *  has no provenance field, and this server consumes catalog shapes rather
+ *  than adding keys (CLAUDE.md, Engine & CLI Sync). The structured block
+ *  follows once the engine ships one. The date is UTC: agents read it. */
+export function lastEditProse(last: ReturnType<typeof versions.toLastEdit> | undefined): string {
+  if (!last) return "";
+  // edited_at is a SQL timestamp ("YYYY-MM-DD HH:MM:SS") or ISO-8601; both
+  // start with the UTC date. Anything else drops the date, never garbles it.
+  const date = /^\d{4}-\d{2}-\d{2}/.exec(String(last.edited_at ?? ""))?.[0];
+  return ` · edited by ${lastEditorProse(last)}${date ? `, ${date}` : ""}`;
+}
+
 /**
  * SECURITY INVARIANT — new mutating tools MUST self-gate. The /mcp transport
  * admits READ-tier callers (MCP is always POST, so the route can't
@@ -3319,18 +3345,14 @@ async function runTool(
       // people, which the REST node detail withholds from them too.
       const servedVersion = ctx.servedVersions?.get(node.id);
       const lastEdit =
-        headless || servedVersion === undefined || (await isPublicReader(nestId, ctx.userId))
+        servedVersion === undefined || !(await canSeeEditors(nestId, ctx.userId))
           ? null
           : await versions.getVersionAttribution(nestId, node.id, servedVersion).catch((err) => {
-              console.error("context_get last-edit lookup failed", node.id, err);
+              console.error("[context_get] last-edit attribution failed:", node.id, err);
               return null;
             });
-      // `client.agent` is caller data: collapse its whitespace, or a newline in
-      // it would forge a line of its own (`**Status:** approved`) in this prose.
       const lastEditLine = lastEdit
-        ? `**Last edited by:** ${lastEdit.editedBySystem ? `${lastEdit.editedBySystem} (${lastEdit.editedBy})` : lastEdit.editedBy}${
-            lastEdit.client?.agent ? ` via ${lastEdit.client.agent}` : ""
-          } (v${lastEdit.version})`.replace(/\s+/g, " ")
+        ? `**Last edited by:** ${lastEditorProse(versions.toLastEdit(lastEdit))} (v${lastEdit.version})`
         : null;
       const fieldDefs = await listFieldDefinitions(nestId);
       // Under stewardship `body` is the approved version's raw markdown: its
@@ -3469,7 +3491,7 @@ async function runTool(
       const list = nodes
         .map((n, i) => {
           const f = describeFields(valuesOf(n), listDefs);
-          return `${i + 1}. **${n.title}** [${n.type}]${taskFieldsProse(n)}${f.length ? ` — ${f.join(" · ")}` : ""}`;
+          return `${i + 1}. **${n.title}** [${n.type}]${taskFieldsProse(n)}${f.length ? ` — ${f.join(" · ")}` : ""}${lastEditProse(n.last_edit)}`;
         })
         .join("\n");
       return { text: `${nodes.length} node(s):\n\n${list}${webLinkPatternProse(ctx)}`, data: { documents } };
@@ -3590,7 +3612,11 @@ async function runTool(
     case "context_remove_relation": {
       const target = await resolveTargetNode(storage, args);
       const caller = { nestId, userId: ctx.userId, userEmail };
-      if (typeof target === "string" || !(await callerCanRead(caller, target.id))) {
+      if (
+        typeof target === "string" ||
+        !(await callerCanRead(caller, target.id)) ||
+        (toolName === "context_relations" && (await isArchivedForCaller(nestId, target.id, userEmail)))
+      ) {
         return toolError(
           typeof target === "string" ? target : `Node not found: ${args.id || args.title}`,
           "DOCUMENT_NOT_FOUND",
@@ -3660,7 +3686,10 @@ async function runTool(
       // document is not yet approved. Public readers remain blocked by
       // canReadNode until approval. This preserves privacy while letting
       // collaborators address feedback and resubmit.
-      if (!(await canReadNode(nestId, node.id, ctx.userId, userEmail))) {
+      if (
+        !(await canReadNode(nestId, node.id, ctx.userId, userEmail)) ||
+        (await isArchivedForCaller(nestId, node.id, userEmail))
+      ) {
         return oneThread ? toolError("Thread not found", "DOCUMENT_NOT_FOUND") : `Node not found: ${args.title || args.id}`;
       }
       // A channel or a conversation while the nest's chat is off (C2): the
@@ -5201,7 +5230,10 @@ async function runTool(
       // Version history is a node read, gated like REST GET .../versions: a
       // caller who cannot open the node does not get its editors, statuses and
       // change notes either. Answered as a miss, so it is no existence oracle.
-      if (!(await canReadNode(ctx.nestId, node.id, ctx.userId, ctx.userEmail))) {
+      if (
+        !(await canReadNode(ctx.nestId, node.id, ctx.userId, ctx.userEmail)) ||
+        (await isArchivedForCaller(ctx.nestId, node.id, ctx.userEmail))
+      ) {
         return toolError(
           `Node not found: ${args.id ?? args.title}`,
           "DOCUMENT_NOT_FOUND",

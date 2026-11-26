@@ -61,6 +61,12 @@ export interface DocumentActionsInput {
    * pulled…). The server 403s everyone else. Default false.
    */
   canSeeActivity?: boolean;
+  /**
+   * The document is still loading, or it failed to load. "Share public link"
+   * publishes in one click and names the document in its confirmation, so it
+   * waits for a loaded document (PO-1396). Default false.
+   */
+  isLoading?: boolean;
 }
 
 export function documentActions(input: DocumentActionsInput): DocumentActionSpec[] {
@@ -77,6 +83,7 @@ export function documentActions(input: DocumentActionsInput): DocumentActionSpec
     isOwnDeletionRequest,
     includeVersionHistory = true,
     canSeeActivity = false,
+    isLoading = false,
   } = input;
   const actions: DocumentActionSpec[] = [];
 
@@ -113,8 +120,9 @@ export function documentActions(input: DocumentActionsInput): DocumentActionSpec
   // One click to a public link (PO-1365, share-link.ts): copies the link the
   // document already has, or publishes with the dialog's defaults first. Same
   // gate as Publish below — it is that dialog's shortcut, and the server
-  // refuses everyone else.
-  if (canShare && !isNew && !isArchived)
+  // refuses everyone else. Not while the document is loading: one click
+  // publishes it, and the toast would name it "Untitled" (PO-1396).
+  if (canShare && !isNew && !isArchived && !isLoading)
     actions.push({
       key: "share-link",
       label: "Share public link",

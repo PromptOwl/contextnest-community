@@ -3,15 +3,12 @@ import { FolderInput, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../../lib/api";
 import { checkFolderPath } from "../../lib/folder-path";
-import { prettyFolderPath } from "../FolderTree";
+import { FolderSelect } from "../FolderSelect";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
 
 /** Rename or move a folder (admins/owners). Pick the parent folder from the
  *  nest's existing folders and edit the name; the new path is parent + name. */
@@ -73,17 +70,7 @@ export function FolderMoveDialog({
           data-testid="folder-move-name"
         />
         <label className="text-sm font-medium">Move to</label>
-        <Select value={parent === "" ? "__root__" : parent} onValueChange={(v) => setParent(v === "__root__" ? "" : v)}>
-          <SelectTrigger data-testid="folder-move-parent">
-            <SelectValue placeholder="Choose a folder" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="__root__">Nest root</SelectItem>
-            {parents.map((f) => (
-              <SelectItem key={f} value={f}>{prettyFolderPath(f)}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <FolderSelect value={parent} onChange={setParent} folders={parents} testId="folder-move-parent" />
         {error ? (
           <p className="text-xs text-destructive">{error}</p>
         ) : (

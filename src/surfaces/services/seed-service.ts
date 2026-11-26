@@ -80,6 +80,7 @@ import { safeMembers } from "./members.js";
 import { getProfile } from "./identity-service.js";
 import { recordNotice } from "./notices.js";
 import { sealedNest } from "../sealed.js";
+import { logCaught } from "../log.js";
 
 export const CONTEXT_LABEL = "CONTEXT.md";
 const CLAIM_MS = 5 * 60_000;
@@ -241,7 +242,8 @@ async function approvedNode(libraryNestId: string, nodeId: string): Promise<Seed
     const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(raw);
     const title = fm ? (/^title:\s*(.+)$/m.exec(fm[1])?.[1] ?? "").trim().replace(/^["']|["']$/g, "") : "";
     return { title, body: normBody(bodyOnly(nodeId, raw)) };
-  } catch {
+  } catch (err) {
+    logCaught("seed", err, { nest: libraryNestId, call: "approved_node" }, "warn");
     return null;
   }
 }
@@ -347,8 +349,8 @@ export async function listSeedsFor(userId: string): Promise<SeedRef[]> {
     try {
       const s = loadBundled(id);
       if (s) out.push(refOf(s));
-    } catch {
-      /* an invalid bundled seed is not offered */
+    } catch (err) {
+      logCaught("seed", err, { seed: id, call: "bundled_invalid" }); // a bundled seed should always load: not offered
     }
   }
   for (const lib of (await getSettings()).seed_library_nests) {
@@ -358,8 +360,8 @@ export async function listSeedsFor(userId: string): Promise<SeedRef[]> {
       try {
         const s = await loadLibrary(lib, id, userId);
         if (s) out.push(refOf(s));
-      } catch {
-        /* invalid: not offered */
+      } catch (err) {
+        logCaught("seed", err, { nest: lib, seed: id, call: "library_invalid" }, "warn"); // not offered
       }
     }
   }
@@ -485,8 +487,8 @@ async function configureNestListeners(nestId: string): Promise<number> {
   for (const r of rows) {
     try {
       if (await configureListenerFromSeeds(r.id)) n++;
-    } catch {
-      /* one bad listener doesn't stop the others */
+    } catch (err) {
+      logCaught("seed", err, { nest: nestId, binding: r.id, call: "configure_listener" }); // one bad listener doesn't stop the others
     }
   }
   return n;
@@ -513,7 +515,7 @@ async function renew(nestId: string, token: string): Promise<boolean> {
 async function release(nestId: string, token: string): Promise<void> {
   await getDb()
     .run("DELETE FROM surface_seed_claims WHERE nest_id = ? AND token = ?", [nestId, token])
-    .catch(() => undefined);
+    .catch((err) => logCaught("seed", err, { nest: nestId, call: "release_claim" }, "warn"));
 }
 
 interface ItemRecord {
@@ -1085,7 +1087,10 @@ async function proposeOrgMirror(nestId: string, m: SeedManifest, email: string, 
         [install.id, mem.surface_user_id],
       )) as { community_user_id: string } | undefined;
       if (!link || people.has(link.community_user_id)) continue;
-      const profile = await getProfile(install.id, mem.surface_user_id).catch(() => null);
+      const profile = await getProfile(install.id, mem.surface_user_id).catch((err) => {
+        logCaught("seed", err, { install: install.id, call: "profile" }, "warn");
+        return null;
+      });
       const user = (await getDb().get("SELECT name FROM users WHERE id = ?", [link.community_user_id])) as { name?: string | null } | undefined;
       const display = cleanName(profile?.display_name) ?? cleanName(user?.name);
       if (display) people.set(link.community_user_id, { name: display, installId: install.id, group });
@@ -1143,7 +1148,13 @@ export async function listSeedsForNest(nestId: string, actorUserId: string): Pro
 /** For the binding preview (AC-SEED-09): does the nest have a seed, and what could the caller apply? */
 export async function seedPreview(nestId: string, actorUserId: string): Promise<{ no_seed: boolean; seeds: SeedRef[] }> {
   const has = await getDb().get("SELECT 1 AS x FROM surface_seed_applications WHERE nest_id = ?", [nestId]);
-  return { no_seed: !has, seeds: has ? [] : await listSeedsFor(actorUserId).catch(() => []) };
+  const seeds = has
+    ? []
+    : await listSeedsFor(actorUserId).catch((err) => {
+        logCaught("seed", err, { nest: nestId, call: "list_seeds" }, "warn");
+        return [];
+      });
+  return { no_seed: !has, seeds };
 }
 
 export const DEFAULT_SEED_FAILED_TEXT =
@@ -1179,7 +1190,7 @@ export async function applyDefaultSeed(nestId: string, ownerUserId: string): Pro
     // is doing the work — in progress, not a failure (no row, no notice).
     if (err instanceof ConflictError) return null;
     console.error(`[surfaces] default seed not applied (${err instanceof AppError ? err.statusCode : "error"})`);
-    await defaultSeedFailed(nestId, ownerUserId).catch(() => undefined);
+    await defaultSeedFailed(nestId, ownerUserId).catch((e) => logCaught("seed", e, { nest: nestId, call: "default_seed_failed" }));
     return null;
   }
 }

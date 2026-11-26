@@ -48,6 +48,7 @@ import { useAuth } from "../auth/AuthContext";
 import { deriveNestCaps, isNestArchived } from "../lib/nest-caps";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { slugifyFolderPath } from "../lib/folder-target";
+import { folderNamePreview } from "../lib/folder-path";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -64,6 +65,9 @@ import {
   withoutPattern,
   newCardPlacement,
   planMove,
+  creatingCard,
+  isPersonDimension,
+  isCreatingCard,
   optimisticMove,
   resolveConfig,
   buildLanes,
@@ -85,6 +89,7 @@ import {
   matchesAssigneeFilter,
   matchesBlockedFilter,
   matchesTitleFilter,
+  sharedBoardTitle,
   moveNeedsReview,
   inDoneFolder,
   openBlockers,
@@ -100,6 +105,7 @@ import {
   TagPill,
   Avatar,
   BlockedBadge,
+  CommentBadge,
   DueChip,
   DeleteBoardDialog,
   GovernedMoveDialog,
@@ -191,7 +197,7 @@ function loadConfig(nestId: string): BoardSettings {
   return { dimension: "folder", tagNamespace: "", layouts: {} };
 }
 
-const DIMENSION_KINDS: readonly string[] = ["folder", "status", "tag", "assignee", "priority", "field"];
+const DIMENSION_KINDS: readonly string[] = ["folder", "status", "tag", "assignee", "priority", "field", "creator"];
 const SWIMLANE_KINDS: readonly string[] = ["assignee", "priority", "parent", "field"];
 
 /** The custom-field parts of a stored board config, shape-checked. */
@@ -312,6 +318,7 @@ function MaturityBoardInner({
   const { isAdmin, adminStatus, typeTaskEnabled } = useAuth();
   const me = adminStatus?.me?.email?.toLowerCase();
   const qc = useQueryClient();
+  const commentCounts = useQuery(reads.commentCounts(nestId)).data?.counts;
   const nestSettings = useNestSettings(nestId);
   const priorityLevels = usePriorityLevels();
   // The nest's workflow order for its stage group, so a Stage board opens as
@@ -348,6 +355,9 @@ function MaturityBoardInner({
     return () => clearInterval(t);
   }, [fieldDefs]);
   const [nodes, setNodes] = useState<BoardNode[]>([]);
+  // Cards whose create request is still running. Kept out of `nodes`, so every
+  // edit, drag and bulk action treats them as not there yet.
+  const [creating, setCreating] = useState<BoardNode[]>([]);
   // Numbering is off and the board holds tasks: admins get a pointer to the
   // switch instead of cards that silently lack a number.
   // Numbering is on (the default) but some tasks predate it: admins can number
@@ -465,6 +475,7 @@ function MaturityBoardInner({
           tags: Array.isArray(n.tags) ? n.tags : [],
           status: n.status ?? "",
           assignee: n.assignee,
+          author: n.author,
           assigned_at: n.assigned_at,
           due: n.due,
           priority: n.priority,
@@ -708,7 +719,7 @@ function MaturityBoardInner({
 
   const visibleNodes = useMemo(
     () =>
-      nodes.filter(
+      [...nodes, ...creating].filter(
         (n) =>
           // Without the engine's task type "+ Add task" makes documents, so
           // Tasks only would hide every card added here.
@@ -729,22 +740,32 @@ function MaturityBoardInner({
           ) &&
           matchesFieldFilters(n, config.filterFields, fieldDefs),
       ),
-    [nodes, config.tasksOnly, typeTaskEnabled, config.filterTags, config.filterFields, fieldDefs, config.hideDoneAfterDays, assigneeFilter, hideBlocked, filterDraft],
+    [nodes, creating, config.tasksOnly, typeTaskEnabled, config.filterTags, config.filterFields, fieldDefs, config.hideDoneAfterDays, assigneeFilter, hideBlocked, filterDraft],
   );
 
+  const [addingIn, setAddingIn] = useState<{
+    cell: string;
+    col: string;
+    lane?: string;
+    parent?: string;
+    /** A task the server refused, back in the dialog to fix. */
+    draft?: NewTask;
+  } | null>(null);
   // Folders with nothing in them — the sidebar's census read (shared cache), so
   // the folder board lists the same folders the tree does.
   const census = useQuery({
     ...reads.census(nestId),
-    enabled: effectiveConfig.dimension === "folder",
+    // The New task dialog's folder picker needs them on any board.
+    enabled: effectiveConfig.dimension === "folder" || addingIn !== null,
   });
+  const allFolders = useMemo(() => (census.data?.census.folders ?? []).map((f) => f.path), [census.data]);
   const emptyFolders = useMemo(
     () => (census.data?.census.folders ?? []).filter((f) => !f.total).map((f) => f.path),
     [census.data],
   );
   const { columns, byColumn } = useMemo(
-    () => groupByColumn(visibleNodes, effectiveConfig, emptyFolders, nodes),
-    [visibleNodes, effectiveConfig, emptyFolders, nodes],
+    () => groupByColumn(visibleNodes, effectiveConfig, emptyFolders, [...nodes, ...creating]),
+    [visibleNodes, effectiveConfig, emptyFolders, nodes, creating],
   );
 
   // Each column in the active board's saved order (Linear/Jira stack rank).
@@ -899,12 +920,12 @@ function MaturityBoardInner({
   );
 
   // ── "+ Add task" ──
-  const [addingIn, setAddingIn] = useState<{ cell: string; col: string; lane?: string; parent?: string } | null>(null);
   const createCard = useCallback(
     async (colKey: string, task: NewTask, parent?: string, laneKey?: string) => {
       const placement = newCardPlacement(colKey, effectiveConfig);
       if (!placement) return;
       const { content, surfaceTag, ...details } = task;
+      let card: BoardNode | undefined;
       try {
         const payload: Record<string, any> = {
           // The create route requires a body; a task's notes may start empty.
@@ -955,14 +976,17 @@ function MaturityBoardInner({
         };
         // The surface picked in the dialog is an ordinary tag, added to whatever
         // the column and filters already put on the card.
+        if (payload.folder === "") delete payload.folder; // the nest root
         if (surfaceTag) payload.tags = [...new Set([...(payload.tags ?? []), `#${surfaceTag}`])];
+        const shown = (card = { ...creatingCard(payload), author: me });
+        setCreating((cs) => [...cs, shown]);
         const res = await api.createNode(nestId, payload as any);
         qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
-        // Refresh the board so the new card shows — don't wait.
-        void load({ silent: true });
+        // The real card replaces the stand-in.
+        void load({ silent: true }).then(() => setCreating((cs) => cs.filter((c) => c !== shown)));
         return res?.node?.id as string | undefined;
       } catch (e: any) {
-        toast.error(e?.message || "Couldn't add the task");
+        setCreating((cs) => cs.filter((c) => c !== card));
         throw e;
       }
     },
@@ -1181,6 +1205,7 @@ function MaturityBoardInner({
   const [colDrag, setColDrag] = useState<string | null>(null);
   const [colDropTarget, setColDropTarget] = useState<string | null>(null);
   const [newColumn, setNewColumn] = useState("");
+  const newColumnInput = useRef<HTMLInputElement>(null);
   // The tag board's add-column box stays a "+ Column" button until needed.
   const [addingColumn, setAddingColumn] = useState(false);
   // The how-to lines stay out of the way until asked for (the "?" button).
@@ -1415,7 +1440,9 @@ function MaturityBoardInner({
           ? "Unassigned"
           : effectiveConfig.dimension === "priority"
             ? "No priority"
-            : "Uncategorized"
+            : effectiveConfig.dimension === "creator"
+              ? "Unknown"
+              : "Uncategorized"
         : key),
     [columnLabels, effectiveConfig.dimension],
   );
@@ -1509,7 +1536,7 @@ function MaturityBoardInner({
         title={col.title}
       >
         <span className="flex min-w-0 items-center gap-1.5">
-          {effectiveConfig.dimension === "assignee" && col.key !== UNCATEGORIZED && (
+          {isPersonDimension(effectiveConfig.dimension) && col.key !== UNCATEGORIZED && (
             <Avatar email={col.key} size="sm" />
           )}
           {effectiveConfig.dimension === "priority" && (
@@ -1529,7 +1556,7 @@ function MaturityBoardInner({
               capitalizeColumnHeader(effectiveConfig.dimension) ? "capitalize" : ""
             } ${col.key === UNCATEGORIZED ? "text-muted-foreground" : ""}`}
           >
-            {effectiveConfig.dimension === "assignee" && col.key !== UNCATEGORIZED
+            {isPersonDimension(effectiveConfig.dimension) && col.key !== UNCATEGORIZED
               ? personLabel(col.key)
               : effectiveConfig.field?.type === "user" && col.key !== UNCATEGORIZED
                 ? personLabel(col.key)
@@ -1624,7 +1651,8 @@ function MaturityBoardInner({
                     p?.cell === cell && p.before === before ? p : { cell, before },
                   );
                 }}
-                draggable={draggable}
+                draggable={draggable && !isCreatingCard(n.id)}
+                aria-busy={isCreatingCard(n.id) || undefined}
                 onDragStart={(e) => {
                   setDragId(n.id);
                   setDragFromCol(col.key);
@@ -1640,7 +1668,7 @@ function MaturityBoardInner({
                 onClick={() => onOpenDocument(n.id)}
                 className={`group rounded-lg border border-border bg-card px-3 py-2.5 text-sm cursor-pointer shadow-sm hover:border-primary/50 hover:shadow-md transition ${
                   dragId === n.id ? "opacity-50" : ""
-                } ${busy ? "pointer-events-none" : ""}`}
+                } ${busy ? "pointer-events-none" : ""} ${isCreatingCard(n.id) ? "pointer-events-none opacity-60" : ""}`}
               >
                 {/* A sub-item names its parent, as ClickUp does. Redundant
                     inside its parent's own swimlane, so hidden there. */}
@@ -1722,6 +1750,7 @@ function MaturityBoardInner({
                         </span>
                       )}
                       <BlockedBadge count={openBlockers(n)} />
+                      <CommentBadge counts={commentCounts?.[n.id]} />
                       {n.due && dueCtl}
                       <SubItemChip
                         items={kids}
@@ -1788,41 +1817,59 @@ function MaturityBoardInner({
             {draggable ? "Drop here" : "Empty"}
           </div>
         )}
-        {addingIn?.cell === cell && (
-          <CreateTaskDialog
-            parentTitle={
-              addingIn.parent ? nodes.find((x) => x.id === addingIn.parent)?.title ?? "task" : undefined
-            }
-            initial={{
-              assignee:
-                newCardPlacement(col.key, effectiveConfig)?.assignee ??
-                (assigneeFilter.size === 1 && !assigneeFilter.has(UNASSIGNED)
-                  ? [...assigneeFilter][0]
-                  : undefined),
-              priority: newCardPlacement(col.key, effectiveConfig)?.priority,
-            }}
-            people={members}
-            me={me}
-            surfaces={surfaceChoices}
-            defaultSurface={defaultSurfaceTag}
-            onSubmit={async (task) => {
-              const id = await createCard(col.key, task, addingIn.parent, addingIn.lane);
-              setAddingIn(null);
-              // Stay on the Board (PO-1246); the card lands in its column.
-              if (id)
-                toast.success(`Task "${task.title}" created`, {
-                  action: { label: "Open", onClick: () => onOpenDocument(id) },
-                });
-            }}
-            onClose={() => setAddingIn(null)}
-          />
-        )}
       </div>
     );
   };
 
   return (
     <div className="space-y-4">
+      {/* One dialog for every column and lane, on the board and in the list. */}
+      {addingIn && (
+        <CreateTaskDialog
+          key={addingIn.draft ? "retry" : "new"}
+          nestId={nestId}
+          parentTitle={
+            addingIn.parent ? nodes.find((x) => x.id === addingIn.parent)?.title ?? "task" : undefined
+          }
+          initial={{
+            assignee:
+              newCardPlacement(addingIn.col, effectiveConfig)?.assignee ??
+              (assigneeFilter.size === 1 && !assigneeFilter.has(UNASSIGNED)
+                ? [...assigneeFilter][0]
+                : undefined),
+            priority: newCardPlacement(addingIn.col, effectiveConfig)?.priority,
+            folder: newCardPlacement(addingIn.col, effectiveConfig)?.folder,
+            ...addingIn.draft,
+          }}
+          folders={allFolders}
+          people={members}
+          me={me}
+          surfaces={surfaceChoices}
+          defaultSurface={defaultSurfaceTag}
+          onSubmit={async (task, another) => {
+            // The card shows at once and the dialog does not wait (po-1520).
+            // Stay on the Board (PO-1246); the card lands in its column.
+            const at = addingIn;
+            if (!another) setAddingIn(null);
+            createCard(at.col, task, at.parent, at.lane).then(
+              (id) => {
+                if (id)
+                  toast.success(`Task "${task.title}" created`, {
+                    action: { label: "Open", onClick: () => onOpenDocument(id) },
+                  });
+              },
+              // Nothing typed is lost: the toast stays and brings it back.
+              (e: any) =>
+                toast.error(`Task "${task.title}" was not created`, {
+                  description: e?.message,
+                  duration: Infinity,
+                  action: { label: "Edit and retry", onClick: () => setAddingIn({ ...at, draft: task }) },
+                }),
+            );
+          }}
+          onClose={() => setAddingIn(null)}
+        />
+      )}
       <NestPageHeader nestName={nestName} onBack={onBack}>
         <div className="flex flex-wrap items-center gap-2">
           {/* Two capsules — what the columns are, and how the rows split — so
@@ -1861,6 +1908,7 @@ function MaturityBoardInner({
             <option value="tag">Tag</option>
             <option value="assignee">Assignee</option>
             <option value="priority">Priority</option>
+            <option value="creator">Created by</option>
             {groupableFields.length > 0 && (
               <optgroup label="Fields">
                 {groupableFields.map((d) => (
@@ -1984,9 +2032,19 @@ function MaturityBoardInner({
                 e.preventDefault();
                 void addColumn(newColumn);
               }}
-              className="flex items-center gap-1"
+              className="relative flex items-center gap-1"
             >
+              {effectiveConfig.dimension === "folder" && folderNamePreview(newColumn) && (
+                <p
+                  role="status"
+                  className="absolute left-0 top-full z-20 mt-1 w-max max-w-xs rounded-md border bg-popover px-2 py-1 text-xs text-muted-foreground shadow-md"
+                  data-testid="board-new-folder-preview"
+                >
+                  Will be created as <span className="font-medium text-foreground">{folderNamePreview(newColumn)}</span>
+                </p>
+              )}
               <Input
+                ref={newColumnInput}
                 value={newColumn}
                 onChange={(e) => setNewColumn(e.target.value)}
                 placeholder={
@@ -2113,7 +2171,7 @@ function MaturityBoardInner({
                   title={
                     b.private
                       ? "Private — only you see this board"
-                      : `Shared with everyone on this nest${b.created_by_email ? ` · made by ${b.created_by_email}` : ""}`
+                      : sharedBoardTitle(b.created_by_email, roster?.people)
                   }
                 >
                   {b.private && <Lock className="h-3 w-3" />}
@@ -2172,7 +2230,8 @@ function MaturityBoardInner({
               Review status (draft, pending, published) is{" "}
               <span className="font-medium text-foreground">read-only</span>{" "}
               here — move a doc through review in the document view. To group tasks by
-              stage, pick the stage option instead.
+              stage, pick <span className="font-medium text-foreground">Tag</span> under Columns, then{" "}
+              <span className="font-medium text-foreground">stage:</span> in the list beside it.
             </li>
             <li>
               Switch to{" "}
@@ -2235,6 +2294,14 @@ function MaturityBoardInner({
                   ? " — drag a card across to change it. Every change is a versioned edit."
                   : "."
                 : " — this field no longer exists; pick another grouping."}
+            </li>
+            <li>Drag a card up or down to rank it; pick Lanes to split rows.</li>
+          </>
+        ) : config.dimension === "creator" ? (
+          <>
+            <li>
+              One column per person, for the documents they{" "}
+              <span className="font-medium text-foreground">created</span>. A card cannot move to another person.
             </li>
             <li>Drag a card up or down to rank it; pick Lanes to split rows.</li>
           </>
@@ -2385,7 +2452,7 @@ function MaturityBoardInner({
               }
               setFilterDraft("");
             }}
-            placeholder="Filter by title or #tag"
+            placeholder="Filter by title, ticket or #tag"
             title="Type to filter by title. Enter adds the text as a tag filter."
             className="h-7 w-44 bg-transparent px-1 text-sm outline-none placeholder:text-muted-foreground"
           />
@@ -2518,11 +2585,35 @@ function MaturityBoardInner({
       ) : columns.length === 0 ? (
         // The tag board starts with no columns by design, so "no documents"
         // would be a lie — the documents are there, the columns aren't yet.
+        effectiveConfig.dimension === "folder" && canEditDocs ? (
+          <div
+            className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-12 text-center text-sm text-muted-foreground"
+            data-testid="board-first-run"
+          >
+            <p>
+              <span className="font-medium text-foreground">Add a column to get started.</span> A column is a folder; its
+              tasks show as cards.
+            </p>
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button size="sm" onClick={() => newColumnInput.current?.focus()}>
+                Add a column
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setAddingIn({ cell: UNCATEGORIZED, col: UNCATEGORIZED })}
+              >
+                Add your first task
+              </Button>
+            </div>
+          </div>
+        ) : (
         <div className="text-sm text-muted-foreground py-8">
           {effectiveConfig.dimension === "tag"
             ? "No tag columns yet — add one above to start sorting documents into it, or a pattern like status* for every matching tag."
             : "No documents to show."}
         </div>
+        )
       ) : viewMode === "list" ? (
         <BoardListView
           nestId={nestId}
@@ -2543,10 +2634,12 @@ function MaturityBoardInner({
           me={me}
           personLabel={personLabel}
           canEdit={canEditDocs}
+          canAddTo={(key) => canEditDocs && !!newCardPlacement(key, effectiveConfig)}
+          onAddTask={(key) => setAddingIn({ cell: key, col: key })}
           governance={governance}
           doneTags={doneTags}
           tagSuggestions={allTagValues}
-          onOpen={onOpenDocument}
+          onOpen={(id) => !isCreatingCard(id) && onOpenDocument(id)}
           onChanged={async () => {
             await qc.invalidateQueries({ queryKey: reads.nodesMeta(nestId).queryKey });
             await load({ silent: true });

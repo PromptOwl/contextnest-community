@@ -168,6 +168,8 @@ describe("node_index — write-through", () => {
       owner.apiKey,
     );
     expect(res.status).toBe(200);
+    // The index update runs after the response, as on every write (po-1247).
+    await settleSeals();
 
     // Left the source listing...
     expect(readFileSync(abcIndex, "utf-8")).not.toContain("relocating");

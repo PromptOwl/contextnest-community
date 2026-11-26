@@ -89,6 +89,20 @@ export const keys = {
     [...keys.channels(nestId), "timeline", name] as const,
   channelThread: (nestId: string, name: string, threadId: string) =>
     [...keys.channels(nestId), "thread", name, threadId] as const,
+  // C2 (PO-1197): conversations, a container's members, presence, my
+  // preferences, the app-wide unread, the nest's chat switch.
+  conversations: (nestId: string) => [...keys.channels(nestId), "conversations"] as const,
+  conversationTimeline: (nestId: string, uuid: string) => [...keys.channels(nestId), "conv-timeline", uuid] as const,
+  conversationThread: (nestId: string, uuid: string, threadId: string) => [...keys.channels(nestId), "conv-thread", uuid, threadId] as const,
+  containerMembers: (nestId: string, key: string) => [...keys.channels(nestId), "members", key] as const,
+  presence: (nestId: string) => [...keys.nest(nestId), "presence"] as const,
+  chatPreferences: () => [...keys.me, "chat-preferences"] as const,
+  chatUnread: () => [...keys.me, "chat-unread"] as const,
+  chatSettings: (nestId: string) => [...keys.nest(nestId), "chat-settings"] as const,
+  // C1 message features (PO-1196): a channel's pins, my saved messages, a search.
+  channelPins: (nestId: string, name: string) => [...keys.channels(nestId), "pins", name] as const,
+  mySaved: () => [...keys.me, "saved"] as const,
+  chatSearch: (nestId: string | null, q: string, channel: string | null) => [...keys.me, "chat-search", nestId ?? "*", q, channel ?? "*"] as const,
   // Agent handles the @ picker offers, and their wake-up targets (owner/admin).
   agentHandles: (nestId: string) => [...keys.nest(nestId), "agent-handles"] as const,
   agentWebhooks: (nestId: string) => [...keys.nest(nestId), "agent-webhooks"] as const,
@@ -173,8 +187,11 @@ export const keys = {
   me: ["me"] as const,
   unreadNotifications: () => [...keys.me, "notifications", "unread"] as const,
   myWorkAll: () => [...keys.me, "work"] as const,
-  myWork: (limit?: number, offset?: number, mentionsOffset?: number) =>
-    [...keys.myWorkAll(), limit ?? null, offset ?? null, mentionsOffset ?? null] as const,
+  /** My open mentions on their own (the chat sidebar, PO-1200); under
+   *  myWorkAll so a reply or Mark done refreshes it with the rest. */
+  myMentions: () => [...keys.myWorkAll(), "mentions"] as const,
+  myWork: (limit?: number, offset?: number, mentionsOffset?: number, doneTasks?: boolean) =>
+    [...keys.myWorkAll(), limit ?? null, offset ?? null, mentionsOffset ?? null, doneTasks ?? null] as const,
   myDrafts: (limit?: number, offset?: number, q?: string, sort?: string) =>
     [...keys.me, "drafts", limit ?? null, offset ?? null, q ?? null, sort ?? null] as const,
 
@@ -193,6 +210,9 @@ export const keys = {
  * wrong in both directions — a reviewer must never act on a stale queue, while
  * the nest list barely changes between sessions.
  */
+/** How often an open approvals list re-reads on its own. */
+const LIVE_QUEUE_MS = 30_000;
+
 const STALE = {
   /** Structure and configuration the user rarely changes mid-session. */
   reference: 5 * 60_000,
@@ -269,6 +289,31 @@ const NEST_WRITE_SCOPES: Array<{
   // Mark read is the caller's own mark; the page writes the returned row into
   // the cached list, so nothing needs refetching.
   { match: /^\/channels\/[^/]+\/read$/, affects: () => [] },
+  // C2: posting into a conversation is an annotation write on its node.
+  {
+    match: /^\/nodes\/nodes\/conversations\/[^/]+\/annotations(?:\/|$)/,
+    affects: (n) => [keys.conversations(n), keys.myWorkAll()],
+  },
+  { match: /^\/conversations\/[^/]+\/read$/, affects: () => [] },
+  { match: /^\/conversations(?:\/|$)/, affects: (n) => [keys.conversations(n), [...keys.channels(n), "members"]] },
+  { match: /^\/channels\/[^/]+\/(?:members|join|leave|private)$/, affects: (n) => [keys.channelList(n), [...keys.channels(n), "members"]] },
+  { match: /^\/chat\/settings$/, affects: (n) => [keys.nest(n), keys.chatSettings(n)] },
+  { match: /^\/chat\/(?:presence|typing)$/, affects: () => [] },
+  // A reaction, edit, delete, pin or save on one message (C1): the channel's
+  // timeline and threads are patched in place by the hook; pins and the
+  // saved list are re-read.
+  {
+    match: /^\/channels\/[^/]+\/messages\/[^/]+\/(?:pin)$/,
+    affects: (n) => [[...keys.channels(n), "pins"]],
+  },
+  {
+    match: /^\/channels\/[^/]+\/messages\/[^/]+\/(?:save)$/,
+    affects: () => [keys.mySaved(), keys.myWorkAll()],
+  },
+  {
+    match: /^\/channels\/[^/]+\/messages\/[^/]+(?:\/reactions(?:\/|$)|$)/,
+    affects: () => [],
+  },
   // Create, archive, restore: a channel is a node, so the document listing
   // (the sidebar's Channels folder) changes with the channel list.
   {
@@ -321,7 +366,7 @@ const NEST_WRITE_SCOPES: Array<{
   // already drops the body — naming one would only risk naming the wrong one.
   {
     match:
-      /^\/nodes\/(.+)\/(?:approve|reject|submit-review|revert|external-edits)(?:\/|$)/,
+      /^\/(?:nodes\/(.+)\/(?:approve(?:-with-edits)?|reject|submit-review|revert|external-edits)|review-queue\/bulk)(?:\/|$)/,
     affects: (n) => [
       keys.nodes(n),
       [...keys.nest(n), "review-queue"],
@@ -475,7 +520,7 @@ const NEST_WRITE_SCOPES: Array<{
  * and dropped once when it ends.
  */
 export const VERDICT_REFETCH_WINDOW_MS = 2500;
-const VERDICT_PATH = /^\/nodes\/.+\/(?:approve|reject)(?:\/|$)/;
+const VERDICT_PATH = /^\/(?:nodes\/.+\/(?:approve(?:-with-edits)?|reject)|review-queue\/bulk)(?:\/|$)/;
 const queuedVerdictDrops = new Map<
   string,
   { qc: QueryClient; queryKey: readonly unknown[] }
@@ -795,7 +840,14 @@ export const reads = {
   channelDocs: (nestId: string) =>
     queryOptions({
       queryKey: keys.channelDocs(nestId),
-      queryFn: async () => ({ nodes: (await api.listFolderNodes(nestId, "channels")).nodes.filter(isChannelDoc) }),
+      // Conversation nodes (C2) too: a member's dms are not documents either.
+      queryFn: async () => {
+        const [channels, conversations] = await Promise.all([
+          api.listFolderNodes(nestId, "channels"),
+          api.listFolderNodes(nestId, "conversations").catch(() => ({ nodes: [] as any[] })),
+        ]);
+        return { nodes: [...channels.nodes, ...conversations.nodes].filter(isChannelDoc) };
+      },
       staleTime: STALE.listing,
     }),
   census: (nestId: string) =>
@@ -981,6 +1033,12 @@ export const reads = {
       queryKey: keys.reviewQueue(nestId, status),
       queryFn: () => api.getReviewQueue(nestId, status),
       staleTime: STALE.governance,
+      // Someone else approving (or an agent filing) changes this list without
+      // any action here, so it re-reads on focus and every half minute while
+      // the tab is in view.
+      refetchInterval: LIVE_QUEUE_MS,
+      refetchIntervalInBackground: false,
+      refetchOnWindowFocus: "always",
     }),
   deletionRequests: (nestId: string, status = "pending") =>
     queryOptions({
@@ -1154,11 +1212,74 @@ export const reads = {
       queryFn: () => api.listPromptowlTeams(),
       staleTime: STALE.reference,
     }),
-  myWork: (opts?: { limit?: number; offset?: number; mentionsOffset?: number }) =>
+  conversations: (nestId: string) =>
     queryOptions({
-      queryKey: keys.myWork(opts?.limit, opts?.offset, opts?.mentionsOffset),
+      queryKey: keys.conversations(nestId),
+      queryFn: () => api.listConversations(nestId),
+      staleTime: 0,
+    }),
+  containerMembers: (nestId: string, key: string, fetcher: () => Promise<api.ContainerMembers>) =>
+    queryOptions({
+      queryKey: keys.containerMembers(nestId, key),
+      queryFn: fetcher,
+      staleTime: 30_000,
+    }),
+  presence: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.presence(nestId),
+      queryFn: () => api.getPresence(nestId),
+      staleTime: 30_000,
+    }),
+  chatPreferences: () =>
+    queryOptions({
+      queryKey: keys.chatPreferences(),
+      queryFn: () => api.getChatPreferences(),
+      staleTime: 60_000,
+    }),
+  chatUnread: () =>
+    queryOptions({
+      queryKey: keys.chatUnread(),
+      queryFn: () => api.getChatUnread(),
+      staleTime: 10_000,
+    }),
+  chatSettings: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.chatSettings(nestId),
+      queryFn: () => api.getChatSettings(nestId),
+      staleTime: 0,
+    }),
+  channelPins: (nestId: string, name: string) =>
+    queryOptions({
+      queryKey: keys.channelPins(nestId, name),
+      queryFn: () => api.listChannelPins(nestId, name),
+      staleTime: 0,
+    }),
+  mySaved: () =>
+    queryOptions({
+      queryKey: keys.mySaved(),
+      queryFn: () => api.listSavedMessages({ limit: 50 }),
+      staleTime: 0,
+    }),
+  chatSearch: (nestId: string | null, q: string, channel: string | null) =>
+    queryOptions({
+      queryKey: keys.chatSearch(nestId, q, channel),
+      queryFn: () => api.searchChannelMessages(nestId, { q, channel: channel ?? undefined, limit: 20 }),
+      staleTime: 30_000,
+    }),
+  myMentions: () =>
+    queryOptions({
+      queryKey: keys.myMentions(),
+      queryFn: () => api.getMyMentions({ limit: 50 }),
+      staleTime: 0,
+    }),
+  myWork: (opts?: { limit?: number; offset?: number; mentionsOffset?: number; doneTasks?: boolean }) =>
+    queryOptions({
+      queryKey: keys.myWork(opts?.limit, opts?.offset, opts?.mentionsOffset, opts?.doneTasks),
       queryFn: () => api.getMyWork(opts),
       staleTime: STALE.governance,
+      refetchInterval: LIVE_QUEUE_MS,
+      refetchIntervalInBackground: false,
+      refetchOnWindowFocus: "always",
     }),
   myDrafts: (opts?: {
     limit?: number;

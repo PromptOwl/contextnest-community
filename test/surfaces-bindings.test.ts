@@ -3,7 +3,7 @@
  * model (§4.10, §4.17, §12 R1, binding state machine §12 R3), over REST, MCP
  * and the services. The connector is the in-memory fake; no network.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import { randomUUID } from "crypto";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest, resetAuthRateLimit } from "./helpers.js";
 import { createFakeConnector, conversation, member, type FakeConnector } from "./surfaces-fake-connector.js";
@@ -232,7 +232,9 @@ describe("guard against the real permission model", () => {
     expect(again.capture_ok).toBe(1);
   });
 
-  it("AC-GRD-06: an enabled outbound connector on N → capture_ok false with connector", async () => {
+  // po-1431 replaces the old AC-GRD-06 (connector → refused): a bound nest's
+  // connector posts carry no content, so a connector is not a reader.
+  it("AC-GRD-06 (po-1431): an enabled outbound connector on N no longer blocks the bind", async () => {
     for (const channel of ["slack", "teams", "webhook"]) {
       const n = await newNest(alice);
       const url = channel === "slack" ? "https://hooks.slack.com/services/T/B/X" : "https://example.com/hook";
@@ -240,8 +242,8 @@ describe("guard against the real permission model", () => {
       expect(cr.status, JSON.stringify(cr.data)).toBeLessThan(300);
       setConv("C-06", ["SA"]);
       const r = await jsonRequest(app, "POST", "/surfaces/bindings/preview", { install_id: installId, conversation_id: "C-06", nest_id: n }, alice.apiKey);
-      expect(r.data.guard.capture_ok, channel).toBe(false);
-      expect(r.data.guard.detail.non_user_principals).toContain("connector");
+      expect(r.data.guard.capture_ok, channel).toBe(true);
+      expect(r.data.guard.detail.non_user_principals).not.toContain("connector");
     }
   });
 
@@ -444,11 +446,180 @@ describe("guard re-checks (§4.17)", () => {
     const after = await row(id);
     expect(after.status).toBe("paused_guard");
     expect(after.capture_ok).toBe(1);
-    const nonAdmin = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, {}, dave.apiKey);
+    const nonAdmin = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, { reason: "test resume" }, dave.apiKey);
     expect(nonAdmin.status).toBe(403);
-    const res = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, {}, alice.apiKey);
+    const res = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, { reason: "test resume" }, alice.apiKey);
     expect(res.status).toBe(200);
     expect(res.data.binding.status).toBe("active");
+  });
+
+  it("po-1437: a nest admin pauses listening; the guard never resumes it; Resume brings it back with the reason cleared", async () => {
+    const n = await newNest(alice);
+    await share(n, dave);
+    setConv("C-1437", ["SA", "SD"]);
+    const b = await bind({ conversation_id: "C-1437", nest_id: n });
+    expect(b.status).toBe(201);
+    const id = b.data.binding.id;
+    paused.length = 0;
+
+    const nonAdmin = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/pause`, { reason: "launch week" }, dave.apiKey);
+    expect(nonAdmin.status).toBe(403);
+    // A reason is required, so the team can see why.
+    for (const body of [{}, { reason: "  " }, { reason: "ok" }]) {
+      expect((await jsonRequest(app, "POST", `/surfaces/bindings/${id}/pause`, body, alice.apiKey)).status, JSON.stringify(body)).toBe(422);
+    }
+    expect((await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, {}, alice.apiKey)).status).toBe(422);
+    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${id}`, undefined, alice.apiKey)).status).toBe(422);
+    expect((await row(id)).status).toBe("active");
+    const p = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/pause`, { reason: "launch week" }, alice.apiKey);
+    expect(p.status, JSON.stringify(p.data)).toBe(200);
+    expect(p.data.binding).toMatchObject({ status: "paused_guard", paused_by_admin: true });
+    // The pause hooks purge the buffer and withdraw pending cards, as for any pause.
+    expect(paused).toEqual([{ bindingId: id, reason: "admin" }]);
+    // No "the guard failed" alert for a pause an admin chose.
+    expect((await S.db.getDb().all("SELECT 1 FROM surface_notices WHERE binding_id = ? AND kind = 'binding_paused'", [id])).length).toBe(0);
+    expect((await jsonRequest(app, "POST", `/surfaces/bindings/${id}/pause`, { reason: "again" }, alice.apiKey)).status).toBe(409);
+
+    // A passing guard sweep leaves it paused.
+    await S.runner.handleSurfaceSignal(installId, { surface: "slack", workspace: "T1", kind: "member_joined", conversation: "C-1437", user: "SD" });
+    await S.runner.runGuardSweep();
+    expect((await row(id)).status).toBe("paused_guard");
+
+    const res = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, { reason: "launch is over" }, alice.apiKey);
+    expect(res.status, JSON.stringify(res.data)).toBe(200);
+    expect(res.data.binding).toMatchObject({ status: "active", paused_by_admin: false });
+
+    // The history keeps every change, newest first, with the actual person (id + email) and the reason.
+    expect((await jsonRequest(app, "GET", `/surfaces/bindings/${id}/history`, undefined, dave.apiKey)).status).toBe(403);
+    const h = await jsonRequest(app, "GET", `/surfaces/bindings/${id}/history`, undefined, alice.apiKey);
+    expect(h.status, JSON.stringify(h.data)).toBe(200);
+    expect(h.data.history.map((e: any) => [e.action, e.reason, e.by?.email ?? null])).toEqual([
+      ["resumed", "launch is over", alice.email],
+      ["paused", "launch week", alice.email],
+      ["started", null, alice.email],
+    ]);
+    expect(h.data.history[0].by.user_id).toBe(alice.userId);
+  });
+
+  it("po-1437: a pause nobody chose (the guard) and a removal go on the history too", async () => {
+    const n = await newNest(alice);
+    await share(n, dave);
+    setConv("C-1437g", ["SA", "SD"]);
+    const id = (await bind({ conversation_id: "C-1437g", nest_id: n })).data.binding.id;
+    setConv("C-1437g", ["SA"]);
+    await S.runner.handleSurfaceSignal(installId, { surface: "slack", workspace: "T1", kind: "member_left", conversation: "C-1437g", user: "SD" });
+    await S.runner.runGuardSweep();
+    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${id}`, { reason: "channel retired" }, alice.apiKey)).status).toBe(200);
+    const h = (await jsonRequest(app, "GET", `/surfaces/bindings/${id}/history`, undefined, alice.apiKey)).data.history;
+    expect(h.map((e: any) => [e.action, e.by ? "person" : "nest"])).toEqual([
+      ["removed", "person"],
+      ["paused", "nest"],
+      ["started", "person"],
+    ]);
+    expect(h[1].reason).toMatch(/^Paused by Nest/);
+  });
+
+  it("archiving a nest pauses its listening channels as an admin pause; deleting removes them and its pending installs", async () => {
+    const nests = await import("../src/nests/service.js");
+    const a = await newNest(alice);
+    setConv("C-arch", ["SA"]);
+    const aId = (await bind({ conversation_id: "C-arch", nest_id: a })).data.binding.id;
+    paused.length = 0;
+    await nests.archiveNest(a);
+    expect(await row(aId)).toMatchObject({ status: "paused_guard", pause_reason: "admin" });
+    expect(paused).toEqual([{ bindingId: aId, reason: "admin" }]);
+
+    const d = await newNest(alice);
+    setConv("C-del", ["SA"]);
+    const dId = (await bind({ conversation_id: "C-del", nest_id: d })).data.binding.id;
+    const pending = await S.installs.createInstall({ surface: "slack", mode: "hosted", tenantKey: `pending:${randomUUID()}`, homeNestId: d, installedByUserId: alice.userId });
+    paused.length = 0;
+    await nests.deleteNest(d);
+    // Stopped first (hooks purge + withdraw), then the nest's FK cascade drops the row.
+    expect(paused).toEqual([{ bindingId: dId, reason: "removed" }]);
+    expect(await row(dId)).toBeUndefined();
+    expect(await S.installs.getInstall(pending.id)).toBeNull();
+    // The active install homed elsewhere is untouched.
+    expect((await S.installs.getInstall(installId))?.status).toBe("active");
+  });
+
+  it("po-1437: moving a channel to another nest = remove, then bind the same channel to the new nest", async () => {
+    const n1 = await newNest(alice);
+    const n2 = await newNest(alice);
+    setConv("C-1437m", ["SA"]);
+    const first = await bind({ conversation_id: "C-1437m", nest_id: n1 });
+    expect(first.status).toBe(201);
+    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${first.data.binding.id}`, { reason: "test remove" }, alice.apiKey)).status).toBe(200);
+    const moved = await bind({ conversation_id: "C-1437m", nest_id: n2 });
+    expect(moved.status, JSON.stringify(moved.data)).toBe(201);
+    expect(moved.data.binding).toMatchObject({ nest_id: n2, status: "active" });
+  });
+
+  it("po-1437 review: a second stop is 409 with no extra history row; a move names the nest from the server; history stays per nest", async () => {
+    const n1 = await newNest(alice, "Old Nest");
+    const n2 = await newNest(alice, "New Nest");
+    setConv("C-1437r", ["SA"]);
+    const id = (await bind({ conversation_id: "C-1437r", nest_id: n1 })).data.binding.id;
+    // moved_to_nest_id is resolved server-side; a free-text moved_to is ignored.
+    const del = await jsonRequest(app, "DELETE", `/surfaces/bindings/${id}`, { reason: "new team", moved_to_nest_id: n2, moved_to: "<!channel>" }, alice.apiKey);
+    expect(del.status, JSON.stringify(del.data)).toBe(200);
+    expect((await jsonRequest(app, "DELETE", `/surfaces/bindings/${id}`, { reason: "double click" }, alice.apiKey)).status).toBe(409);
+    const old = (await S.db.getDb().all("SELECT action, reason, nest_id FROM surface_binding_history WHERE binding_id = ? ORDER BY created_at", [id])) as any[];
+    expect(old.map((h) => h.action)).toEqual(["started", "moved"]);
+    expect(old[1].reason).toBe("new team (moved to New Nest)");
+
+    // Re-bound to the new nest (same row): its admins see only the new nest's history.
+    expect((await bind({ conversation_id: "C-1437r", nest_id: n2 })).status).toBe(201);
+    const h = (await jsonRequest(app, "GET", `/surfaces/bindings/${id}/history`, undefined, alice.apiKey)).data.history;
+    expect(h.map((e: any) => e.action)).toEqual(["started"]);
+  });
+
+  it("po-1446: activity maps verdicts and card states, and counts only the last 7 UTC days", async () => {
+    const n = await newNest(alice);
+    setConv("C-1446", ["SA"]);
+    const id = (await bind({ conversation_id: "C-1446", nest_id: n })).data.binding.id;
+    const db = S.db.getDb();
+    const now = new Date().toISOString();
+    const old = new Date(Date.now() - 10 * 86_400_000).toISOString();
+    const counter = (day: string, metric: string, value: number) =>
+      db.run("INSERT INTO surface_counters (org_id, nest_id, binding_id, day, metric, value, created_at) VALUES ('default', ?, ?, ?, ?, ?, ?)", [n, id, day, metric, value, now]);
+    await counter(now.slice(0, 10), "buffered", 4);
+    await counter(now.slice(0, 10), "drop_too_short", 2);
+    await counter(old.slice(0, 10), "buffered", 50); // outside the window
+    const win = (status: string, verdict: string | null, judgedAt: string | null) =>
+      db.run(
+        "INSERT INTO surface_windows (id, binding_id, nest_id, thread_key, opened_at, last_message_at, status, verdict, judged_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [randomUUID(), id, n, randomUUID(), now, now, status, verdict, judgedAt],
+      );
+    await win("open", null, null);
+    await win("judged", "propose", now);
+    await win("judged", "no_op", now);
+    await win("judged", "filtered", now);
+    await win("judged", "error", now);
+    await win("judged", "budget_exhausted", now);
+    await win("judged", "propose", old); // outside the window
+    await win("discarded", "discarded", now); // never counted
+    const card = (state: string, postedAt: string | null, createdAt: string) =>
+      db.run(
+        "INSERT INTO surface_proposals (id, window_id, binding_id, nest_id, card_kind, state, posted_at, expires_at, created_at) VALUES (?, ?, ?, ?, 'single', ?, ?, ?, ?)",
+        [randomUUID(), randomUUID(), id, n, state, postedAt, now, createdAt],
+      );
+    await card("held", null, now);
+    await card("queued", null, now);
+    await card("decided", now, now); // reached the channel
+    await card("expired", null, now); // expired while held: never posted
+    await card("posted", old, old); // outside the window
+
+    const a = (await jsonRequest(app, "GET", `/surfaces/bindings/${id}/activity`, undefined, alice.apiKey)).data;
+    expect(a).toMatchObject({
+      days: 7,
+      received: 6,
+      buffered: 4,
+      skipped: { too_short: 2 },
+      waiting: 1,
+      judged: { proposed: 1, nothing_kept: 2, failed: 2 },
+      cards: { posted: 1, queued: 1, held: 1 },
+    });
   });
 
   it("resume refuses while the guard still fails", async () => {
@@ -458,7 +629,7 @@ describe("guard re-checks (§4.17)", () => {
     const b = await bind({ conversation_id: "C-16b", nest_id: n });
     setConv("C-16b", ["SA"]);
     await jsonRequest(app, "POST", `/surfaces/bindings/${b.data.binding.id}/recheck`, {}, alice.apiKey);
-    const res = await jsonRequest(app, "POST", `/surfaces/bindings/${b.data.binding.id}/resume`, {}, alice.apiKey);
+    const res = await jsonRequest(app, "POST", `/surfaces/bindings/${b.data.binding.id}/resume`, { reason: "test resume" }, alice.apiKey);
     expect(res.status).toBe(409);
   });
 
@@ -532,18 +703,7 @@ describe("guard re-checks (§4.17)", () => {
       await expectRecomputed("agent deleted");
     });
 
-    it("AC-GRD-17: outbound connector created / disabled / deleted", async () => {
-      await freshBinding();
-      const cr = await jsonRequest(app, "POST", `/nests/${n}/connectors`, { channel: "webhook", url: "https://example.com/h", events: ["*"] }, alice.apiKey);
-      await expectRecomputed("connector created");
-      const cid = cr.data.connector?.id ?? ((await S.db.getDb().get("SELECT id FROM connectors WHERE nest_id = ?", [n])) as any).id;
-      await jsonRequest(app, "PATCH", `/nests/${n}/connectors/${cid}`, { enabled: false }, alice.apiKey);
-      await expectRecomputed("connector disabled");
-      await jsonRequest(app, "PATCH", `/nests/${n}/connectors/${cid}`, { enabled: true }, alice.apiKey);
-      await expectRecomputed("connector enabled");
-      await jsonRequest(app, "DELETE", `/nests/${n}/connectors/${cid}`, undefined, alice.apiKey);
-      await expectRecomputed("connector deleted");
-    });
+    // Outbound connectors are not readers since po-1431, so a connector change needs no re-check.
 
     it("AC-GRD-17: identity link created / revoked", async () => {
       await freshBinding();
@@ -610,10 +770,10 @@ describe("binding state machine (§12): active | paused_guard | paused_by_member
     expect(view.data.binding.booted_at).toBeTruthy();
     expect("boot_reason" in view.data.binding).toBe(false);
     // re-bind refused while the booting member is present and hasn't consented
-    const resume = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, {}, alice.apiKey);
+    const resume = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, { reason: "test resume" }, alice.apiKey);
     expect(resume.status).toBe(409);
     await S.bindings.consentToReturn({ bindingId: id, surfaceUserId: "SC" });
-    const ok = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, {}, alice.apiKey);
+    const ok = await jsonRequest(app, "POST", `/surfaces/bindings/${id}/resume`, { reason: "test resume" }, alice.apiKey);
     expect(ok.status).toBe(200);
     expect(ok.data.binding.status).toBe("active");
   });
@@ -624,7 +784,7 @@ describe("binding state machine (§12): active | paused_guard | paused_by_member
     const b = await bind({ conversation_id: "C-BOOT2", nest_id: n });
     await S.bindings.bootBinding({ bindingId: b.data.binding.id, surfaceUserId: "SC" });
     setConv("C-BOOT2", ["SA"]);
-    const ok = await jsonRequest(app, "POST", `/surfaces/bindings/${b.data.binding.id}/resume`, {}, alice.apiKey);
+    const ok = await jsonRequest(app, "POST", `/surfaces/bindings/${b.data.binding.id}/resume`, { reason: "test resume" }, alice.apiKey);
     expect(ok.status).toBe(200);
   });
 
@@ -643,7 +803,7 @@ describe("binding state machine (§12): active | paused_guard | paused_by_member
     const n = await newNest(alice);
     setConv("C-DEL", ["SA"]);
     const b = await bind({ conversation_id: "C-DEL", nest_id: n });
-    const del = await jsonRequest(app, "DELETE", `/surfaces/bindings/${b.data.binding.id}`, undefined, alice.apiKey);
+    const del = await jsonRequest(app, "DELETE", `/surfaces/bindings/${b.data.binding.id}`, { reason: "test remove" }, alice.apiKey);
     expect(del.status).toBe(200);
     expect(del.data.binding.status).toBe("removed");
     expect(paused).toEqual([{ bindingId: b.data.binding.id, reason: "removed" }]);
@@ -733,5 +893,283 @@ describe("MCP parity for bindings", () => {
     const del = await mcp(`/nests/${n}/mcp`, "tools/call", { name: "context_surfaces_binding_delete", arguments: { binding_id: bid.id } }, alice.apiKey);
     expect(del.result?.isError).toBeFalsy();
     expect((await row(bid.id)).status).toBe("removed");
+  });
+});
+
+describe("po-1431: server webhook and nest connectors vs Slack binding", () => {
+  const SLACK = "https://hooks.slack.com/services/T/B/po1431";
+  const HOOK = "https://example.com/hook-po1431";
+  const SECRET = "Secret Plan Q3";
+  const posts: Array<{ url: string; body: string }> = [];
+  const sent = (url: string) => posts.filter((p) => p.url === url);
+
+  beforeAll(() => {
+    process.env.SLACK_WEBHOOK_URL = SLACK;
+    process.env.NOTIFY_DEBOUNCE_MS = "50";
+    vi.stubGlobal("fetch", async (url: unknown, init?: { body?: unknown }) => {
+      posts.push({ url: String(url), body: String(init?.body ?? "") });
+      return new Response("ok");
+    });
+  });
+  afterAll(() => {
+    delete process.env.SLACK_WEBHOOK_URL;
+    delete process.env.NOTIFY_DEBOUNCE_MS;
+    vi.unstubAllGlobals();
+  });
+  beforeEach(() => {
+    posts.length = 0;
+  });
+
+  /** A nest only Alice reads, with a webhook connector, optionally bound to a channel. */
+  async function nestWithConnector(bound: boolean, conv: string) {
+    const n = await newNest(alice);
+    const cr = await jsonRequest(app, "POST", `/nests/${n}/connectors`, { channel: "webhook", url: HOOK, events: ["*"] }, alice.apiKey);
+    expect(cr.status, JSON.stringify(cr.data)).toBeLessThan(300);
+    setConv(conv, ["SA"]);
+    let bindingId: string | null = null;
+    if (bound) {
+      const { createBindingWithListener } = await import("../src/surfaces/services/listener-service.js");
+      bindingId = (await createBindingWithListener({ actorUserId: alice.userId, installId, conversationId: conv, nestId: n })).binding.id;
+    }
+    return { n, bindingId };
+  }
+
+  it("AC 1: with SLACK_WEBHOOK_URL set, a nest whose readers are all in the channel can bind", async () => {
+    const n = await newNest(alice);
+    setConv("C-1431-A", ["SA"]);
+    const r = await jsonRequest(app, "POST", "/surfaces/bindings/preview", { install_id: installId, conversation_id: "C-1431-A", nest_id: n }, alice.apiKey);
+    expect(r.data.guard.capture_ok).toBe(true);
+    expect(r.data.guard.detail.non_user_principals).not.toContain("connector");
+  });
+
+  it("AC 3: a bound nest's event reaches the server webhook and its connector with no title, text or subject", async () => {
+    const { n } = await nestWithConnector(true, "C-1431-B");
+    const { dispatchEvent } = await import("../src/notify/dispatch.js");
+    await dispatchEvent({ kind: "run_failed", nestId: n, message: `Run of ${SECRET} failed`, subjectId: "nodes/secret-plan-q3", actor: alice.email });
+    await vi.waitFor(() => {
+      expect(sent(SLACK)).toHaveLength(1);
+      expect(sent(HOOK)).toHaveLength(1);
+    });
+    for (const p of [...sent(SLACK), ...sent(HOOK)]) {
+      expect(p.body).not.toMatch(/secret/i);
+      expect(p.body).toContain("open ContextNest");
+    }
+    const raw = JSON.parse(sent(HOOK)[0].body);
+    expect(raw.kind).toBe("run_failed");
+    expect(raw.subject_id).toBeNull();
+    expect(raw.actor).toBeNull();
+  });
+
+  it("AC 4: a bound nest's digest carries a count only", async () => {
+    const { n } = await nestWithConnector(true, "C-1431-C");
+    const { notifyNestEvent } = await import("../src/notify/notify.js");
+    await notifyNestEvent(n, `Alice approved ${SECRET}`);
+    await notifyNestEvent(n, `Bob requested review of ${SECRET}`);
+    await vi.waitFor(() => expect(sent(SLACK)).toHaveLength(1));
+    expect(sent(SLACK)[0].body).not.toMatch(/secret|alice|bob/i);
+    expect(sent(SLACK)[0].body).toMatch(/2 updates/);
+  });
+
+  it("AC 5: an unbound nest's messages are unchanged", async () => {
+    const { n } = await nestWithConnector(false, "C-1431-D");
+    const { dispatchEvent } = await import("../src/notify/dispatch.js");
+    await dispatchEvent({ kind: "run_failed", nestId: n, message: `Run of ${SECRET} failed`, subjectId: "nodes/secret-plan-q3" });
+    await vi.waitFor(() => {
+      expect(sent(SLACK)).toHaveLength(1);
+      expect(sent(HOOK)).toHaveLength(1);
+    });
+    expect(sent(SLACK)[0].body).toContain(SECRET);
+    expect(JSON.parse(sent(HOOK)[0].body).subject_id).toBe("nodes/secret-plan-q3");
+  });
+
+  it("AC 6: adding or removing the server webhook does not change a bound nest's readers or pause it", async () => {
+    const { n, bindingId } = await nestWithConnector(true, "C-1431-E");
+    const { effectiveReaders } = await import("../src/surfaces/services/readers.js");
+    const b = await row(bindingId!);
+    const opts = { listenerAgentNodeId: b.listener_agent_node_id, bindingId: b.id };
+    const withHook = (await effectiveReaders(n, opts)).fingerprint;
+    delete process.env.SLACK_WEBHOOK_URL;
+    try {
+      expect((await effectiveReaders(n, opts)).fingerprint).toBe(withHook);
+    } finally {
+      process.env.SLACK_WEBHOOK_URL = SLACK;
+    }
+    await S.bindings.recheckBinding(b.id);
+    expect((await row(b.id)).status).toBe("active");
+  });
+
+  it("AC 7: when the bound-nest lookup fails, the event is redacted (fail closed)", async () => {
+    const { n } = await nestWithConnector(false, "C-1431-F");
+    const { sealedTestHooks } = await import("../src/surfaces/sealed.js");
+    const { dispatchEvent } = await import("../src/notify/dispatch.js");
+    sealedTestHooks.failBound = true;
+    try {
+      await dispatchEvent({ kind: "run_failed", nestId: n, message: `Run of ${SECRET} failed` });
+      await vi.waitFor(() => expect(sent(SLACK)).toHaveLength(1));
+    } finally {
+      sealedTestHooks.failBound = false;
+    }
+    expect(sent(SLACK)[0].body).not.toMatch(/secret/i);
+  });
+});
+
+describe("po-1432: the preview names who blocks a pair and who can't read the nest", () => {
+  let erin: { userId: string; email: string };
+  beforeAll(async () => {
+    // A Community user with no Slack link and no Slack profile in the workspace.
+    erin = { userId: randomUUID(), email: "erin@surf.test" };
+    await S.db.getDb().run("INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, 'Erin', 'x')", [erin.userId, erin.email]);
+    fake.profiles.set("SX", { ...(await import("./surfaces-fake-connector.js")).profile("SX"), display_name: "Xavier" });
+  });
+
+  async function preview(conv: string, n: string, key = alice.apiKey) {
+    const r = await jsonRequest(app, "POST", "/surfaces/bindings/preview", { install_id: installId, conversation_id: conv, nest_id: n }, key);
+    expect(r.status, JSON.stringify(r.data)).toBe(200);
+    return r.data;
+  }
+
+  it("AC 1-3, 5: absent readers carry a reason; channel members who can't read are listed with or without an account", async () => {
+    const n = await newNest(alice);
+    await share(n, bob, "read");
+    const er = await jsonRequest(app, "POST", `/nests/${n}/collaborators`, { email: erin.email, permission: "read" }, alice.apiKey);
+    expect(er.status, JSON.stringify(er.data)).toBeLessThan(300);
+    setConv("C-1432-A", ["SA", "SC", "SX"]);
+    const p = await preview("C-1432-A", n);
+    expect(p.would_bind).toBe(false);
+    const absent = Object.fromEntries(p.people.absent_readers.map((r: any) => [r.email, r]));
+    expect(absent[bob.email]).toMatchObject({ user_id: bob.userId, name: "Bob", reason: "not_in_channel" });
+    expect(absent[erin.email]).toMatchObject({ user_id: erin.userId, name: "Erin", reason: "no_slack_link" });
+    expect(absent[alice.email]).toBeUndefined();
+    const members = Object.fromEntries(p.people.members_not_readers.map((m: any) => [m.surface_user_id, m]));
+    expect(members.SC).toMatchObject({ community_user_id: carol.userId, name: "Carol", email: carol.email });
+    expect(members.SX).toMatchObject({ community_user_id: null, name: "Xavier", email: null });
+    expect(members.SA).toBeUndefined();
+  });
+
+  it("po-1445: an unmatched member carries the email Slack confirmed; an unconfirmed one carries none; a matched one never", async () => {
+    const { profile } = await import("./surfaces-fake-connector.js");
+    fake.profiles.set("SX", profile("SX", { display_name: "Xavier", email: "xavier@elsewhere.test" }));
+    fake.profiles.set("SY", profile("SY", { display_name: "Yusuf", email: "yusuf@elsewhere.test", email_confirmed: false }));
+    const { getDb } = S.db;
+    await getDb().run("DELETE FROM surface_users_cache WHERE surface_user_id IN ('SX', 'SY')");
+    const n = await newNest(alice);
+    setConv("C-1445-A", ["SA", "SC", "SX", "SY"]);
+    const p = await preview("C-1445-A", n);
+    const members = Object.fromEntries(p.people.members_not_readers.map((m: any) => [m.surface_user_id, m]));
+    expect(members.SX).toMatchObject({ community_user_id: null, slack_email: "xavier@elsewhere.test" });
+    expect(members.SY).toMatchObject({ community_user_id: null, slack_email: null });
+    expect(members.SC).toMatchObject({ community_user_id: carol.userId, slack_email: null });
+  });
+
+  it("QA: another app's bot that turns surface_ok off is named, so the count matches the names", async () => {
+    const { profile } = await import("./surfaces-fake-connector.js");
+    fake.profiles.set("SBOT", profile("SBOT", { display_name: "Zapier" }));
+    const n = await newNest(alice);
+    setConv("C-1432-BOT", ["SA", "SBOT"]);
+    fake.conversations.get("C-1432-BOT")!.members[1].is_bot = true;
+    const p = await preview("C-1432-BOT", n);
+    expect(p.guard.surface_ok).toBe(false);
+    expect(p.guard.detail.members_not_readers).toBe(1);
+    expect(p.people.members_not_readers).toEqual([expect.objectContaining({ surface_user_id: "SBOT", name: "Zapier", community_user_id: null, is_bot: true })]);
+  });
+
+  it("po-1467: a reader whose email a channel member has, but whose link is refused, is not_linked with the reason; never not_in_channel", async () => {
+    const { profile } = await import("./surfaces-fake-connector.js");
+    // Same email in Community and Slack, but the Community email is not verified.
+    const hank = { userId: randomUUID(), email: "hank@surf.test" };
+    await S.db.getDb().run("INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, 'Hank', 'x')", [hank.userId, hank.email]);
+    fake.profiles.set("SH", profile("SH", { display_name: "Hank F", email: "Hank@surf.test" }));
+    await S.db.getDb().run("DELETE FROM surface_users_cache WHERE surface_user_id = 'SH'");
+    const n = await newNest(alice);
+    const r = await jsonRequest(app, "POST", `/nests/${n}/collaborators`, { email: hank.email, permission: "read" }, alice.apiKey);
+    expect(r.status, JSON.stringify(r.data)).toBeLessThan(300);
+    setConv("C-1467-A", ["SA", "SH"]);
+    const p = await preview("C-1467-A", n);
+    const absent = Object.fromEntries(p.people.absent_readers.map((a: any) => [a.email, a]));
+    expect(absent[hank.email]).toMatchObject({ user_id: hank.userId, reason: "not_linked", match_reason: "unverified" });
+  });
+
+  it("shared server: a same-email reader is refused as org_domain until the connection's home nest lists the domain", async () => {
+    const { profile } = await import("./surfaces-fake-connector.js");
+    const ivy = { userId: randomUUID(), email: "ivy@surf.test" };
+    await S.db
+      .getDb()
+      .run("INSERT INTO users (id, email, name, password_hash, email_verified_at) VALUES (?, ?, 'Ivy', 'x', ?)", [ivy.userId, ivy.email, new Date().toISOString()]);
+    fake.profiles.set("SIVY", profile("SIVY", { display_name: "Ivy", email: ivy.email }));
+    const n = await newNest(alice);
+    expect((await jsonRequest(app, "POST", `/nests/${n}/collaborators`, { email: ivy.email, permission: "read" }, alice.apiKey)).status).toBeLessThan(300);
+    setConv("C-SHARED", ["SA", "SIVY"]);
+    const home = (await S.db.getDb().get("SELECT home_nest_id FROM surface_installs WHERE id = ?", [installId])) as { home_nest_id: string | null };
+    const before = process.env.SHARED_DEPLOYMENT;
+    process.env.SHARED_DEPLOYMENT = "true";
+    await S.db.getDb().run("UPDATE surface_installs SET home_nest_id = ? WHERE id = ?", [n, installId]);
+    try {
+      const find = async () => (await preview("C-SHARED", n)).people.absent_readers.find((a: any) => a.email === ivy.email);
+      expect(await find()).toMatchObject({ reason: "not_linked", match_reason: "org_domain" });
+      // The setting an admin saves in Setup; the nest stays private.
+      const saved = await jsonRequest(app, "PATCH", `/nests/${n}/settings`, { org_domains: ["surf.test"] }, alice.apiKey);
+      expect(saved.status, JSON.stringify(saved.data)).toBe(200);
+      expect(await find()).toBeUndefined();
+    } finally {
+      if (before === undefined) delete process.env.SHARED_DEPLOYMENT;
+      else process.env.SHARED_DEPLOYMENT = before;
+      await S.db.getDb().run("UPDATE surface_installs SET home_nest_id = ? WHERE id = ?", [home.home_nest_id, installId]);
+    }
+  });
+
+  it("AC 6: a world-readable nest names its cause", async () => {
+    const pub = await newNest(alice);
+    await jsonRequest(app, "PATCH", `/nests/${pub}/visibility`, { visibility: "public", acknowledge_public: true }, alice.apiKey);
+    const linked = await newNest(alice);
+    await S.db.getDb().run(
+      "INSERT INTO publish (id, nest_id, node_id, slug, access_mode, created_by, created_at) VALUES (?, ?, 'nodes/x', ?, 'public', ?, '2026-10-30T00:00:00.000Z')",
+      [randomUUID(), linked, `s-${randomUUID()}`, alice.userId],
+    );
+    setConv("C-1432-B", ["SA"]);
+    expect((await preview("C-1432-B", pub)).people.universe_cause).toBe("public");
+    expect((await preview("C-1432-B", linked)).people.universe_cause).toBe("link");
+    expect((await preview("C-1432-B", await newNest(alice))).people.universe_cause).toBeNull();
+  });
+
+  it("AC 7: the MCP preview returns the same people block", async () => {
+    const n = await newNest(alice);
+    await share(n, bob, "read");
+    setConv("C-1432-C", ["SA", "SC"]);
+    const rest = await preview("C-1432-C", n);
+    const out = await mcp(
+      `/nests/${n}/mcp`,
+      "tools/call",
+      { name: "context_surfaces_binding_preview", arguments: { install_id: installId, conversation_id: "C-1432-C" } },
+      alice.apiKey,
+    );
+    expect(out.result?.isError).toBeFalsy();
+    expect(rest.people.absent_readers.map((r: any) => r.email)).toEqual([bob.email]);
+    expect(out.result.structuredContent.people).toEqual(rest.people);
+  });
+
+  it("AC 8: a stored binding and its guard detail carry no names", async () => {
+    const n = await newNest(alice);
+    setConv("C-1432-D", ["SA", "SC"]);
+    const r = await bind({ conversation_id: "C-1432-D", nest_id: n });
+    expect(r.status, JSON.stringify(r.data)).toBe(201);
+    const stored = JSON.stringify(await row(r.data.binding.id)) + JSON.stringify(r.data.binding);
+    expect(stored).not.toMatch(/carol|Carol|people/);
+  });
+});
+
+describe("po-1432 review: the people lists are capped", () => {
+  it("names at most 20 absent readers while guard.detail keeps the full count", async () => {
+    const n = await newNest(alice);
+    for (let i = 0; i < 22; i++) {
+      const id = randomUUID();
+      const email = `cap-${i}-${id.slice(0, 6)}@surf.test`;
+      await S.db.getDb().run("INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, 'x')", [id, email, `Cap ${i}`]);
+      const r = await jsonRequest(app, "POST", `/nests/${n}/collaborators`, { email, permission: "read" }, alice.apiKey);
+      expect(r.status, JSON.stringify(r.data)).toBeLessThan(300);
+    }
+    setConv("C-1432-CAP", ["SA"]);
+    const r = await jsonRequest(app, "POST", "/surfaces/bindings/preview", { install_id: installId, conversation_id: "C-1432-CAP", nest_id: n }, alice.apiKey);
+    expect(r.data.guard.detail.readers_absent).toBe(22);
+    expect(r.data.people.absent_readers).toHaveLength(20);
   });
 });

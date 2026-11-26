@@ -1,6 +1,6 @@
 import type { DatabaseAdapter } from "./adapter.js";
 import { ANON_USER_ID } from "../shared/constants.js";
-import { surfacesS1Ddl } from "../surfaces/schema-ddl.js";
+import { surfacesS1Ddl, surfacesBindingHistoryDdl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterPostgres } from "../surfaces/schema-ddl-s2b.js";
 import { surfacesS3Ddl, surfacesS3AlterPostgres, seedItemKindsPostgres } from "../surfaces/schema-ddl-s3.js";
@@ -127,7 +127,9 @@ export const HISTORICAL_MIGRATIONS = [
   "098_team_chat_c2",
   "099_agent_profiles",
   "100_hired_agents",
-  "101_seed_item_kinds",
+  "101_surface_binding_history",
+  "102_node_changes",
+  "103_seed_item_kinds",
 ];
 
 /** Migration ids whose Postgres backfill must run once, not on every boot. */
@@ -1578,7 +1580,26 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
   `);
 
-  // Migration 101 parity: a seed also writes boards, channels and task stages
+  // Migration 101 parity: Surfaces binding history (po-1437).
+  await db.exec(surfacesBindingHistoryDdl(NOW));
+
+  // Migration 102 parity: document moves and tag changes (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS node_changes (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('moved', 'tags_changed')),
+      actor TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      client_json TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_node_changes_node
+      ON node_changes(nest_id, node_id, created_at);
+  `);
+
+  // Migration 103 parity: a seed also writes boards, channels and task stages
   // (PO-1411). A fresh table already has the wider CHECK; an older one swaps it once.
   await db.exec(seedItemKindsPostgres());
 

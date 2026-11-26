@@ -15,13 +15,13 @@
  */
 /**
  * What a seed can write (PO-1411 adds a recipe's board, channel and task
- * stages to the S3 four). Widening this list needs migration 101 below.
+ * stages to the S3 four). Widening this list needs migration 103 below.
  */
 export const SEED_ITEM_KINDS = ["folder", "node", "context", "definition", "board", "channel", "task_rules"] as const;
 const SEED_ITEM_KINDS_SQL = SEED_ITEM_KINDS.map((k) => `'${k}'`).join(", ");
 
 /**
- * Migration 101 (SQLite): rebuild surface_seed_items with the wider kind
+ * Migration 103 (SQLite): rebuild surface_seed_items with the wider kind
  * CHECK when the table still has the S3 one. SQLite can't alter a CHECK.
  */
 export function seedItemKindsRebuildSqlite(now: string): string {
@@ -45,7 +45,7 @@ export function seedItemKindsRebuildSqlite(now: string): string {
   `;
 }
 
-/** Migration 101 (Postgres): swap the kind CHECK for the wider one, once. */
+/** Migration 103 (Postgres): swap the kind CHECK for the wider one, once. */
 export function seedItemKindsPostgres(): string {
   return `
     DO $$ BEGIN

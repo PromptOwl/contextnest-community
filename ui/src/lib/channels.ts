@@ -202,3 +202,32 @@ export function mentionNotice(outcomes: PostedMention[] | undefined): string | n
     );
   return parts.length ? parts.join(" ") : null;
 }
+
+/**
+ * One "what is new" pull per timeline at a time (PO-1200). A pull asked for mid-run on the same timeline re-runs it once
+ * after; another timeline runs on its own. `start` returns null when busy; `shouldRepeat` reads and clears the re-run mark.
+ */
+export class PullGuard {
+  private runs = new Map<string, { again: boolean }>();
+  start(key: string): { again: boolean } | null {
+    const running = this.runs.get(key);
+    if (running) {
+      running.again = true;
+      return null;
+    }
+    const mark = { again: false };
+    this.runs.set(key, mark);
+    return mark;
+  }
+  shouldRepeat(mark: { again: boolean }): boolean {
+    const again = mark.again;
+    mark.again = false;
+    return again;
+  }
+  finish(key: string): void {
+    this.runs.delete(key);
+  }
+  running(key: string): boolean {
+    return this.runs.has(key);
+  }
+}
