@@ -2,9 +2,14 @@ import { describe, it, expect } from "vitest";
 import { saveDestination } from "./document-save-nav";
 
 describe("saveDestination", () => {
-  it("returns to the nest when a brand-new document is created", () => {
+  it("EX-1 a brand-new document opens once it is created", () => {
+    expect(saveDestination("new", { savedId: "nodes/event" })).toBe("document");
+    expect(saveDestination("new", { savedId: "nodes/event", publishedDraft: true, hasReturnTo: true })).toBe("document");
+  });
+
+  it("a create that returned no id still lands somewhere: the nest", () => {
     expect(saveDestination("new")).toBe("nest");
-    expect(saveDestination("new", { publishedDraft: true, hasReturnTo: true })).toBe("nest");
+    expect(saveDestination("new", { savedId: "" })).toBe("nest");
   });
 
   it("stays in the editor when an existing document is saved", () => {
