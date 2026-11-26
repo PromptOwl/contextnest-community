@@ -131,6 +131,7 @@ import {
   type TaskFields,
   type TaskFieldsPatch,
 } from "./task-fields.js";
+import { moveDetail, recordNodeChange, tagChangeDetail } from "./node-changes.js";
 import { openBlockerCounts } from "./relations.js";
 import {
   addComputedFields,
@@ -3582,6 +3583,19 @@ export async function updateNode(
         responseVersion = publishedVersion;
       }
 
+      const retagged = patch.tags ? tagChangeDetail(priorTags, currentTags) : null;
+      if (retagged) {
+        // The write already landed: a missing history line must not fail it.
+        await recordNodeChange(getDb(), {
+          nestId,
+          nodeId,
+          kind: "tags_changed",
+          actor: userEmail,
+          detail: retagged,
+          client: patch.client,
+        }).catch((err) => console.error("[node-changes] tag change not recorded", nestId, nodeId, err));
+      }
+
       const nextAssignee = taskFieldsOf(node.frontmatter.metadata).assignee ?? null;
       // Only a published edit notifies: a drafted assignment may be rejected.
       // Approving that draft later doesn't notify either (known gap).
@@ -3694,6 +3708,8 @@ export const NODE_KEYED_TABLES = [
   ["metacognition_agents", "node_id"],
   // Agent/person interactions logged on a task (migration 064).
   ["task_activity", "node_id"],
+  // Who moved it and who changed its tags (migration 102).
+  ["node_changes", "node_id"],
   // Document pins (CU-wdqcq02crw, migration 071) — editorial and personal. A
   // delete takes them with it (no pin on a document that is gone, or on the
   // next one to take its id); a move carries them along.
@@ -3909,6 +3925,13 @@ async function moveNodeInner(
     await db.transaction(async (tx) => {
       await rewriteNodeKeyedRows(tx, nestId, nodeId, newId);
       await rewriteNodeKeyedRows(tx, nestId, oldDerived, newDerived);
+      await recordNodeChange(tx, {
+        nestId,
+        nodeId: newId,
+        kind: "moved",
+        actor: userEmail,
+        detail: moveDetail(nodeId, newId),
+      });
       await tx.run(
         "UPDATE runs SET agent_node = ? WHERE nest_id = ? AND agent_node = ?",
         [newId, nestId, nodeId],
@@ -4104,6 +4127,17 @@ async function assertNotArchived(nestId: string, nodeId: string): Promise<void> 
 /** Archiving is a steward's call: nest owners, admins and reviewers of this node. */
 export async function canArchiveNode(nestId: string, nodeId: string, userEmail: string): Promise<boolean> {
   return canApproveWith(await resolveUserRoles(nestId, userEmail, { nodeId }));
+}
+
+/** Archived, and not this caller's to restore: reads by id answer as a miss. */
+export async function isArchivedForCaller(nestId: string, nodeId: string, userEmail: string): Promise<boolean> {
+  let node: ContextNode;
+  try {
+    node = await (await engineCache.get(nestId)).storage.readDocument(nodeId);
+  } catch {
+    return false; // no document: each read answers that its own way
+  }
+  return isArchived(node) && !(await canArchiveNode(nestId, nodeId, userEmail));
 }
 
 /**

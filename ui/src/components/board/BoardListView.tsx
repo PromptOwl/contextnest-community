@@ -46,7 +46,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import * as api from "../../lib/api";
-import { UNCATEGORIZED, namespaceKey, type BoardColumn, type BoardNode, type DimensionKind } from "../../lib/board-dimensions";
+import { UNCATEGORIZED, isPersonDimension, namespaceKey, type BoardColumn, type BoardNode, type DimensionKind } from "../../lib/board-dimensions";
 import {
   formatDue,
   inDoneFolder,
@@ -87,6 +87,7 @@ const DIMENSION_NAMES: Record<DimensionKind, string> = {
   assignee: "Assignee",
   priority: "Priority",
   field: "Field",
+  creator: "Column",
 };
 
 interface Props {
@@ -344,12 +345,12 @@ export function BoardListView({
           <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground" title={label}>
             {dimension === "priority" ? (
               <PriorityIcon priority={keys[0] === UNCATEGORIZED ? undefined : keys[0]} />
-            ) : dimension === "assignee" ? null : (
+            ) : isPersonDimension(dimension) ? null : (
               <span
                 className={`h-2 w-2 shrink-0 rounded-full ${isDone ? "bg-emerald-500" : keys[0] === UNCATEGORIZED ? "border border-muted-foreground/50" : "bg-muted-foreground/40"}`}
               />
             )}
-            <span className="truncate">{dimension === "assignee" && keys[0] !== UNCATEGORIZED ? personLabel(keys[0]!) : label}</span>
+            <span className="truncate">{isPersonDimension(dimension) && keys[0] !== UNCATEGORIZED ? personLabel(keys[0]!) : label}</span>
           </span>
         );
       }
@@ -358,6 +359,14 @@ export function BoardListView({
           <span className="flex min-w-0 items-center gap-1.5" title={n.assignee}>
             <Avatar email={n.assignee} size="sm" />
             <span className="truncate text-muted-foreground">{shortPerson(n.assignee)}</span>
+          </span>
+        ) : (
+          <span className="text-muted-foreground/50">—</span>
+        );
+      case "creator":
+        return n.author ? (
+          <span className="truncate text-muted-foreground" title={n.author}>
+            {shortPerson(n.author)}
           </span>
         ) : (
           <span className="text-muted-foreground/50">—</span>
@@ -500,13 +509,13 @@ export function BoardListView({
                       className="flex h-full items-center gap-2 px-3 text-left text-sm font-medium"
                     >
                       <ChevronDown className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${r.collapsed ? "-rotate-90" : ""}`} />
-                      {dimension === "assignee" && r.key !== UNCATEGORIZED && <Avatar email={r.key} size="sm" />}
+                      {isPersonDimension(dimension) && r.key !== UNCATEGORIZED && <Avatar email={r.key} size="sm" />}
                       {dimension === "priority" && <PriorityIcon priority={r.key === UNCATEGORIZED ? undefined : r.key} />}
                       {dimension === "tag" && doneTags.includes(r.key.toLowerCase()) && (
                         <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
                       )}
                       <span className={r.key === UNCATEGORIZED ? "text-muted-foreground" : ""}>
-                        {dimension === "assignee" && r.key !== UNCATEGORIZED ? personLabel(r.key) : r.label}
+                        {isPersonDimension(dimension) && r.key !== UNCATEGORIZED ? personLabel(r.key) : r.label}
                       </span>
                       <span className="text-xs font-normal text-muted-foreground tabular-nums">{r.count}</span>
                     </button>
@@ -515,7 +524,7 @@ export function BoardListView({
                         type="button"
                         onClick={() => onAddTask(r.key)}
                         className="flex h-full items-center gap-1.5 px-3 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
-                        aria-label={`Add task to ${dimension === "assignee" && r.key !== UNCATEGORIZED ? personLabel(r.key) : r.label}`}
+                        aria-label={`Add task to ${isPersonDimension(dimension) && r.key !== UNCATEGORIZED ? personLabel(r.key) : r.label}`}
                         data-testid={`list-add-task-${r.key}`}
                       >
                         <Plus className="h-3.5 w-3.5" /> Add task
@@ -576,7 +585,7 @@ export function BoardListView({
                   </DropdownMenuLabel>
                   {moveTargets.map((c) => {
                     const done = dimension === "tag" && doneTags.includes(c.key.toLowerCase());
-                    const label = dimension === "assignee" && c.key !== UNCATEGORIZED ? personLabel(c.key) : c.label;
+                    const label = isPersonDimension(dimension) && c.key !== UNCATEGORIZED ? personLabel(c.key) : c.label;
                     return (
                       <DropdownMenuItem
                         key={c.key}
@@ -591,7 +600,7 @@ export function BoardListView({
                       >
                         {dimension === "priority" ? (
                           <PriorityIcon priority={c.key === UNCATEGORIZED ? undefined : c.key} />
-                        ) : dimension === "assignee" && c.key !== UNCATEGORIZED ? (
+                        ) : isPersonDimension(dimension) && c.key !== UNCATEGORIZED ? (
                           <Avatar email={c.key} size="sm" />
                         ) : done ? (
                           <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />

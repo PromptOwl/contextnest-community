@@ -10,7 +10,7 @@ import {
   dismissNotification,
   visibleNotifications,
 } from "../../../lib/notifications-preview";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../../../lib/queries";
 import { useAuth } from "../../../auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
@@ -31,6 +31,7 @@ import { localToday } from "../../../lib/board-tasks";
 import { MentionRows } from "../../../components/my-work/MentionRows";
 import { keyOfConversationId } from "../../../lib/chat-live";
 import { AssignedTasks } from "../../../components/my-work/AssignedTasks";
+import { emptyPageStepBack, mergeLiveWork } from "../../../lib/my-work-inbox";
 import { openTasks, type TaskStatusFilter } from "../../../lib/my-work-tasks";
 
 type WorkTab = "all" | "approvals" | "tasks" | "mentions" | "notifications" | "waiting";
@@ -110,10 +111,30 @@ export default function MyWorkPage() {
     window.addEventListener("my-work:home", home);
     return () => window.removeEventListener("my-work:home", home);
   }, []);
+  // The page on screen, watched: re-read on focus and every half minute, so a
+  // decision made elsewhere leaves the list and its counts.
+  const { data: liveWork } = useQuery(
+    reads.myWork({ offset: rawWork.pagination?.offset || undefined, doneTasks: withDone || undefined }),
+  );
+  useEffect(() => {
+    if (!liveWork) return;
+    setWork((prev) => mergeLiveWork(prev, liveWork));
+    pruneSelection(liveWork.items);
+    const back = emptyPageStepBack(liveWork);
+    if (back !== null) void goToWorkPage(back);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveWork]);
+  // A selection only means anything against the rows on screen. Carrying it
+  // across a page turn (or over rows that just got resolved) left the bar
+  // counting items the batch would then find nothing to act on.
+  const pruneSelection = (items: api.WorkItem[]) => {
+    const onPage = new Set(items.map((w) => `${w.nest_id}:${w.node_id}`));
+    setWorkSelected((prev) => new Set([...prev].filter((key) => onPage.has(key))));
+  };
   const goToWorkPage = async (offset: number) => {
     setLoadingMoreWork(true);
     try {
-      const next = await qc.fetchQuery(reads.myWork({ offset, doneTasks: withDone || undefined }));
+      const next = await qc.fetchQuery(reads.myWork({ offset: offset || undefined, doneTasks: withDone || undefined }));
       setWork((prev) => ({
         items: next.items,
         waiting: next.waiting,
@@ -124,13 +145,7 @@ export default function MyWorkPage() {
         mentions: prev.mentions,
         mentions_pagination: prev.mentions_pagination,
       }));
-      // A selection only means anything against the rows on screen. Carrying
-      // it across a page turn (or over rows that just got resolved) left the
-      // bar counting items the batch would then find nothing to act on.
-      const onPage = new Set(next.items.map((w) => `${w.nest_id}:${w.node_id}`));
-      setWorkSelected(
-        (prev) => new Set([...prev].filter((key) => onPage.has(key))),
-      );
+      pruneSelection(next.items);
     } catch (e) {
       console.error("[Dashboard] goToWorkPage failed", e);
     } finally {

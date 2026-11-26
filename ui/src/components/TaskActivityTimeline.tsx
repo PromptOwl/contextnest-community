@@ -1,7 +1,8 @@
 /**
  * A task's logged interactions — what agents (and people) registered with
  * context_task_log / `ctx task log`: who, through which agent and key, the
- * status they reported, and their note. Newest first. Renders nothing until
+ * status they reported, and their note — with its moves and tag changes.
+ * Newest first. Renders nothing until
  * something has been logged, so a fresh task stays quiet.
  */
 import { useQuery } from "@tanstack/react-query";

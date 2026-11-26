@@ -101,6 +101,7 @@ import {
   archiveNode,
   unarchiveNode,
   canArchiveNode,
+  isArchivedForCaller,
   isIdUnderFolder,
   isDerivedAnnotationsNode,
   fieldsOfRaw,
@@ -3609,7 +3610,11 @@ async function runTool(
     case "context_remove_relation": {
       const target = await resolveTargetNode(storage, args);
       const caller = { nestId, userId: ctx.userId, userEmail };
-      if (typeof target === "string" || !(await callerCanRead(caller, target.id))) {
+      if (
+        typeof target === "string" ||
+        !(await callerCanRead(caller, target.id)) ||
+        (toolName === "context_relations" && (await isArchivedForCaller(nestId, target.id, userEmail)))
+      ) {
         return toolError(
           typeof target === "string" ? target : `Node not found: ${args.id || args.title}`,
           "DOCUMENT_NOT_FOUND",
@@ -3679,7 +3684,10 @@ async function runTool(
       // document is not yet approved. Public readers remain blocked by
       // canReadNode until approval. This preserves privacy while letting
       // collaborators address feedback and resubmit.
-      if (!(await canReadNode(nestId, node.id, ctx.userId, userEmail))) {
+      if (
+        !(await canReadNode(nestId, node.id, ctx.userId, userEmail)) ||
+        (await isArchivedForCaller(nestId, node.id, userEmail))
+      ) {
         return oneThread ? toolError("Thread not found", "DOCUMENT_NOT_FOUND") : `Node not found: ${args.title || args.id}`;
       }
       // A channel or a conversation while the nest's chat is off (C2): the
@@ -5220,7 +5228,10 @@ async function runTool(
       // Version history is a node read, gated like REST GET .../versions: a
       // caller who cannot open the node does not get its editors, statuses and
       // change notes either. Answered as a miss, so it is no existence oracle.
-      if (!(await canReadNode(ctx.nestId, node.id, ctx.userId, ctx.userEmail))) {
+      if (
+        !(await canReadNode(ctx.nestId, node.id, ctx.userId, ctx.userEmail)) ||
+        (await isArchivedForCaller(ctx.nestId, node.id, ctx.userEmail))
+      ) {
         return toolError(
           `Node not found: ${args.id ?? args.title}`,
           "DOCUMENT_NOT_FOUND",

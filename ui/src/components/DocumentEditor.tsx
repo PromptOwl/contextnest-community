@@ -15,6 +15,7 @@ import { SuggestDialog } from "./OrgContribution";
 import { invalidateForPath, keys, reads, useNestMeta, useNestSettings, useNodeStewards } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { canSaveTagsAlone, saveOutcome } from "../lib/save-outcome";
+import { stripLeadingTitle } from "../lib/reader";
 import { setNavGuard, bypassNavGuard, dropParkedEntries } from "../lib/nav-guard";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { documentLink } from "../lib/nest-url";
@@ -4316,8 +4317,10 @@ export function DocumentEditor({
                                same tokens the editor's code blocks use. */
                             <CodeHighlight code={content} data-testid="tool-source-view" />
                           ) : (
+                            // The title bar is right above: a first heading that
+                            // repeats it is not shown again. The body keeps it.
                             <DocumentViewer
-                              content={content}
+                              content={stripLeadingTitle(content, title)}
                               onWikiLinkClick={(title, displayText) =>
                                 handleWikiLinkClick(title, null, displayText)
                               }

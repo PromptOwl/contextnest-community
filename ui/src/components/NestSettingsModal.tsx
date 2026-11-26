@@ -34,7 +34,6 @@ import {
 import * as api from "../lib/api";
 import { SystemsPanel } from "./nest/SystemsPanel";
 import { AgentWebhooksPanel } from "./nest/AgentWebhooksPanel";
-import { NestChatPanel } from "./nest/NestChatPanel";
 
 interface NestSettingsModalProps {
   nestId: string;
@@ -714,8 +713,6 @@ export function NestSettingsModal({
           )}
 
           {/* Acts on its own (each change saves immediately), not via Save. */}
-          {/* Team chat (C2/C3): the nest's own switch and my default level. */}
-          <NestChatPanel nestId={nestId} canManage={canManageStewardship} />
           {canManageStewardship && <SystemsPanel nestId={nestId} />}
           {canManageStewardship && <AgentWebhooksPanel nestId={nestId} />}
         </div>

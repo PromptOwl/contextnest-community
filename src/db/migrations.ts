@@ -2849,6 +2849,26 @@ export function runMigrations(db: Database.Database): void {
     db.exec(surfacesBindingHistoryDdl("(datetime('now'))"));
     recordMigration("101_surface_binding_history");
   }
+
+  // 102: who moved a document and who changed its tags (po-1400). Nothing to
+  //   backfill: earlier moves were not recorded anywhere.
+  if (!hasMigration("102_node_changes")) {
+    db.exec(`
+    CREATE TABLE IF NOT EXISTS node_changes (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('moved', 'tags_changed')),
+      actor TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      client_json TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_node_changes_node
+      ON node_changes(nest_id, node_id, created_at);
+    `);
+    recordMigration("102_node_changes");
+  }
 }
 
 /**

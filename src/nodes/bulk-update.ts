@@ -209,6 +209,8 @@ async function columnOp(nestId: string, userId: string, boardId: string, column:
       throw new ValidationError(
         "Status moves through review, not the board — submit or approve the documents instead.",
       );
+    case "creator":
+      throw new ValidationError("Who created a document doesn't change — a Created by board can't be a move target.");
     case "folder":
       throw new ValidationError("Folder boards move documents between folders — use context_move per document.");
     case "field":

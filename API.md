@@ -914,7 +914,7 @@ Query: `sort` = `rank` (board card order, default) · `title` · `status` · `as
 
 **DELETE** `/nests/:nestId/boards/:boardId` (write+) — the creator, or a nest owner/admin → `{ "deleted": true }`.
 
-Limits (`400` when exceeded): 100 boards per nest; `name` ≤ 80 characters; config ≤ 256 KB; ≤ 500 layout/rank keys; ≤ 2000 ids per list, each ≤ 600 characters; `config.dimension` ∈ `folder` / `status` / `tag` / `assignee` / `priority` / `field`. A body that isn't a JSON object → `400`. Boards are deleted with their nest.
+Limits (`400` when exceeded): 100 boards per nest; `name` ≤ 80 characters; config ≤ 256 KB; ≤ 500 layout/rank keys; ≤ 2000 ids per list, each ≤ 600 characters; `config.dimension` ∈ `folder` / `status` / `tag` / `assignee` / `priority` / `field` / `creator`. A body that isn't a JSON object → `400`. Boards are deleted with their nest.
 
 Custom-field boards: `"dimension": "field"` with `"fieldKey": "severity"` makes the field's values the columns (layout key `field:severity`); `"swimlane": "field"` with `"swimlaneField"` makes them lanes; `"filterFields": { "severity": "high", "blocked": "true" }` keeps only matching cards (same matching as the node list's `field.<key>` filter). Keys must look like field keys; a board naming a field that was later deleted still loads.
 
@@ -1172,7 +1172,7 @@ Sharing a team whose members carry a governance role (`viewer`/`editor`) turns `
 
 Auth is the shared session/key auth. Management is gated by the caller's role on the team (the server/license admin may manage any team): **add people** = editor/admin members + owner (escalation-capped — can't grant above your own role); **rename / change-role / remove** = admin members + owner; **delete** = owner only. Unregistered member emails mint a placeholder user (`is_invited = 1`), same as collaborator/steward invites.
 
-- **POST `/teams`** — `{ "name": "Platform" }` → `201 { team }`. Any user may create a team (they become its owner).
+- **POST `/teams`** — `{ "name": "Platform" }` → `201 { team }`. Any user may create a team (they become its owner). A name that another team has (any case) → `409`; on a shared deployment only the owner's own teams count. `PATCH /teams/:teamId` applies the same rule. An import keeps its upstream name.
 - **GET `/teams`** — the teams the caller can see → `{ teams: [...] }`. On a shared deployment (`SHARED_DEPLOYMENT` on) that is the teams the caller owns **or is a member of**; on a single-organization server it is **every team on the server**, and any signed-in user may also read `GET /teams/:teamId`. Seeing a team never grants managing it. Each member is enriched with `registered` (real account vs invited placeholder) and the team with `owner_email`.
 - **GET `/teams/:teamId`** — owner, a member, or the server admin may view → `{ team: { id, name, owner_id, owner_email, members: [{ userId, email, role, registered }], ... } }`.
 - **PATCH `/teams/:teamId`** — `{ "name": "..." }` rename (admin/owner). Also refreshes the cached `teamName` in every nest that shares this team.
@@ -1818,7 +1818,7 @@ Query: `?node=<nodeId>` **or** `?folder=<path>` (neither = the whole nest), `&ty
 
 The **admin activity log** for one document, one folder, or the nest: who changed, reviewed, commented on, deleted, read, retrieved or exported it, newest first. Owner, nest admin, or server admin only (the same rule as `/trace`); everyone else gets `403`. `400` for `node` and `folder` together, a traversal id or folder, or an unknown `type`.
 
-It merges what the server records: versions (`created`, `edited`, `restored`, with the agent from the write's `client`), reviews (`review_requested`, `approved`, `rejected`, `review_cancelled`), comments (`commented`, `comment_resolved`), deletions (`deleted`), and document access, which leaves no version (`read`, `retrieved`, `exported`).
+It merges what the server records: versions (`created`, `edited`, `restored`, with the agent from the write's `client`), reviews (`review_requested`, `approved`, `rejected`, `review_cancelled`), comments (`commented`, `comment_resolved`), deletions (`deleted`), moves and tag changes (`moved`, `tags_changed`: `detail` is `"todo → doing"`, `"stage:backlog → stage:done"`), and document access, which leaves no version (`read`, `retrieved`, `exported`).
 
 Access is recorded when a document is opened (`GET …/nodes/:id`, a historical version via `GET …/nodes/:id/versions/:version`, MCP `context_get`), returned by a search, query, table query or context call (`/search`, `/query`, `/table-query`, `/context` incl. Hootie — attributed to agent `hootie` — MCP `context_query` / `context_search` / `context_table_query` / `context_resolve`), or exported. Read and retrieval rows carry `version` — **the version the caller was served** — wherever the surface returns one known version: under stewardship an agent is served (and the row records) the approved version, not a newer draft; otherwise the current version. With the versioned history (`GET …/versions/:version`) that is enough to rebuild exactly what an agent saw. Exports and REST `/search` / `/query` / `/context` rows carry no version. Recording is on by default and can be turned off per nest (`access_log_enabled`, owner only); only document ids and versions are stored, never content. A whole-nest export is one row with `nodeId: null` and appears in the nest's and folders' logs, and in the log of every document that existed at the time (not documents created afterwards). `detail` names how a document was accessed (`search`, `context`, `context_get`, `markdown export (12 documents)`); **what the caller searched for or asked is never stored**. Access rows are **sampled, not exhaustive**: throttled to one per person, document, action, surface, agent and version per 10 minutes (a new version is a new row), capped at 50 documents per retrieval, and pruned on the activity-trace retention window (`TRACE_RETENTION_DAYS`). The throttle is per server process, so a multi-instance deployment records up to one row per instance per window. Deleting a document purges its version and access history (the `deleted` tombstone stays).
 
@@ -2148,7 +2148,9 @@ over comments + committed edits (`node_versions`) + pending external-edit
 suggestions ("proposed an edit", read from nest storage) + reviews
 (`review_requests`); newest first, `?limit=` (default 100). Each entry:
 `{ type, nodeId, actor, at, detail?, refId? }` where `type` ∈
-`comment | comment_resolved | edit | edit_proposed | review_requested | review_resolved | task_activity`.
+`comment | comment_resolved | edit | edit_proposed | review_requested | review_resolved | moved | tags_changed | task_activity`.
+A `moved` entry's `detail` names the previous and new folder; a `tags_changed` entry's names the tags
+that were swapped, added or removed.
 A `task_activity` entry (see below) also carries `status?`, `agent?` (the caller's
 `client.agent`), `key?` (`{ label?, prefix?, scoped }`) and `summary` — the
 one-line description the task's timeline shows.
@@ -2194,9 +2196,10 @@ The comments above are flat per-node threads. **Annotations** are the highlight-
 - `POST /nests/:nestId/nodes/:nodeId/annotations` — open a thread. Body: `{ body, anchor?: { start, end, text }, snapshotVersion?, client? }` → `201 { thread, comment_id, mentions }`. `client` is stored with the message as caller attribution: `client.agent` shows the message as `"<agent>, on behalf of <person>"`; an API key's label alone does not (it is kept beside the message, not shown as an agent). On a channel node, posting is for people added to the nest (see Channels). No `anchor` = a whole-document (or whole-artifact) thread.
 - `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments` — reply. Body: `{ body, client? }` → `{ thread, comment_id, mentions }`. A reply on a resolved thread reopens it (the MCP `context_comment` reply does the same). On a document, everyone already in the thread (its opener and earlier repliers, minus the replier and anyone the reply @mentions) gets a `comment_reply` notification — an inbox row linking the document, plus an email when SMTP is configured. **In a channel a reply notifies only the people it @mentions**: no `comment_reply` rows for the thread's participants and no "commented on" rows for reviewer stewards (the channel's `unread` count carries that); people watching the channel node still hear of every message.
 - Both answer with what was written and who it reached: `comment_id` is the new message's id, and `mentions` lists every `@name` in it, in order — `{ name, kind: "person", display_name, notified }` (`notified: false` when it is the author, has no account, or can't open the node), `{ name, kind: "agent", wake }` (`wake`: `sent` — a wake-up POST went out; `no_webhook` — the agent has no target and finds the mention in its `context_my_work`; `skipped` — the writer itself, a duplicate, or the rate fence) or `{ name, kind: "nobody" }`. A caller who may not see the nest's roster (someone reading a public nest, say) always gets `mentions: []`, so the answer can't be used to find out who is on a nest. MCP `context_comment` returns the same as `structuredContent` (`node_id`, `thread_id`, `comment_id`, `mentions`) and says it in one line of text.
+- `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments/:commentId/edit` `{ body }` · `/delete` — the author changes or removes their own comment on a document → `{ thread }` (`null` when the thread has no comment left). Anyone else → `403`; a channel message → `409` (use the channel's messages route). An edited comment carries `editedAt`, and only the names the edit added are notified.
 - `POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/resolve` · `/reopen`.
 - `GET /nests/:nestId/nodes/:nodeId/hosted` — an artifact's HTML (for a `view` node's page and frames see [View nodes](#view-nodes)), served under the sandbox CSP (opaque origin, no network). `?v=N` pins a snapshot. `?embed=1` appends the in-app viewer's bridge, a script that tells the viewer which text is at the top of the frame, scrolls to text the viewer names, and paints the open threads' quotes (`postMessage` only; the viewer sends quotes keyed by throwaway ids, never thread ids or comment bodies — so the artifact's own scripts can tell which of its passages have open threads, and nothing more). Without `embed` the body is served as stored. Only `embed=1` turns it on. An artifact whose markup ends inside an unclosed `<script>`, `<!--`, `<textarea>` or `<plaintext>` swallows the bridge; its preview then works as before, without highlights or place-keeping.
-- `GET /nests/:nestId/comment-counts` — `{ "<nodeId>": <open thread count>, … }` for the whole nest in one call (the UI's "most commented" sort).
+- `GET /nests/:nestId/comment-counts` — `{ "counts": { "<nodeId>": { "count", "open", "comments", "lastAt" } } }` for the whole nest in one call: threads, unresolved threads, messages and the newest thread's time (the UI's "most commented" sort and the Board card's comment badge). Deleted messages are not counted.
 
 ---
 
@@ -2562,9 +2565,9 @@ Query: `?folder=<path>` (that subtree only; defaults to the whole nest), `?recur
 Creates a folder with nothing in it — the directory is created in the vault carrying only its generated `INDEX.md`, so no document is added to the nest. Each segment is slugified (`GTM/Deals` → `gtm/deals`) and the depth cap applies. Creating a folder that already exists is a no-op. Write tier.
 
 ```json
-{ "folder": "gtm/deals" }
+{ "folder": "gtm/deals", "created": true }
 ```
-Returns 201 with the path actually created.
+Returns 201 with the slugified path; `created` is `false` when the folder was already there.
 
 ### GET `/nests/:nestId/census`
 One call for everything the Documents page needs to describe the *whole* nest, whatever folder is open — counts by tag, type and status, the folder tree, the author roster, and the recently-edited strip. Gated by the same `filterAccessible` pass as the listing, so the numbers describe what this caller can actually reach.

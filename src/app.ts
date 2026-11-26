@@ -3466,10 +3466,12 @@ export function createApp(): Hono<AuthEnv> {
     // Handlers re-check node read-access; don't bump these POSTs to "write".
     //   POST …/annotations                        → create thread
     //   POST …/annotations/:id/{comments,resolve,reopen}
+    //   POST …/annotations/:id/comments/:commentId/{edit,delete}
     const isAnnotationAction =
       isPost &&
       (/\/annotations$/.test(path) ||
-        /\/annotations\/[^/]+\/(comments|resolve|reopen)$/.test(path));
+        /\/annotations\/[^/]+\/(comments|resolve|reopen)$/.test(path) ||
+        /\/annotations\/[^/]+\/comments\/[^/]+\/(edit|delete)$/.test(path));
     // Marking a channel read (PO-1189) is the caller's own bookmark, like a
     // pin: anyone who can read the channel may, a read-only member most of
     // all. The handler checks channel access. Exact segments.

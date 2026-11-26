@@ -8,7 +8,9 @@ import {
   isPickedDue,
   matchesAssigneeFilter,
   matchesBlockedFilter,
+  isTaskDone,
   matchesTitleFilter,
+  sharedBoardTitle,
   moveNeedsReview,
   openBlockers,
   priorityRank,
@@ -17,6 +19,7 @@ import {
   type GovernanceContext,
 } from "../ui/src/lib/board-tasks";
 import { newCardPlacement, resolveConfig, type BoardNode } from "../ui/src/lib/board-dimensions";
+import { filterForBoard } from "../src/nests/board-items";
 import { saveOutcome } from "../ui/src/lib/save-outcome";
 
 const node = (over: Partial<BoardNode> & { id: string }): BoardNode => ({
@@ -171,11 +174,22 @@ describe("blocked badge (task relations)", () => {
   });
 
   it("title filter matches part of a title, ignoring case; '#…' is a tag, not a title", () => {
-    expect(matchesTitleFilter({ title: "Task Beta" }, "beta")).toBe(true);
-    expect(matchesTitleFilter({ title: "Task Beta" }, " Task B ")).toBe(true);
-    expect(matchesTitleFilter({ title: "Task Alpha" }, "Beta")).toBe(false);
-    expect(matchesTitleFilter({ title: "Task Alpha" }, "")).toBe(true);
-    expect(matchesTitleFilter({ title: "Task Alpha" }, "#prime")).toBe(true);
+    expect(matchesTitleFilter({ title: "Task Beta", tags: [] }, "beta")).toBe(true);
+    expect(matchesTitleFilter({ title: "Task Beta", tags: [] }, " Task B ")).toBe(true);
+    expect(matchesTitleFilter({ title: "Task Alpha", tags: [] }, "Beta")).toBe(false);
+    expect(matchesTitleFilter({ title: "Task Alpha", tags: [] }, "")).toBe(true);
+    expect(matchesTitleFilter({ title: "Task Alpha", tags: [] }, "#prime")).toBe(true);
+  });
+  it("po-1261: finds a card by its ticket number, any case", () => {
+    const card = { title: "Migrate user table", tags: ["#stage:backlog", "#ticket:dpb-5"] };
+    for (const q of ["DPB-5", "dpb-5", "dpb"]) expect(matchesTitleFilter(card, q)).toBe(true);
+    expect(matchesTitleFilter(card, "DPB-6")).toBe(false);
+    expect(matchesTitleFilter(card, "backlog")).toBe(false);
+    // The board items agents read filter the same way.
+    const rows = [{ id: "nodes/a", type: "task", ...card }] as any;
+    const board = { dimension: "tag" } as any;
+    expect(filterForBoard(rows, board, { q: "Dpb-5" })).toHaveLength(1);
+    expect(filterForBoard(rows, board, { q: "DPB-6" })).toHaveLength(0);
   });
 });
 
@@ -190,5 +204,24 @@ describe("inDoneFolder", () => {
     expect(inDoneFolder("nodes/projects/doing/x", ["done"])).toBe(false);
     expect(inDoneFolder("nodes/done-later/x", ["done"])).toBe(false);
     expect(inDoneFolder("nodes/done", ["done"])).toBe(false);
+  });
+});
+
+describe("po-1238: isTaskDone, so a finished task is not overdue on its page", () => {
+  it("reads done tags and done folders, as the board does", () => {
+    expect(isTaskDone("nodes/a", ["stage:done"], ["#Stage:Done"])).toBe(true);
+    expect(isTaskDone("nodes/projects/done/a", [], ["done"])).toBe(true);
+    expect(isTaskDone("nodes/a", ["#stage:backlog"], ["done"])).toBe(false);
+    expect(isTaskDone(undefined, [], ["done"])).toBe(false);
+  });
+});
+
+describe("po-1243: sharedBoardTitle", () => {
+  const people = [{ email: "Ada@acme.dev", name: "Ada L" }, { email: "bob@acme.dev", name: null }];
+  it("names the maker, and never shows an address", () => {
+    expect(sharedBoardTitle("ada@acme.dev", people)).toBe("Shared with everyone on this nest · made by Ada L");
+    for (const who of ["bob@acme.dev", "gone@acme.dev", null]) {
+      expect(sharedBoardTitle(who, people)).toBe("Shared with everyone on this nest");
+    }
   });
 });

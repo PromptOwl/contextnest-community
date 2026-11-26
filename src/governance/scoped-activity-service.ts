@@ -10,6 +10,7 @@
  *   review_requests    review_requested / approved / rejected / review_cancelled
  *   comments           commented / comment_resolved
  *   node_deletions     deleted
+ *   node_changes       moved / tags_changed
  * plus document access, which seals no version and is recorded separately in
  * node_access_events (access-log.ts):
  *   read / retrieved / exported  (a whole-nest export has no node and shows
@@ -34,6 +35,8 @@ export const ACTIVITY_TYPES = [
   "commented",
   "comment_resolved",
   "deleted",
+  "moved",
+  "tags_changed",
   "read",
   "retrieved",
   "exported",
@@ -79,6 +82,7 @@ const SOURCE_TYPES: Record<string, ActivityType[]> = {
   reviews: ["review_requested", "approved", "rejected", "review_cancelled"],
   comments: ["commented", "comment_resolved"],
   deletions: ["deleted"],
+  changes: ["moved", "tags_changed"],
   access: ["read", "retrieved", "exported"],
 };
 
@@ -290,6 +294,32 @@ export async function getScopedActivity(params: {
         agent: agentOf(client),
         ...(client ? { client } : {}),
         at: toIso(r.deleted_at),
+      });
+    }
+  }
+
+  if (want("changes")) {
+    const s = scopeSql(scope);
+    const a = actorSql(actor, ["actor"]);
+    const rows = (await db.all(
+      `SELECT id, node_id, kind, actor, detail, client_json, created_at
+         FROM node_changes
+        WHERE nest_id = ?${s.sql}${a.sql}
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?`,
+      [nestId, ...s.args, ...a.args, window],
+    )) as any[];
+    for (const r of rows) {
+      const client = deserializeClient(r.client_json);
+      push({
+        id: `ch:${r.id}`,
+        type: r.kind,
+        nodeId: r.node_id,
+        actor: r.actor,
+        agent: agentOf(client),
+        ...(client ? { client } : {}),
+        at: toIso(r.created_at),
+        detail: r.detail,
       });
     }
   }

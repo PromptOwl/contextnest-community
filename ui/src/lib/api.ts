@@ -2068,7 +2068,8 @@ export async function getNestCensus(nestId: string) {
 /** Per-node comment (annotation thread) counts for sorting the document list. */
 export async function getCommentCounts(nestId: string) {
   return request<{
-    counts: Record<string, { count: number; lastAt: string | null }>;
+    /** Threads, unresolved threads and messages per document. */
+    counts: Record<string, { count: number; open: number; comments: number; lastAt: string | null }>;
   }>(`/nests/${nestId}/comment-counts`);
 }
 
@@ -2632,9 +2633,10 @@ export async function withdrawDeletionRequest(nestId: string, id: string) {
   );
 }
 
-/** Create a folder with nothing in it — no placeholder document. */
+/** Create a folder with nothing in it — no placeholder document. `created` is
+ *  false when it was already there. */
 export async function createFolder(nestId: string, folder: string) {
-  return request<{ folder: string }>(`/nests/${nestId}/folders`, {
+  return request<{ folder: string; created: boolean }>(`/nests/${nestId}/folders`, {
     method: "POST",
     body: JSON.stringify({ folder }),
   });
@@ -2796,6 +2798,8 @@ export type ActivityLogType =
   | "commented"
   | "comment_resolved"
   | "deleted"
+  | "moved"
+  | "tags_changed"
   | "read"
   | "retrieved"
   | "exported";
@@ -2974,6 +2978,8 @@ export interface AnnotationComment {
   createdAt: string;
   /** Set when an agent run posted it: links to its trace. */
   runId?: string;
+  /** When its author last edited it. */
+  editedAt?: string;
 }
 
 export interface AnnotationThread {
@@ -3084,6 +3090,28 @@ export async function createAnnotation(
   return request<{ thread: AnnotationThread; comment_id?: string; mentions?: PostedMention[] }>(
     `/nests/${nestId}/nodes/${nodeId}/annotations`,
     { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+/** Change one's own comment. */
+export async function editAnnotationComment(
+  nestId: string,
+  nodeId: string,
+  threadId: string,
+  commentId: string,
+  body: string,
+) {
+  return request<{ thread: AnnotationThread | null }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/comments/${commentId}/edit`,
+    { method: "POST", body: JSON.stringify({ body }) },
+  );
+}
+
+/** Remove one's own comment; `thread` is null when nothing is left in it. */
+export async function deleteAnnotationComment(nestId: string, nodeId: string, threadId: string, commentId: string) {
+  return request<{ thread: AnnotationThread | null }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/comments/${commentId}/delete`,
+    { method: "POST", body: JSON.stringify({}) },
   );
 }
 
@@ -3728,6 +3756,8 @@ export type ActivityType =
   | "edit_proposed"
   | "review_requested"
   | "review_resolved"
+  | "moved"
+  | "tags_changed"
   | "task_activity";
 
 export interface ActivityEntry {
