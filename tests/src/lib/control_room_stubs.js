@@ -113,6 +113,24 @@ export async function stubSurfaces(page, initial = {}) {
     }
   );
 
+  // The Slack app's keys are saved through Server settings (po-1447). Only a
+  // PATCH carrying them is answered here; every other settings call is real.
+  await page.route(
+    (url) => pathOf(url) === '/admin/settings',
+    async (route, request) => {
+      if (request.method() !== 'PATCH') return route.fallback();
+      const body = JSON.parse(request.postData() || '{}');
+      const keys = Object.keys(body).filter((k) => k.startsWith('surfaces_slack_hosted_'));
+      if (!keys.length) return route.fallback();
+      state.calls.push({ method: 'PATCH', path: '/admin/settings', body: Object.fromEntries(keys.map((k) => [k, '(redacted)'])) });
+      for (const k of keys) {
+        const f = k.slice('surfaces_slack_hosted_'.length);
+        if (f in state.creds) state.creds[f] = !!String(body[k]).trim();
+      }
+      return json(route, { settings: {} });
+    },
+  );
+
   await page.route(
     (url) => pathOf(url).startsWith('/surfaces/') && pathOf(url) !== '/surfaces/settings',
     async (route, request) => {
@@ -134,6 +152,23 @@ export async function stubSurfaces(page, initial = {}) {
         const stored = Object.keys(body).filter((k) => k in state.creds);
         for (const k of stored) state.creds[k] = true;
         return json(route, { stored, credentials: state.creds });
+      }
+      // One Slack app per server (po-1447): the manifest, its addresses and
+      // which of its three keys are saved. Values never come back.
+      if (p === '/surfaces/slack/app' && m === 'GET') {
+        const base = 'https://example.test/surfaces/slack';
+        return json(route, { manifest, urls: { events: `${base}/events`, interactions: `${base}/interactions`, commands: `${base}/commands`, redirect: `${base}/oauth/callback` }, credentials: state.creds });
+      }
+      // The hosted connect: Slack OAuth for the server's app, homed on the
+      // picked nest. Approved at once, then back to setup, as below.
+      if (p === '/surfaces/slack/hosted/oauth/start') {
+        const home = new URL(request.url()).searchParams.get('home_nest_id');
+        state.install = { id: 'inst_fake', surface: 'slack', mode: 'manifest', status: 'active', home_nest_id: home };
+        return route.fulfill({
+          status: 200,
+          contentType: 'text/html',
+          body: '<!doctype html><title>Slack approved</title><script>location.replace("/control-room?section=setup")</script>',
+        });
       }
       if (p === '/surfaces/slack/installs/inst_fake/oauth/start') {
         // Stubbed Slack OAuth: approve at once and come back, as the callback
