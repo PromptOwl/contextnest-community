@@ -34,7 +34,7 @@ import { track } from "../../services/work.js";
 import { buildManifest, BOT_SCOPES, slackUrls, publicUrlProblem, originMismatch, PUBLIC_URL_SETTING } from "./manifest.js";
 import { verifySlackSignature } from "./verify.js";
 import { normalizeSlack } from "./connector.js";
-import { slackCall } from "./api.js";
+import { slackCall, slackErrorCode, refusedClientPair } from "./api.js";
 import { logCaught } from "../../log.js";
 import { listInstallChannels, channelListFailure } from "./channels.js";
 import { handleCommand, handleInteraction } from "./interactions.js";
@@ -275,15 +275,23 @@ slackAdminRoutes.put("/installs/:id/credentials", async (c) => {
   const i = await getInstall(c.req.param("id"));
   if (!i || i.surface !== "slack" || i.mode === "hosted") return c.json({ error: "Not found" }, 404);
   const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-  const stored: string[] = [];
-  for (const k of ["client_id", "client_secret", "signing_secret"] as const) {
+  const keys = ["client_id", "client_secret", "signing_secret"] as const;
+  const next: Partial<Record<(typeof keys)[number], string>> = {};
+  for (const k of keys) {
     const v = b[k];
     if (v === undefined) continue;
     if (typeof v !== "string" || !v.trim() || v.length > 300) return c.json({ error: `${k} must be a non-empty string` }, 422);
-    await setSecret(i.id, k, v.trim(), c.get("userId"));
-    stored.push(k);
+    next[k] = v.trim();
   }
-  return c.json({ stored, credentials: await secretPresence(i.id) });
+  // Check the pair with Slack before storing, so a wrong key is caught here, not after the Slack approval.
+  if (next.client_id || next.client_secret) {
+    const id = next.client_id ?? (await getSecret(i.id, "client_id"));
+    const secret = next.client_secret ?? (await getSecret(i.id, "client_secret"));
+    const refused = id && secret ? await refusedClientPair(id, secret) : null;
+    if (refused) return c.json({ error: refused.error, field: refused.field }, 422);
+  }
+  for (const k of keys) if (next[k]) await setSecret(i.id, k, next[k]!, c.get("userId"));
+  return c.json({ stored: Object.keys(next), credentials: await secretPresence(i.id) });
 });
 
 /**
@@ -361,6 +369,18 @@ async function pendingHostedInstall(nestId: string, userId: string): Promise<Ins
     })
   );
 }
+
+/** The server's one Slack app: the manifest to create it from and the addresses it must keep. */
+slackAdminRoutes.get("/app", async (c) => {
+  const denied = await assertAdmin(c);
+  if (denied) return denied;
+  const creds = hostedCreds();
+  return c.json({
+    manifest: buildManifest({ baseUrl: config.PUBLIC_BASE_URL, installId: "hosted" }),
+    urls: slackUrls(config.PUBLIC_BASE_URL, "hosted"),
+    credentials: { client_id: !!creds.clientId, client_secret: !!creds.clientSecret, signing_secret: !!creds.signing },
+  });
+});
 
 slackAdminRoutes.get("/hosted/oauth/start", async (c) => {
   if (!hostedEnabled()) return c.json({ error: "Not found" }, 404);
@@ -457,6 +477,26 @@ function slackErrorMessage(code: string): string {
   return `Slack returned an error: ${code.slice(0, 100)}. Nothing was connected.${redirect ? ` Check that your Slack app lists exactly ${redirect} under OAuth & Permissions → Redirect URLs, then try again from Setup.` : " Try again from Setup."}`;
 }
 
+/** oauth.v2.access failed: say what to fix and where, by Slack's error code. */
+function exchangeFailed(c: C, code: string, redirect: string) {
+  const where = "Control room → Setup → Slack app (or Server settings → Surfaces)";
+  const link = SETUP_LINK;
+  const tail = "Nothing was connected and no token was kept.";
+  if (code === "invalid_client_id" || code === "bad_client_secret" || code === "invalid_client") {
+    return done(c, 502, `Slack refused the app's Client ID or Client secret. ${tail}`, {}, {
+      steps: [`Copy the Client ID and Client secret from your Slack app's Basic Information page.`, `Save them in ${where}.`, "Open Setup and click Open Slack to approve again."],
+      link,
+    });
+  }
+  if (code === "bad_redirect_uri") {
+    return done(c, 502, `Slack refused the redirect address. ${tail}`, {}, {
+      steps: [`Add ${redirect} under OAuth & Permissions → Redirect URLs in your Slack app.`, "Open Setup and click Open Slack to approve again."],
+      link: SETUP_LINK,
+    });
+  }
+  return done(c, 502, `Slack didn't accept the sign-in (${code}). ${tail} Start again from Setup.`, {}, { link: SETUP_LINK });
+}
+
 /**
  * OAuth v2 callback: state must exist, be unexpired, unused, minted by this
  * session — then it is consumed (compare-and-set) BEFORE the code is
@@ -505,7 +545,10 @@ slackAdminRoutes.get("/oauth/callback", async (c) => {
     });
   } catch (err) {
     logCaught("oauth", err, { install: install.id });
-    return done(c, 502, "Slack didn't accept the sign-in. No token was kept.");
+    // A hosted attempt is cheap to restart: close it so a stale one is never reused.
+    // A manifest install keeps its saved values, so the admin fixes only the wrong one.
+    if (hosted) await getDb().run("UPDATE surface_installs SET status = 'disconnected', updated_at = ? WHERE id = ? AND status = 'pending'", [iso(Date.now()), install.id]);
+    return exchangeFailed(c, slackErrorCode(err), slackUrls(config.PUBLIC_BASE_URL, hosted ? "hosted" : install.id).redirect);
   }
   const token = typeof res.access_token === "string" ? res.access_token : "";
   const team = res.team?.id ? String(res.team.id) : "";

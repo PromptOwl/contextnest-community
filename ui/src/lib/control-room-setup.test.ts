@@ -407,18 +407,6 @@ describe("po-1448: Server settings → Surfaces helpers", () => {
     expect(Uint8Array.from(atob(a), (c) => c.charCodeAt(0))).toHaveLength(32);
     expect(a).not.toBe(b);
   });
-
-  it("hostedSlackUrls builds the four Slack URLs from the public base URL, and nothing without one", async () => {
-    const { hostedSlackUrls } = await import("./control-room-setup");
-    expect(hostedSlackUrls("https://nest.acme.com/")).toEqual({
-      redirect: "https://nest.acme.com/surfaces/slack/oauth/callback",
-      events: "https://nest.acme.com/surfaces/slack/hosted/events",
-      interactions: "https://nest.acme.com/surfaces/slack/hosted/interactions",
-      commands: "https://nest.acme.com/surfaces/slack/hosted/commands",
-    });
-    expect(hostedSlackUrls("")).toBeNull();
-    expect(hostedSlackUrls(null)).toBeNull();
-  });
 });
 
 describe("po-1446: channel activity in plain words", () => {
@@ -444,7 +432,8 @@ describe("po-1446: channel activity in plain words", () => {
     expect(lines).toContain("No thread judged yet.");
     expect(lines[lines.length - 1]).toMatch(/Nothing arrived from Slack.*message\.groups.*app_mention.*reaction_added.*reinstall/);
     expect(lines[lines.length - 1]).not.toMatch(/buffer key/);
-    expect(lines[lines.length - 1]).toMatch(/disconnected and set up again.*old address/);
+    // One Slack app per server: the hint points at the address Setup lists, not at a per-connection one.
+    expect(lines[lines.length - 1]).toMatch(/Request URL is the events address listed under Setup → Slack app/);
     expect(activityLines({ ...base, received: 1, skipped: { too_short: 1 } }, 20).join(" ")).not.toMatch(/Nothing arrived/);
   });
 });

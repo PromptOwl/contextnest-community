@@ -60,7 +60,8 @@ import { AgentConnectPanel } from "./AgentConnectPanel";
 import { LicensePanel } from "./LicensePanel";
 import { NetworkStatusPanel } from "./NetworkStatusPanel";
 import { toast } from "sonner";
-import { generateBufferKey, hostedSlackUrls, SLACK_BOT_EVENTS, SLACK_BOT_SCOPES } from "../../../lib/control-room-setup";
+import { generateBufferKey } from "../../../lib/control-room-setup";
+import { SlackAppCard } from "../control-room/SlackAppCard";
 
 interface SettingsPageProps {
   settings: AdminSettings | null;
@@ -178,11 +179,7 @@ const TABS: {
       "surfaces_quiet_minutes",
       "surfaces_default_cap_usd",
       "surfaces_org_name",
-      "surfaces_slack_hosted_enabled",
       "surfaces_slack_self_serve",
-      "surfaces_slack_hosted_client_id",
-      "surfaces_slack_hosted_client_secret",
-      "surfaces_slack_hosted_signing_secret",
     ],
   },
   {
@@ -447,57 +444,6 @@ function GenerateBufferKey({ isSet, onKey }: { isSet: boolean; onKey: (key: stri
         </AlertDialogContent>
       </AlertDialog>
     </>
-  );
-}
-
-/** po-1448: where each hosted Slack app value comes from, with this server's own URLs. */
-function HostedSlackGuide({ baseUrl }: { baseUrl: string | null | undefined }) {
-  const urls = hostedSlackUrls(baseUrl);
-  const row = (where: string, url: string) => (
-    <li>
-      {where}
-      <div className="mt-1 flex min-w-0 items-center gap-2">
-        <code className="min-w-0 truncate rounded bg-muted px-1.5 py-0.5 text-xs">{url}</code>
-        <CopyButton text={url} toastMessage="Copied" />
-      </div>
-    </li>
-  );
-  const names = (where: string, list: readonly string[], testId: string) => (
-    <li>
-      {where}
-      <div className="mt-1 flex min-w-0 items-start gap-2" data-testid={testId}>
-        <code className="min-w-0 rounded bg-muted px-1.5 py-0.5 text-xs [overflow-wrap:anywhere]">{list.join(", ")}</code>
-        <CopyButton text={list.join("\n")} toastMessage="Copied" />
-      </div>
-    </li>
-  );
-  return (
-    <details className="rounded-md border px-3 py-2 text-sm" data-testid="hosted-slack-guide">
-      <summary className="cursor-pointer font-medium">Where do I find these?</summary>
-      <ol className="mt-2 list-decimal space-y-2 pl-5 text-foreground/80">
-        <li>
-          Open{" "}
-          <a href="https://api.slack.com/apps" target="_blank" rel="noreferrer" className="underline">
-            api.slack.com/apps
-          </a>{" "}
-          and create the app, or open the existing one.
-        </li>
-        <li>In Basic Information → App Credentials, copy the Client ID, Client Secret and Signing Secret into the fields below.</li>
-        {urls ? (
-          <>
-            {row("In OAuth & Permissions → Redirect URLs, add:", urls.redirect)}
-            {names("In OAuth & Permissions → Bot Token Scopes, add:", SLACK_BOT_SCOPES, "hosted-slack-scopes")}
-            {row("In Event Subscriptions, turn events on and set the Request URL to:", urls.events)}
-            {names("On the same page, under Subscribe to bot events, add these (message.groups is what private channels need):", SLACK_BOT_EVENTS, "hosted-slack-events")}
-            {row("In Interactivity & Shortcuts, turn interactivity on and set the Request URL to:", urls.interactions)}
-            {row("In Slash Commands, create /nest (or another name, if an app in this workspace already uses it) with the Request URL:", urls.commands)}
-            <li>After changing scopes or events on an app that is already installed, use Install App → Reinstall to Workspace.</li>
-          </>
-        ) : (
-          <li className="text-red-800">Set Public base URL in the Basic tab first. The Slack app's URLs are built from it.</li>
-        )}
-      </ol>
-    </details>
   );
 }
 
@@ -2531,54 +2477,23 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
             </Card>
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Hosted Slack app</CardTitle>
+                <CardTitle className="text-base">Slack app</CardTitle>
                 <CardDescription>
-                  One-click install with PromptOwl's own Slack app. Leave off to
-                  install your own app from the manifest instead.
+                  One Slack app for this server. Create it from the manifest,
+                  then save its keys here. The same keys show in Control room →
+                  Setup; a change in either place shows in both. The keys save
+                  with their own Save keys button.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm">{draft.surfaces_slack_hosted_enabled ? "On" : "Off"}</span>
-                  <Switch checked={!!draft.surfaces_slack_hosted_enabled} onCheckedChange={(v) => set({ surfaces_slack_hosted_enabled: v })} aria-label="Hosted Slack app" />
-                </div>
-                <div className="flex items-center justify-between gap-4">
+                <SlackAppCard heading={false} />
+                <div className="flex items-center justify-between gap-4 border-t pt-4">
                   <span className="text-sm">
                     Self-serve: anyone signed in can connect their own Slack
-                    workspace to a nest they own ({draft.surfaces_slack_hosted_enabled && draft.surfaces_slack_self_serve ? "on" : "off"})
-                    {!draft.surfaces_slack_hosted_enabled && (
-                      <span className="block text-xs text-muted-foreground">Turn on the Hosted Slack app first.</span>
-                    )}
+                    workspace to a nest they own ({draft.surfaces_slack_self_serve ? "on" : "off"})
                   </span>
-                  {/* Self-serve runs only through the hosted app, so show its real state; the saved value returns with the app. */}
-                  <Switch
-                    checked={!!draft.surfaces_slack_hosted_enabled && !!draft.surfaces_slack_self_serve}
-                    disabled={!draft.surfaces_slack_hosted_enabled}
-                    onCheckedChange={(v) => set({ surfaces_slack_self_serve: v })}
-                    aria-label="Self-serve Slack"
-                  />
+                  <Switch checked={!!draft.surfaces_slack_self_serve} onCheckedChange={(v) => set({ surfaces_slack_self_serve: v })} aria-label="Self-serve Slack" />
                 </div>
-                <HostedSlackGuide baseUrl={draft.public_base_url} />
-                <div className="space-y-1.5">
-                  <Label htmlFor="surfaces-slack-client-id">Client ID</Label>
-                  <TextField id="surfaces-slack-client-id" error={fieldErrors.surfaces_slack_hosted_client_id} value={draft.surfaces_slack_hosted_client_id ?? ""} onChange={(v) => set({ surfaces_slack_hosted_client_id: v })} />
-                </div>
-                <SecretField
-                  id="surfaces-slack-client-secret"
-                  label="Client secret"
-                  isSet={!!settings?.surfaces_slack_hosted_client_secret_set}
-                  value={draft.surfaces_slack_hosted_client_secret}
-                  onChange={(v) => set({ surfaces_slack_hosted_client_secret: v })}
-                  error={fieldErrors.surfaces_slack_hosted_client_secret}
-                />
-                <SecretField
-                  id="surfaces-slack-signing-secret"
-                  label="Signing secret"
-                  isSet={!!settings?.surfaces_slack_hosted_signing_secret_set}
-                  value={draft.surfaces_slack_hosted_signing_secret}
-                  onChange={(v) => set({ surfaces_slack_hosted_signing_secret: v })}
-                  error={fieldErrors.surfaces_slack_hosted_signing_secret}
-                />
               </CardContent>
             </Card>
           </TabsContent>

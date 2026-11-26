@@ -869,10 +869,7 @@ export const config = {
   get SURFACES_ORG_NAME(): string | undefined {
     return process.env.SURFACES_ORG_NAME || undefined;
   },
-  /** Hosted one-click Slack install (behind Slack Marketplace approval) and its app credentials. */
-  get FEATURE_SURFACES_SLACK_HOSTED(): boolean {
-    return process.env.FEATURE_SURFACES_SLACK_HOSTED === "true";
-  },
+  /** The server's one Slack app: its credentials. */
   get SURFACES_SLACK_HOSTED_CLIENT_ID(): string | null {
     return process.env.SURFACES_SLACK_HOSTED_CLIENT_ID || null;
   },

@@ -333,6 +333,9 @@ describe("/admin/settings — validation", () => {
     expect(refused.data.fieldErrors).toHaveProperty("surfaces_enabled");
     expect((await jsonRequest(app, "GET", "/surfaces/status", undefined, admin.apiKey)).status).toBe(404);
 
+    // Saving the Slack app's keys checks them with Slack: answer for a good pair, without the network.
+    let slackAnswer = "invalid_code";
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ ok: false, error: slackAnswer }), { headers: { "content-type": "application/json" } }));
     const key = Buffer.alloc(32, 7).toString("base64");
     const on = await jsonRequest(app, "PATCH", "/admin/settings", {
       workflow_plane_enabled: true,
@@ -395,12 +398,37 @@ describe("/admin/settings — validation", () => {
     }, admin.apiKey);
     expect(cleared.data.settings).toMatchObject({ surfaces_buffer_key_set: false, surfaces_default_cap_usd: null, surfaces_org_name: "", surfaces_quiet_minutes: 20 });
 
-    // Turning Surfaces off disables it live; hosted Slack can't be on without it.
+    // A Client secret Slack refuses is a field error, and the saved one stays.
+    slackAnswer = "bad_client_secret";
+    const wrong = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_slack_hosted_client_secret: "wrong-secret" }, admin.apiKey);
+    expect(wrong.status).toBe(400);
+    expect(wrong.data.fieldErrors.surfaces_slack_hosted_client_secret).toMatch(/Slack refused this Client secret/);
+    expect(await persistedSetting("SURFACES_SLACK_HOSTED_CLIENT_SECRET")).not.toBe(null);
+    // Only a new Client ID typed, the saved secret is the old app's: the error says to paste the secret too.
+    const idOnly = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_slack_hosted_client_id: "777.777" }, admin.apiKey);
+    expect(idOnly.data.fieldErrors.surfaces_slack_hosted_client_secret).toMatch(/saved Client secret doesn't match.*save both/);
+    slackAnswer = "invalid_client_id";
+    expect((await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_slack_hosted_client_id: "999.999" }, admin.apiKey)).data.fieldErrors).toHaveProperty("surfaces_slack_hosted_client_id");
+    expect((await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey)).data.surfaces_slack_hosted_client_id).toBe("123.456");
+    vi.unstubAllGlobals();
+
+    // Clear keys (Setup / Server settings): empty values remove all three, with no Slack check.
+    const cleared3 = await jsonRequest(app, "PATCH", "/admin/settings", {
+      surfaces_slack_hosted_client_id: "",
+      surfaces_slack_hosted_client_secret: "",
+      surfaces_slack_hosted_signing_secret: "",
+    }, admin.apiKey);
+    expect(cleared3.status, JSON.stringify(cleared3.data)).toBe(200);
+    expect(cleared3.data.settings).toMatchObject({
+      surfaces_slack_hosted_client_id: "",
+      surfaces_slack_hosted_client_secret_set: false,
+      surfaces_slack_hosted_signing_secret_set: false,
+    });
+
+    // Turning Surfaces off disables it live.
     const off = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_enabled: false }, admin.apiKey);
     expect(off.data.settings.surfaces_enabled).toBe(false);
     expect((await jsonRequest(app, "GET", "/surfaces/status", undefined, admin.apiKey)).status).toBe(404);
-    const hosted = await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_slack_hosted_enabled: true }, admin.apiKey);
-    expect(hosted.data.fieldErrors).toHaveProperty("surfaces_slack_hosted_enabled");
 
     // Non-admins can't change any of it.
     expect((await jsonRequest(app, "PATCH", "/admin/settings", { surfaces_org_name: "Evil" }, stranger.apiKey)).status).toBe(403);

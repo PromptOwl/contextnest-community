@@ -9,26 +9,23 @@
  * answers with saved / not saved, never a value.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Check, CircleAlert, Download, ExternalLink, FolderPlus, Hash, Lock, RefreshCw } from "lucide-react";
+import { Check, CircleAlert, ExternalLink, FolderPlus, Hash, Lock, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { EmailDomains } from "./EmailDomains";
-import { Input } from "@/components/ui/input";
+import { SlackAppCard } from "./SlackAppCard";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { SearchableSelect } from "@/components/SearchableSelect";
 import { Checkbox } from "@/components/ui/checkbox";
-import { CopyButton } from "@/components/ui/copy-button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   addCollaborator,
   applySurfacesSeed,
   createNest,
-  createSlackInstall,
   createSurfacesBinding,
   disconnectSurfacesInstall,
-  getSlackInstall,
   getSurfacesSeedStatus,
   getSurfacesSettings,
   getSurfacesStatus,
@@ -44,9 +41,7 @@ import {
   getSurfacesBindingActivity,
   type SurfacesBindingActivity,
   type SurfacesBindingHistoryEntry,
-  putSlackCredentials,
   slackHostedOAuthStartUrl,
-  slackOAuthStartUrl,
   type SurfacesBinding,
   type SurfacesChannel,
   type SurfacesInstallRef,
@@ -59,7 +54,6 @@ import {
   DEFAULT_SETTINGS_COPY,
   activityLines,
   SETUP_STEPS,
-  REUSE_APP_STEPS,
   deriveProgress,
   dryRunSummary,
   dryRunTree,
@@ -438,23 +432,6 @@ export function SetupWizard({ state, onDone, onHow }: { state: SetupState; onDon
 
 // ─── 1. Connect Slack ───────────────────────────────────────────────────────
 
-const CRED_FIELDS = [
-  { key: "client_id", label: "Client ID" },
-  { key: "client_secret", label: "Client secret" },
-  { key: "signing_secret", label: "Signing secret" },
-] as const;
-
-function downloadJson(name: string, data: unknown) {
-  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
 /** po-1437: the channels a disconnect stops, named, and what each channel is told. */
 export function DisconnectChannels({ bindings }: { bindings: SurfacesBinding[] }) {
   const live = bindings.filter((b) => b.status !== "removed" && b.conversation_kind !== "dm");
@@ -479,12 +456,9 @@ export function DisconnectChannels({ bindings }: { bindings: SurfacesBinding[] }
 export function ConnectStep({ state, next }: { state: SetupState; next: () => void }) {
   const inst = state.install;
   const connected = inst?.status === "active";
-  const hosted = !!state.status?.slack_hosted;
   const org = state.status?.org_name;
   const [homeNest, setHomeNest] = useState<string>(inst?.home_nest_id ?? state.nests[0]?.id ?? "");
-  const [creds, setCreds] = useState<Record<string, boolean>>({});
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [manifest, setManifest] = useState<unknown>(null);
+  const [appReady, setAppReady] = useState(false);
   const [busy, setBusy] = useState(false);
 
   // A nest that is gone (deleted, archived, not yours) can't be the target: the server refuses it.
@@ -492,88 +466,18 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
     if (state.nests[0] && !state.nests.some((n) => n.id === homeNest)) setHomeNest(state.nests[0].id);
   }, [state.nests, homeNest]);
 
-  useEffect(() => {
-    if (!inst || inst.mode !== "manifest" || connected) return;
-    let live = true;
-    getSlackInstall(inst.id)
-      .then((r) => {
-        if (!live) return;
-        setCreds(r.install.credentials ?? {});
-        setManifest(r.manifest ?? null);
-      })
-      // Without this read every field shows "Not saved": say so, or the admin re-enters secrets.
-      .catch((e) => live && toast.error(errText(e, "Couldn't read the saved Slack values. Reload to try again.")));
-    return () => {
-      live = false;
-    };
-  }, [inst, connected]);
-
-  const allCreds = CRED_FIELDS.every((f) => creds[f.key]);
   const readiness = state.status?.readiness;
   // The server refuses too; this keeps the admin from leaving for a Slack error page.
   const here = typeof window === "undefined" ? null : window.location.origin;
   const urlBad = !!readiness && (!!readiness.public_url || !!wrongAddress(readiness, here));
   const homeName = state.nests.find((n) => n.id === inst?.home_nest_id)?.name;
   const sharedDeployment = !!state.status?.shared_deployment;
-  const domainsNest = inst?.home_nest_id ?? homeNest;
-  const redirectBox = !readiness?.redirect_url || urlBad ? null : (
-    <div className="text-sm" data-testid="setup-redirect-url">
-      <p className="text-muted-foreground">Your Slack app must list this exact address under OAuth &amp; Permissions → Redirect URLs:</p>
-      <div className="mt-1 flex min-w-0 items-center gap-2">
-        <code className="min-w-0 truncate rounded bg-muted px-1.5 py-0.5">{readiness.redirect_url}</code>
-        <CopyButton text={readiness.redirect_url} toastMessage="Redirect URL copied" />
-      </div>
-    </div>
-  );
-
-  const download = async () => {
-    setBusy(true);
-    try {
-      let m = manifest;
-      if (!inst) {
-        if (!homeNest) throw new Error("Choose the nest saved notes land in first.");
-        const r = await createSlackInstall(homeNest);
-        m = r.manifest;
-        setManifest(m);
-        await state.reload();
-      } else if (!m) {
-        // The read on page load failed or hasn't finished: read it again.
-        m = (await getSlackInstall(inst.id)).manifest;
-        setManifest(m);
-      }
-      if (!m) throw new Error("This install has no manifest. Reload the page and try again.");
-      downloadJson("nest-slack-manifest.json", m);
-    } catch (e) {
-      toast.error(errText(e, "Couldn't download the manifest."));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const saveCreds = async () => {
-    if (!inst) return;
-    const body = Object.fromEntries(Object.entries(values).filter(([, v]) => v.trim()));
-    if (!Object.keys(body).length) return;
-    setBusy(true);
-    try {
-      const r = await putSlackCredentials(inst.id, body);
-      setCreds(r.credentials);
-      setValues({});
-      toast.success("Saved. The values are stored encrypted and won't be shown again.");
-    } catch (e) {
-      toast.error(errText(e, "Couldn't save the values."));
-    } finally {
-      setBusy(false);
-    }
-  };
+  // Not connected yet: the connect is homed on the picked nest, never a stale install's.
+  const domainsNest = connected ? inst?.home_nest_id : homeNest;
 
   const approve = () => {
-    if (hosted) {
-      if (!homeNest) return toast.error("Choose the nest saved notes land in first.");
-      window.location.assign(slackHostedOAuthStartUrl(homeNest));
-      return;
-    }
-    if (inst) window.location.assign(slackOAuthStartUrl(inst.id));
+    if (!homeNest) return toast.error("Choose the nest saved notes land in first.");
+    window.location.assign(slackHostedOAuthStartUrl(homeNest));
   };
 
   const [confirmOff, setConfirmOff] = useState(false);
@@ -596,7 +500,7 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
     <>
       <StepHeading
         title="Connect Slack"
-        lede={`This installs ${org ? `${org}'s` : "your"} own copy of the Nest app in your Slack workspace. Installing it doesn't read anything: you pick channels in the next step.`}
+        lede={`This installs ${org ? `${org}'s` : "your"} copy of the Nest app in your Slack workspace. Installing it doesn't read anything: you pick channels in the next step.`}
       />
       <WillNever settings={state.settings} />
       {readiness && !connected && <ReadinessChecklist readiness={readiness} here={here} />}
@@ -616,15 +520,10 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
               <DialogHeader>
                 <DialogTitle>Disconnect Slack?</DialogTitle>
                 <DialogDescription>
-                  Nest stops listening in every channel. Pending review cards are withdrawn, the Slack token is revoked, and channel bindings, drafts and linked Slack users are removed. Approved notes, nest access and the audit history stay. You can connect again later.
+                  Nest stops listening in every channel. Pending review cards are withdrawn, the Slack token is revoked, and channel bindings, drafts and linked Slack users are removed. Approved notes, nest access and the audit history stay. The Slack app and its keys stay, so you can connect again later.
                 </DialogDescription>
               </DialogHeader>
               <DisconnectChannels bindings={state.bindings} />
-              {inst?.mode === "manifest" && (
-                <Note tone="warn" testId="disconnect-new-address">
-                  Connecting again makes a new connection with a new address. To reuse the same Slack app, you will paste a new manifest into it and save its three values again; until then no Slack messages arrive.
-                </Note>
-              )}
               <DialogFooter>
                 <Button variant="outline" onClick={() => setConfirmOff(false)} disabled={busy}>
                   Cancel
@@ -637,96 +536,30 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
           </Dialog>
         </Note>
       ) : (
-        <div className="rounded-lg border p-4">
-          {/* Hosted connects start a fresh install for the chosen nest, so the picker stays. */}
-          {(!inst || hosted) && (
+        <div className="space-y-4 rounded-lg border p-4">
+          <SlackAppCard onReady={setAppReady} />
+          <div className="border-t pt-4">
+            {/* Always choosable before connecting: a deleted nest must never trap the setup. */}
             <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
               <Label htmlFor="setup-home-nest" className="text-sm font-normal">
                 Saved notes land in
               </Label>
               <NestSelect id="setup-home-nest" label="Nest saved notes land in" value={homeNest} nests={state.nests} onChange={setHomeNest} />
             </div>
-          )}
-          <ol className="list-decimal space-y-1.5 pl-5 text-sm leading-relaxed">
-            {hosted ? (
-              <li>Approve the install in Slack. Slack shows exactly which permissions it asks for.</li>
-            ) : (
-              <>
-                <li>
-                  Create the app from our manifest. Slack shows exactly which permissions it asks for.
-                  <div className="mt-2">
-                    <Button variant="outline" className={small} onClick={download} disabled={busy || urlBad || (!inst && !homeNest)}>
-                      <Download className="mr-1.5 h-4 w-4" aria-hidden />
-                      Download manifest
-                    </Button>
-                  </div>
-                </li>
-                <li>{redirectBox ?? "Check that the app's OAuth & Permissions → Redirect URLs keeps the address the manifest set."}</li>
-                <li>
-                  Paste the three values Slack gives you. They are stored encrypted and never shown again.
-                  {inst && (
-                    <div className="mt-2 grid gap-2 sm:grid-cols-3" data-testid="setup-credentials">
-                      {CRED_FIELDS.map((f) => (
-                        <div key={f.key} className="min-w-0">
-                          <Label htmlFor={`cred-${f.key}`} className="flex items-center justify-between text-sm font-normal">
-                            {f.label}
-                            <span className={cn("text-sm", creds[f.key] ? "text-green-700" : "text-muted-foreground")} data-testid={`cred-state-${f.key}`}>
-                              {creds[f.key] ? "Saved" : "Not saved"}
-                            </span>
-                          </Label>
-                          <Input
-                            id={`cred-${f.key}`}
-                            type="password"
-                            autoComplete="off"
-                            spellCheck={false}
-                            className="mt-1 h-9"
-                            placeholder={creds[f.key] ? "Replace the saved value" : ""}
-                            value={values[f.key] ?? ""}
-                            onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
-                          />
-                        </div>
-                      ))}
-                      <div className="sm:col-span-3">
-                        <Button variant="outline" className={small} onClick={saveCreds} disabled={busy || !Object.values(values).some((v) => v.trim())}>
-                          Save values
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                </li>
-                <li>Approve the install in Slack.</li>
-              </>
-            )}
-          </ol>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <Button onClick={approve} disabled={busy || urlBad || (hosted ? !homeNest : !inst || !allCreds)}>
+            <Button onClick={approve} disabled={busy || urlBad || !appReady || !homeNest}>
               Open Slack to approve
             </Button>
-          </div>
-          {urlBad && (
-            <p className="mt-2 text-sm text-red-800" data-testid="setup-url-blocked">
-              Slack can&apos;t connect from here yet. Fix the address problem above first.
-            </p>
-          )}
-          {hosted && redirectBox && <div className="mt-3">{redirectBox}</div>}
-          {!hosted && (
-            <p className="mt-2 text-sm text-muted-foreground" data-testid="setup-manifest-note">
-              The manifest uses this server&apos;s current address. If that address changes, download it again and update the app&apos;s URLs in Slack.
-            </p>
-          )}
-          {!hosted && (
-            <details className="mt-3 text-sm" data-testid="setup-reuse-app">
-              <summary className="cursor-pointer font-medium">Using the same Slack app again after a disconnect?</summary>
-              <p className="mt-1 text-muted-foreground">
-                Each connection has its own id in the app&apos;s addresses. Until the app is updated, Slack keeps sending to the old one and nothing arrives here.
+            {!appReady && (
+              <p className="mt-2 text-sm text-muted-foreground" data-testid="setup-keys-needed">
+                Save the Slack app&apos;s three keys above first.
               </p>
-              <ol className="mt-1 list-decimal space-y-1 pl-5">
-                {REUSE_APP_STEPS.map((s) => (
-                  <li key={s}>{s}</li>
-                ))}
-              </ol>
-            </details>
-          )}
+            )}
+            {urlBad && (
+              <p className="mt-2 text-sm text-red-800" data-testid="setup-url-blocked">
+                Slack can&apos;t connect from here yet. Fix the address problem above first.
+              </p>
+            )}
+          </div>
         </div>
       )}
       <FootBar
