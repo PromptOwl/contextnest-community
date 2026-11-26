@@ -402,9 +402,13 @@ async function previewPeople(nestId: string, ev: Evaluation) {
   const present = new Set(people.map((m) => m.community_user_id).filter(Boolean));
   // At most PEOPLE_CAP names per list; guard.detail keeps the full counts.
   const absentIds = readers.users.filter((u) => !present.has(u)).slice(0, PEOPLE_CAP);
-  const outsiders = people
-    .filter((m) => !m.community_user_id || (!readers.users.includes(m.community_user_id) && !readers.serverAdmins.includes(m.community_user_id)))
-    .slice(0, PEOPLE_CAP);
+  // Other apps' bots in this workspace count against surface_ok too, so name them (they can't be added).
+  const home = homeTenant(install);
+  const bots = ev.mapped.filter((m) => m.is_bot && !m.is_external && m.home_tenant === home && m.surface_user_id !== install.bot_user_id);
+  const outsiders = [
+    ...people.filter((m) => !m.community_user_id || (!readers.users.includes(m.community_user_id) && !readers.serverAdmins.includes(m.community_user_id))),
+    ...bots,
+  ].slice(0, PEOPLE_CAP);
   const ids = [...absentIds, ...outsiders.map((m) => m.community_user_id)].filter((u): u is string => !!u && !u.includes(":"));
   const users = new Map(
     (ids.length
@@ -426,7 +430,7 @@ async function previewPeople(nestId: string, ev: Evaluation) {
     // po-1445: the email Slack has for someone with no account match, so the
     // admin can spot a mismatch. Only a confirmed one; preview only, never stored.
     const slack_email = !u && profile?.email_confirmed ? (profile.email ?? null) : null;
-    members_not_readers.push({ surface_user_id: m.surface_user_id, name, community_user_id: m.community_user_id, email: u?.email ?? null, slack_email });
+    members_not_readers.push({ surface_user_id: m.surface_user_id, name, community_user_id: m.community_user_id, email: u?.email ?? null, slack_email, is_bot: m.is_bot });
   }
   // po-1467: an unmatched member whose confirmed Slack email is a reader's is in
   // the channel; the identity rules refused the link. Say why, not "not in channel".

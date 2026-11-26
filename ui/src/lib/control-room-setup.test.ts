@@ -354,6 +354,28 @@ describe("po-1432: the wizard names who blocks a pair and offers to add channel 
     ]);
     expect(membersToAdd(preview())).toEqual([]);
   });
+
+  it("QA: proposals-only names who can't read, so a missing Add to nest is explained", () => {
+    const po = (members: People["members_not_readers"]) =>
+      guardView(withPeople(preview({ surface_ok: false, detail: { members_total: 2, members_not_readers: members.length } }), { members_not_readers: members }), ctx);
+    // Nobody can be added: an unmatched person and another app's bot are named, no "Can be added" list.
+    const none = po([
+      { surface_user_id: "SX", name: "Xavier", community_user_id: null, email: null, slack_email: "x@x.io" },
+      { surface_user_id: "B1", name: "Zapier", community_user_id: null, email: null, is_bot: true },
+    ]);
+    expect(none.state).toBe("proposals_only");
+    expect(none.groups).toEqual([
+      { heading: "No matching account on this server, so they can't be added:", people: ["Xavier: Slack email x@x.io"] },
+      { heading: "Apps in the channel. They can't be given access; remove them in Slack:", people: ["Zapier"] },
+    ]);
+    expect(membersToAdd(withPeople(preview(), { members_not_readers: [{ surface_user_id: "B1", name: "Zapier", community_user_id: null, email: null, is_bot: true }] }))[0].addable).toBe(false);
+    // An addable member is listed under its own heading.
+    expect(po([{ surface_user_id: "SC", name: "Carol", community_user_id: "u-carol", email: "carol@x.ai" }]).groups).toEqual([
+      { heading: "Can be added to the nest:", people: ["Carol (carol@x.ai)"] },
+    ]);
+    // An older server without people keeps the note alone.
+    expect(guardView(preview({ surface_ok: false, detail: { members_total: 2, members_not_readers: 1 } }), ctx).groups).toBeUndefined();
+  });
 });
 
 describe("po-1432 review: shared-deployment cause and capped name lists", () => {

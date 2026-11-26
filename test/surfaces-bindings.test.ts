@@ -1037,6 +1037,18 @@ describe("po-1432: the preview names who blocks a pair and who can't read the ne
     expect(members.SC).toMatchObject({ community_user_id: carol.userId, slack_email: null });
   });
 
+  it("QA: another app's bot that turns surface_ok off is named, so the count matches the names", async () => {
+    const { profile } = await import("./surfaces-fake-connector.js");
+    fake.profiles.set("SBOT", profile("SBOT", { display_name: "Zapier" }));
+    const n = await newNest(alice);
+    setConv("C-1432-BOT", ["SA", "SBOT"]);
+    fake.conversations.get("C-1432-BOT")!.members[1].is_bot = true;
+    const p = await preview("C-1432-BOT", n);
+    expect(p.guard.surface_ok).toBe(false);
+    expect(p.guard.detail.members_not_readers).toBe(1);
+    expect(p.people.members_not_readers).toEqual([expect.objectContaining({ surface_user_id: "SBOT", name: "Zapier", community_user_id: null, is_bot: true })]);
+  });
+
   it("po-1467: a reader whose email a channel member has, but whose link is refused, is not_linked with the reason; never not_in_channel", async () => {
     const { profile } = await import("./surfaces-fake-connector.js");
     // Same email in Community and Slack, but the Community email is not verified.

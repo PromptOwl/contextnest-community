@@ -195,7 +195,7 @@ function absentGroups(absent: AbsentReader[], members: Member[], ch: string): Pe
     add(
       `In ${ch} but not matched to an account here:`,
       members
-        .filter((m) => !m.community_user_id)
+        .filter((m) => !m.community_user_id && !m.is_bot)
         .map((m) => `${m.name ?? m.surface_user_id}: ${m.slack_email ? `Slack email ${m.slack_email}` : "Slack shares no confirmed email"}`),
     );
   }
@@ -206,7 +206,21 @@ function absentGroups(absent: AbsentReader[], members: Member[], ch: string): Pe
   return groups;
 }
 
-export type MemberToAdd = NonNullable<SurfacesBindingPreview["people"]>["members_not_readers"][number] & { addable: boolean };
+/** po-1432: name the channel members who can't read the nest, so a hidden "Add to nest" is explained. */
+function memberGroups(members: Member[]): { groups?: PeopleGroup[] } {
+  const label = (m: Member) => m.name ?? m.surface_user_id;
+  const groups = [
+    { heading: "Can be added to the nest:", people: members.filter((m) => m.community_user_id).map((m) => (m.email ? `${label(m)} (${m.email})` : label(m))) },
+    {
+      heading: "No matching account on this server, so they can't be added:",
+      people: members.filter((m) => !m.community_user_id && !m.is_bot).map((m) => (m.slack_email ? `${label(m)}: Slack email ${m.slack_email}` : label(m))),
+    },
+    { heading: "Apps in the channel. They can't be given access; remove them in Slack:", people: members.filter((m) => m.is_bot).map(label) },
+  ].filter((g) => g.people.length);
+  return groups.length ? { groups } : {};
+}
+
+export type MemberToAdd =NonNullable<SurfacesBindingPreview["people"]>["members_not_readers"][number] & { addable: boolean };
 
 /** po-1432: channel members who can't read the nest; only those with an account can be added. */
 export function membersToAdd(p: SurfacesBindingPreview): MemberToAdd[] {
@@ -274,6 +288,7 @@ export function guardView(p: SurfacesBindingPreview, ctx: { channel: string; nes
         n > 0
           ? `${n} of the ${plural(d.members_total, "member")} can't read ${ctx.nest}, so cards here never quote existing records.`
           : `Some people here can't read ${ctx.nest}, so cards here never quote existing records.`,
+      ...memberGroups(p.people?.members_not_readers ?? []),
     };
   }
   return { state: "ok", label: "Cards can show existing records", note: null, passed };
