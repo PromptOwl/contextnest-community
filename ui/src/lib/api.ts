@@ -4407,6 +4407,8 @@ export interface WorkItem {
   priority?: string;
   /** Review items: the version under review. */
   version?: number;
+  /** Review items: false when a newer version exists than the one under review. */
+  up_to_date?: boolean;
   /** Deletion items only: why it was flagged, and the row to resolve. */
   reason?: string;
   request_id?: string;

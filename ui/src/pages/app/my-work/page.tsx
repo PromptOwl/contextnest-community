@@ -1,8 +1,7 @@
 /**
  * MyWorkPage — My Work (/my-work): tasks assigned to you, the cross-nest review inbox, what you are waiting on, and watcher notifications.
  */
-import { RunLink } from "../../../components/RunLink";
-import { Fragment, useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import * as api from "../../../lib/api";
 import {
@@ -15,26 +14,47 @@ import { reads } from "../../../lib/queries";
 import { useAuth } from "../../../auth/AuthContext";
 import { useAppNav } from "../../../lib/app-nav";
 import {
-  ArrowLeft, Bell, Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, ChevronDown, CheckCircle2, XCircle,
+  ArrowLeft, Bell, Check, Inbox, Trash2, Loader2, ChevronRight, ChevronLeft, CheckCircle2, FileText, Pencil, Send, XCircle,
 } from "lucide-react";
 import { BULK_REVIEW_LIMIT } from "../../../lib/constants";
-import { nothingWaitingOnMe, splitWorkItems, workItemKey } from "../../../lib/my-work-groups";
+import { splitWorkItems, workItemKey } from "../../../lib/my-work-groups";
 import { toast } from "sonner";
 import { relTime, formatServerDate } from "../../../lib/dates";
 import { Button } from "@/components/ui/button";
-import { PageTitle } from "@/components/ui/page-title";
 import { APPROVE_BUTTON_CLASS, REJECT_BUTTON_CLASS } from "@/lib/review-actions-style";
 import { Checkbox } from "@/components/ui/checkbox";
-import { ReasonDialog, ReviewActions } from "../../../components/governance";
+import { ReasonDialog, ReviewPane, SubmitForReviewModal } from "../../../components/governance";
 import { MyWorkReviewPane } from "../../../components/MyWorkReviewPane";
 import { localToday } from "../../../lib/board-tasks";
 import { MentionRows } from "../../../components/my-work/MentionRows";
 import { keyOfConversationId } from "../../../lib/chat-live";
+import { QueueRow } from "../../../components/my-work/QueueRow";
+import { splitDrafts, upToDateReviews, type ReviewQueueKey } from "../../../lib/review-queues";
 import { AssignedTasks } from "../../../components/my-work/AssignedTasks";
 import { emptyPageStepBack, mergeLiveWork } from "../../../lib/my-work-inbox";
 import { openTasks, type TaskStatusFilter } from "../../../lib/my-work-tasks";
 
-type WorkTab = "all" | "approvals" | "tasks" | "mentions" | "notifications" | "waiting";
+type WorkTab = "reviews" | "tasks" | "mentions" | "notifications";
+
+function RowBadge({ tone, children }: { tone: "red" | "amber"; children: ReactNode }) {
+  return (
+    <span
+      className={cn(
+        "shrink-0 rounded px-1.5 text-[10px] font-semibold uppercase tracking-wide",
+        tone === "red"
+          ? "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300"
+          : "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300",
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+/** Sizes the workspace to the space under the app header. */
+function fitTop(el: HTMLDivElement | null) {
+  if (el) el.style.setProperty("--my-work-top", `${Math.max(0, Math.round(el.getBoundingClientRect().top + window.scrollY))}px`);
+}
 
 export default function MyWorkPage() {
   const { openNest: onSelectNest, openReview: onOpenReview, openChannel, goBack, initialReview } = useAppNav();
@@ -92,15 +112,17 @@ export default function MyWorkPage() {
   // discarding them.
   const [notificationsExpanded, setNotificationsExpanded] = useState(false);
   const qc = useQueryClient();
-  // "Waiting on others" needs nothing from you, so it starts folded.
-  const [waitingOpen, setWaitingOpen] = useState(false);
-  // Which part of the inbox is showing. "all" is the whole page, in order.
-  const [tab, setTab] = useState<WorkTab>("all");
+  const [queue, setQueue] = useState<ReviewQueueKey>("review");
+  const { data: draftData } = useQuery(reads.myDrafts({ limit: 100 }));
+  const [submitDraft, setSubmitDraft] = useState<api.MyDraft | null>(null);
+  const [discardTarget, setDiscardTarget] = useState<api.MyDraft | null>(null);
+  // What kind of work is showing; reviews first.
+  const [tab, setTab] = useState<WorkTab>("reviews");
   // Finished tasks load only when the Tasks filter asks for Done or All.
   const [withDone, setWithDone] = useState(false);
   const [loadingDone, setLoadingDone] = useState(false);
   // The change open beside the list.
-  const [openRev, setOpenRev] = useState<{ nestId: string; nodeId: string } | null>(initialReview ?? null);
+  const [openRev, setOpenRev] = useState<{ nestId: string; nodeId: string; requestId?: string } | null>(initialReview ?? null);
   // A new change handed in while the page is open (See changes, an old link).
   useEffect(() => {
     if (initialReview) setOpenRev(initialReview);
@@ -240,20 +262,6 @@ export default function MyWorkPage() {
       .finally(() => setWorkLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUserEmail]);
-
-  // Approve/reject both go through ReviewActions — the same required-feedback
-  // dialog used in the in-nest flow (NestView, DocumentEditor) — so rejecting
-  // from the inbox can't bypass the note requirement. Both throw on failure so
-  // the error lands in the dialog instead of a swallowed console line.
-  const approveReviewItem = async (w: api.WorkItem, note?: string) => {
-    await api.approveReview(w.nest_id, w.node_id, note);
-    dropWorkItem(w);
-  };
-
-  const rejectReviewItem = async (w: api.WorkItem, note: string) => {
-    await api.rejectReview(w.nest_id, w.node_id, note);
-    dropWorkItem(w);
-  };
 
   const { reviews: reviewItems, requests: requestItems } = splitWorkItems(work.items);
   const workKey = (w: api.WorkItem) => `${w.nest_id}:${w.node_id}`;
@@ -481,73 +489,232 @@ export default function MyWorkPage() {
   };
 
   const mentionCount = work.mentions_pagination?.total ?? work.mentions?.length ?? 0;
-  const workTabs: Array<{ key: WorkTab; label: string; count: number | null }> = [
-    { key: "all", label: "All", count: null },
-    { key: "approvals", label: "Approvals", count: work.pagination?.total ?? listItems.length },
+  const { drafts: draftRows, sentBack } = splitDrafts((draftData?.drafts ?? []).filter((d) => inNest(d.nest_id)));
+  const draftList = queue === "sent_back" ? sentBack : draftRows;
+  const onePage = !work.pagination || work.pagination.total <= work.pagination.limit;
+  const reviewCount =
+    onePage || nestFilter !== "all" ? listItems.length : Math.max(0, work.pagination!.total - work.waiting.length);
+  const queues: Array<{ key: ReviewQueueKey; label: string; count: number }> = [
+    { key: "review", label: "Review", count: reviewCount },
+    { key: "sent_back", label: "Sent back", count: sentBack.length },
+    { key: "drafts", label: "Drafts", count: draftRows.length },
+    { key: "mine", label: "Mine", count: work.waiting.length },
+  ];
+  const sections: Array<{ key: WorkTab; label: string; count: number }> = [
+    { key: "reviews", label: "Reviews", count: reviewCount },
     { key: "tasks", label: "Tasks", count: openTaskCount },
     { key: "mentions", label: "Mentions", count: mentionCount },
     { key: "notifications", label: "Notifications", count: work.notifications?.length ?? 0 },
-    { key: "waiting", label: "Waiting on others", count: work.waiting.length },
   ];
-  const show = (t: Exclude<WorkTab, "all">) => tab === "all" || tab === t;
-  const tabIsEmpty = tab !== "all" && (workTabs.find((t) => t.key === tab)?.count ?? 0) === 0;
+  const upToDate = upToDateReviews(reviewItems);
+  const workRows = queue === "mine" ? work.waiting : listItems;
+  const isOpen = (w: { nest_id: string; node_id: string }, requestId?: string) =>
+    openRev?.nestId === w.nest_id && openRev.nodeId === w.node_id && (openRev.requestId ?? "") === (requestId ?? "");
+  const rowRequestId = (w: api.WorkItem) => (w.type === "review" ? undefined : w.request_id);
+  const openRow = (w: api.WorkItem) => setOpenRev({ nestId: w.nest_id, nodeId: w.node_id, requestId: rowRequestId(w) });
+  const openItem = openRev
+    ? [...work.items, ...work.waiting].find((w) => isOpen(w, rowRequestId(w))) ?? null
+    : null;
+  const openDraft = openRev && (queue === "drafts" || queue === "sent_back") ? draftList.find((d) => isOpen(d)) ?? null : null;
+  const isMine = (w: api.WorkItem) => work.waiting.some((x) => workItemKey(x) === workItemKey(w) && x.type === w.type);
+  const openNestName =
+    openItem?.nest_name ?? openDraft?.nest_name ?? nestOptions.find(([id]) => id === openRev?.nestId)?.[1] ?? "";
+  // The pane is never empty while the queue has something in it: on a screen
+  // with room for both, the first row opens by itself.
+  const firstRow = queue === "review" || queue === "mine" ? workRows[0] : draftList[0];
+  const firstKey = firstRow ? `${firstRow.nest_id}:${firstRow.node_id}` : "";
+  useEffect(() => {
+    if (openRev || !firstRow || tab !== "reviews" || !window.matchMedia("(min-width: 1024px)").matches) return;
+    if ("request_id" in firstRow || "requested_by" in firstRow) openRow(firstRow as api.WorkItem);
+    else setOpenRev({ nestId: firstRow.nest_id, nodeId: firstRow.node_id });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openRev, firstKey, queue, tab]);
 
-  return (
-    <div className="space-y-4">
-      <PageTitle
-        icon={Inbox}
-        title="My Work"
-        description="Tasks, reviews and requests waiting on you, and what you handed off."
-        className="mb-0"
-        actions={
-          // Opened from the header bell: back to where you were (CU-wdqcq067ud).
-          goBack && (
-            <Button variant="outline" size="sm" onClick={goBack} data-testid="my-work-back">
-              <ArrowLeft className="h-4 w-4 mr-1.5" />
-              Back
+  // A draft that was submitted or discarded has left its queue: let go of it.
+  useEffect(() => {
+    if ((queue === "drafts" || queue === "sent_back") && openRev && draftData && !openDraft) setOpenRev(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queue, openRev, draftData]);
+
+  const refreshDrafts = () => qc.invalidateQueries({ queryKey: ["me", "drafts"] });
+  const withdraw = async (w: api.WorkItem) => {
+    try {
+      if (w.type === "review") await handleWithdrawReview(w);
+      else await handleWithdrawDeletion(w);
+      toast.success(
+        w.type === "review"
+          ? "Submission withdrawn — back to Draft"
+          : isArchiveAsk(w)
+            ? "Archive request withdrawn"
+            : "Deletion request withdrawn",
+      );
+      setOpenRev(null);
+      void refreshDrafts();
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to withdraw");
+    }
+  };
+  const discard = async (d: api.MyDraft) => {
+    const res = await api.discardDraft(d.nest_id, d.node_id);
+    toast.success(res.deleted ? "Draft deleted" : "Restored to the approved version");
+    setOpenRev(null);
+    void refreshDrafts();
+  };
+  const closePane = () => setOpenRev(null);
+
+  // A deletion, archive or access request: no text to compare, just the ask.
+  const requestPane = (w: api.WorkItem) => (
+    <div className="max-w-2xl space-y-4" data-testid="my-work-request-pane">
+      <p className="text-xs text-muted-foreground">
+        {w.nest_name} · <span className="font-mono">{w.node_id}</span>
+      </p>
+      <h2 className="text-xl font-semibold">{w.title}</h2>
+      <p className="text-sm text-muted-foreground">
+        <span className="font-medium text-foreground/80">{w.requested_by}</span>{" "}
+        {w.type === "access"
+          ? `asked for ${w.level === "read" ? "view" : "edit"} access`
+          : isArchiveAsk(w)
+            ? "asked to archive this nest"
+            : "asked to delete this"}{" "}
+        · {relTime(w.requested_at)}
+      </p>
+      {w.reason && <p className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 text-sm">{w.reason}</p>}
+      <div className="flex flex-wrap gap-2">
+        {isMine(w) ? (
+          w.type === "deletion" && (
+            <Button variant="outline" onClick={() => void withdraw(w)}>
+              Withdraw
             </Button>
           )
-        }
-      />
-      {/* One line says what is waiting; the nest filter narrows everything below. */}
-      <div
-        className="flex flex-wrap items-center gap-x-3 gap-y-2"
-        data-testid="my-work-filter-chips"
-      >
-        {!workLoading && (
-          <div role="tablist" aria-label="My Work" className="flex flex-wrap items-center gap-1.5" data-testid="my-work-tabs">
-            {workTabs.map((t) => (
-              <button
-                key={t.key}
-                type="button"
-                role="tab"
-                aria-selected={tab === t.key}
-                onClick={() => setTab(t.key)}
-                data-testid={`my-work-tab-${t.key}`}
-                className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-sm transition-colors ${
-                  tab === t.key
-                    ? "border-primary bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                }`}
-              >
-                {t.label}
-                {t.count !== null && (
-                  <span
-                    className={`rounded-full px-1.5 text-xs font-semibold ${
-                      tab === t.key
-                        ? "bg-primary-foreground/20"
-                        : t.count > 0 && t.key !== "waiting"
-                          ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
-                          : "bg-muted"
-                    }`}
-                  >
-                    {t.count}
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
+        ) : w.type === "access" ? (
+          <>
+            <Button
+              variant="outline"
+              className={APPROVE_BUTTON_CLASS}
+              onClick={() => void approveAccessItem(w)}
+              disabled={approvingAccessId === w.request_id}
+              data-testid="my-work-access-approve"
+            >
+              <CheckCircle2 className="mr-2 h-4 w-4" /> Approve
+            </Button>
+            <Button
+              variant="outline"
+              className={REJECT_BUTTON_CLASS}
+              onClick={() => setDenyAccessTarget(w)}
+              data-testid="my-work-access-deny"
+            >
+              <XCircle className="mr-2 h-4 w-4" /> Deny
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button
+              variant="outline"
+              className={isArchiveAsk(w) ? APPROVE_BUTTON_CLASS : "text-destructive hover:text-destructive"}
+              onClick={() => {
+                setDeletionAction("delete");
+                setDeletionTarget(w);
+              }}
+            >
+              {isArchiveAsk(w) ? <CheckCircle2 className="mr-2 h-4 w-4" /> : <Trash2 className="mr-2 h-4 w-4" />}
+              {isArchiveAsk(w) ? "Approve" : "Delete"}
+            </Button>
+            <Button
+              variant="outline"
+              className={REJECT_BUTTON_CLASS}
+              onClick={() => {
+                setDeletionAction("decline");
+                setDeletionTarget(w);
+              }}
+            >
+              <XCircle className="mr-2 h-4 w-4" /> Reject
+            </Button>
+          </>
         )}
+        <Button variant="ghost" onClick={() => openWorkItem(w)}>
+          Open
+        </Button>
+      </div>
+    </div>
+  );
+
+  const draftPanel = (d: api.MyDraft) => (
+    <>
+      <p className="text-sm font-semibold">{d.status === "rejected" ? "Sent back to you" : "Your draft"}</p>
+      <p className="mb-3 mt-0.5 text-xs text-muted-foreground">
+        {d.status === "rejected" ? "Revise it, then submit it again." : "Nobody else has been asked to review this yet."}
+      </p>
+      <div className="flex flex-col gap-2">
+        <Button onClick={() => setSubmitDraft(d)} data-testid="my-work-draft-submit">
+          <Send className="mr-2 h-4 w-4" /> Submit for review
+        </Button>
+        <Button variant="outline" onClick={() => onOpenReview(d.nest_id, d.nest_name, d.node_id)}>
+          <Pencil className="mr-2 h-4 w-4" /> Edit draft
+        </Button>
+        <Button
+          variant="ghost"
+          className="text-destructive hover:text-destructive"
+          onClick={() => setDiscardTarget(d)}
+        >
+          <Trash2 className="mr-2 h-4 w-4" /> Discard draft
+        </Button>
+      </div>
+    </>
+  );
+
+  const minePanel = (w: api.WorkItem) => (
+    <>
+      <p className="text-sm font-semibold">Waiting for review</p>
+      <p className="mb-3 mt-0.5 text-xs text-muted-foreground">You submitted this, so someone else reviews it.</p>
+      <div className="flex flex-col gap-2">
+        <Button variant="outline" onClick={() => onOpenReview(w.nest_id, w.nest_name, w.node_id)}>
+          <FileText className="mr-2 h-4 w-4" /> Open document
+        </Button>
+        <Button variant="ghost" onClick={() => void withdraw(w)}>
+          <ArrowLeft className="mr-2 h-4 w-4" /> Withdraw from review
+        </Button>
+      </div>
+    </>
+  );
+
+  return (
+    <div className="-mx-8 -my-6 flex flex-col lg:h-[calc(100dvh-var(--my-work-top,64px))]" ref={fitTop} data-testid="my-work">
+      {/* One thin line: what kind of work, and which nest. */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-4 py-2" data-testid="my-work-filter-chips">
+        {goBack && (
+          <Button variant="ghost" size="sm" onClick={goBack} data-testid="my-work-back">
+            <ArrowLeft className="mr-1.5 h-4 w-4" /> Back
+          </Button>
+        )}
+        <h1 className="sr-only" data-testid="page-title">My Work</h1>
+        <div role="tablist" aria-label="My Work" className="flex flex-wrap items-center gap-1" data-testid="my-work-tabs">
+          {sections.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              role="tab"
+              aria-selected={tab === t.key}
+              onClick={() => setTab(t.key)}
+              data-testid={`my-work-tab-${t.key}`}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-sm",
+                tab === t.key ? "bg-muted font-medium" : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {t.label}
+              {!workLoading && t.count > 0 && (
+                <span
+                  className={cn(
+                    "rounded-full px-1.5 text-xs font-semibold",
+                    t.key === "reviews" ? "bg-amber-500 text-white" : "bg-muted-foreground/15",
+                  )}
+                >
+                  {t.count}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
         {nestOptions.length > 1 && (
           <select
             value={nestFilter}
@@ -555,9 +722,10 @@ export default function MyWorkPage() {
               setNestFilter(e.target.value);
               // A hidden row must not stay selected: the bar counts the selection.
               setWorkSelected(new Set());
+              setOpenRev(null);
             }}
             aria-label="Filter by nest"
-            className="ml-auto h-7 max-w-[14rem] rounded-md border border-input bg-background px-2 text-xs"
+            className="ml-auto h-8 max-w-[14rem] rounded-md border border-input bg-background px-2 text-xs"
             data-testid="my-work-nest-filter"
           >
             <option value="all">All nests</option>
@@ -569,121 +737,125 @@ export default function MyWorkPage() {
           </select>
         )}
       </div>
-      <div className={openRev ? "grid gap-6 lg:grid-cols-[minmax(300px,420px)_minmax(0,1fr)]" : undefined}>
-          {/* My Work — cross-nest inbox. Slack/CRM-clean: two tight lists, every
-          row clicks straight to the document (circular nav), approve/reject
-          inline. "My Work" = waiting on you; "Waiting on" = you handed off. */}
-          <div className="space-y-5">
-            {show("approvals") && (<>
-            {/* Approvals — what a reviewer has to decide now. First on the page,
-                so it is never pushed below a long task list. */}
-            <section aria-labelledby="my-work-approvals-heading" data-testid="my-work-approvals" className="space-y-2">
-              <div className="flex items-center gap-2">
-                <h3 id="my-work-approvals-heading" className="text-sm font-medium">
-                  Approvals
-                </h3>
-                {listItems.length > 0 && (
-                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
-                    {work.pagination?.total ?? listItems.length}
+
+      {tab === "reviews" ? (
+        <div className="min-h-0 flex-1 lg:grid lg:grid-cols-[300px_minmax(0,1fr)]">
+          <div
+            className={cn("min-h-0 flex-col border-r lg:flex", openRev ? "hidden" : "flex")}
+            data-testid="my-work-approvals"
+          >
+            <div role="tablist" aria-label="Review queues" className="flex border-b">
+              {queues.map((q) => (
+                <button
+                  key={q.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={queue === q.key}
+                  onClick={() => {
+                    setQueue(q.key);
+                    setOpenRev(null);
+                    setWorkSelected(new Set());
+                  }}
+                  data-testid={`my-work-queue-${q.key}`}
+                  className={cn(
+                    "-mb-px flex flex-auto items-center justify-center gap-1 whitespace-nowrap border-b-2 px-1.5 py-2.5 text-xs",
+                    queue === q.key
+                      ? "border-primary font-medium text-primary"
+                      : "border-transparent text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {q.label}
+                  <span
+                    className={cn(
+                      "rounded-full px-1.5 text-[11px] font-semibold",
+                      queue === q.key ? "bg-primary/10 text-primary" : "bg-muted",
+                    )}
+                  >
+                    {q.count}
                   </span>
+                </button>
+              ))}
+            </div>
+            {queue === "review" && reviewItems.length > 1 && (
+              <div className="border-b px-3 py-2 text-xs text-muted-foreground">
+                <label className="flex items-center gap-2.5">
+                  <Checkbox
+                    checked={workSelected.size === 0 ? false : workSelected.size === upToDate.length ? true : "indeterminate"}
+                    disabled={upToDate.length === 0}
+                    onCheckedChange={(next: boolean | "indeterminate") =>
+                      setWorkSelected(next === true ? new Set(upToDate.map(workKey)) : new Set())
+                    }
+                    aria-label="Select every up-to-date review"
+                    data-testid="work-select-all"
+                  />
+                  {workSelected.size > 0 ? `${workSelected.size} selected` : `Select all up-to-date (${upToDate.length})`}
+                </label>
+                {workSelectionOverflow > 0 && (
+                  <p className="mt-1 text-destructive">
+                    Up to {BULK_REVIEW_LIMIT} per nest — deselect {workSelectionOverflow}.
+                  </p>
+                )}
+                {workSelected.size > 0 && (
+                  <div className="mt-2 flex gap-2">
+                    <Button
+                      size="sm"
+                      className="bg-green-600 text-white hover:bg-green-700"
+                      disabled={workSelectionOverflow > 0}
+                      onClick={() => setWorkBulkAction("approve")}
+                      data-testid="work-bulk-approve"
+                    >
+                      Approve {workSelected.size}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={workSelectionOverflow > 0}
+                      onClick={() => setWorkBulkAction("reject")}
+                      data-testid="work-bulk-reject"
+                    >
+                      Reject {workSelected.size}
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setWorkSelected(new Set())}>
+                      Clear
+                    </Button>
+                  </div>
                 )}
               </div>
+            )}
+            <div className="min-h-0 flex-1 overflow-y-auto">
               {workLoading ? (
-                // Loader, not the empty state: "nothing here" while the
-                // best-effort /me/work fetch is still in flight reads as an
-                // answer, same reasoning as draftsLoading below.
-                <div className="rounded-lg border bg-muted/20 px-4 py-6 flex items-center justify-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Loading your work…
+                <div className="flex items-center justify-center gap-2 px-4 py-10 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" /> Loading your work…
                 </div>
-              ) : nothingWaitingOnMe(work) ? (
-                <div className="rounded-lg border bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
-                  You're all caught up — nothing waiting on you.
-                </div>
-              ) : listItems.length > 0 ? (
-                <div className="rounded-lg border divide-y overflow-hidden">
-                  {/* Batch decision bar — a folder import lands here as many
-                      rows carrying the same decision. Reviews only. */}
-                  {reviewItems.length > 1 && (
-                    <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 bg-muted px-4 py-2 text-sm shadow-sm">
-                      <Checkbox
-                        // Partial selections read as "some", not "none".
-                        checked={
-                          workSelected.size === 0
-                            ? false
-                            : workSelected.size === reviewItems.length
-                              ? true
-                              : "indeterminate"
-                        }
-                        onCheckedChange={(next: boolean | "indeterminate") =>
-                          setWorkSelected(
-                            next === true
-                              ? new Set(reviewItems.map(workKey))
-                              : new Set(),
-                          )
-                        }
-                        aria-label="Select every review waiting on you"
-                        data-testid="work-select-all"
-                      />
-                      <span className="text-muted-foreground">
-                        {workSelected.size > 0
-                          ? `${workSelected.size} selected`
-                          : `Select all ${reviewItems.length} reviews`}
-                      </span>
-                      {workSelectionOverflow > 0 && (
-                        <span className="text-destructive">
-                          Up to {BULK_REVIEW_LIMIT} per nest — deselect{" "}
-                          {workSelectionOverflow}.
-                        </span>
-                      )}
-                      {workSelected.size > 0 && (
-                        <div className="ml-auto flex items-center gap-2">
-                          <Button
-                            size="sm"
-                            disabled={workSelectionOverflow > 0}
-                            onClick={() => setWorkBulkAction("approve")}
-                            data-testid="work-bulk-approve"
-                          >
-                            Approve {workSelected.size}
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={workSelectionOverflow > 0}
-                            onClick={() => setWorkBulkAction("reject")}
-                            data-testid="work-bulk-reject"
-                          >
-                            Reject {workSelected.size}
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => setWorkSelected(new Set())}
-                          >
-                            Clear
-                          </Button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {listItems.map((w, i) => {
-                    const key = `${w.nest_id}:${w.node_id}`;
-                    return (
-                      <Fragment key={workItemKey(w)}>
-                      {i === reviewItems.length && requestItems.length > 0 && (
-                        <div className="bg-muted/40 px-4 py-2 text-sm text-muted-foreground">
-                          {requestItems.length} {requestItems.length === 1 ? "request" : "requests"} · approve or reject each one
-                        </div>
-                      )}
-                      <div
-                        className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 group"
-                      >
-                        {reviewItems.length > 1 && (
+              ) : queue === "review" || queue === "mine" ? (
+                workRows.map((w) => {
+                  const key = workKey(w);
+                  const stale = w.type === "review" && w.up_to_date === false;
+                  const inReview = queue === "review" && w.type === "review";
+                  return (
+                    <QueueRow
+                      key={`${w.type}:${workItemKey(w)}`}
+                      title={w.title}
+                      path={w.node_id}
+                      who={queue === "mine" ? w.nest_name : w.requested_by}
+                      when={nestFilter === "all" && queue === "review" ? `${relTime(w.requested_at)} · ${w.nest_name}` : relTime(w.requested_at)}
+                      selected={isOpen(w, rowRequestId(w))}
+                      onOpen={() => openRow(w)}
+                      badge={
+                        w.type !== "review" ? (
+                          <RowBadge tone="red">{workItemKind(w)}</RowBadge>
+                        ) : stale ? (
+                          <RowBadge tone="amber">Outdated</RowBadge>
+                        ) : w.priority === "urgent" || w.priority === "high" ? (
+                          <RowBadge tone={w.priority === "urgent" ? "red" : "amber"}>{w.priority}</RowBadge>
+                        ) : null
+                      }
+                      checkbox={
+                        queue === "review" && reviewItems.length > 1 ? (
                           <Checkbox
-                            checked={workSelected.has(key)}
-                            // Deletion rows keep their own two-way decision, so
-                            // they hold the column without being selectable.
-                            disabled={w.type !== "review"}
+                            checked={workSelected.has(key) && inReview}
+                            disabled={!inReview}
+                            className={inReview ? "" : "invisible"}
                             onCheckedChange={() =>
                               setWorkSelected((prev) => {
                                 const next = new Set(prev);
@@ -692,104 +864,58 @@ export default function MyWorkPage() {
                               })
                             }
                             aria-label={`Select ${w.title}`}
-                            className={w.type === "review" ? "" : "invisible"}
                           />
-                        )}
-                        <span
-                          className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0 ${w.type === "deletion" && !isArchiveAsk(w)
-                              ? "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300"
-                              : "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
-                            }`}
-                        >
-                          {workItemKind(w)}
-                        </span>
-                        <button
-                          onClick={() => openWorkItem(w)}
-                          className="flex items-center gap-2 min-w-0 flex-1 text-left"
-                        >
-                          <span className="font-medium truncate">{w.title}</span>
-                          <span className="text-xs text-muted-foreground truncate">
-                            in {w.nest_name} · {w.requested_by} · {relTime(w.requested_at)}
-                            {w.reason ? ` · "${w.reason}"` : ""}
-                          </span>
-                        </button>
-                        <RunLink nestId={w.nest_id} runId={w.run_id} className="shrink-0" />
-                        <div className="flex items-center gap-2 shrink-0">
-                          {w.type === "access" ? (
-                            <>
-                              <Button
-                                variant="outline"
-                                className={APPROVE_BUTTON_CLASS}
-                                onClick={() => void approveAccessItem(w)}
-                                disabled={approvingAccessId === w.request_id}
-                                data-testid="my-work-access-approve"
-                              >
-                                <CheckCircle2 className="h-4 w-4 mr-2" /> Approve
-                              </Button>
-                              <Button
-                                variant="outline"
-                                className={REJECT_BUTTON_CLASS}
-                                onClick={() => setDenyAccessTarget(w)}
-                                data-testid="my-work-access-deny"
-                              >
-                                <XCircle className="h-4 w-4 mr-2" /> Deny
-                              </Button>
-                            </>
-                          ) : w.type === "deletion" ? (
-                            <>
-                              {/* Honouring an archive ask archives — it is an
-                                  approval, not a destruction, so it says so and
-                                  wears the same green/red pair as ReviewActions. */}
-                              <Button
-                                variant="outline"
-                                className={
-                                  isArchiveAsk(w)
-                                    ? APPROVE_BUTTON_CLASS
-                                    : "text-destructive hover:text-destructive"
-                                }
-                                onClick={() => {
-                                  setDeletionAction("delete");
-                                  setDeletionTarget(w);
-                                }}
-                              >
-                                {isArchiveAsk(w) ? (
-                                  <CheckCircle2 className="h-4 w-4 mr-2" />
-                                ) : (
-                                  <Trash2 className="h-4 w-4 mr-2" />
-                                )}
-                                {isArchiveAsk(w) ? "Approve" : "Delete"}
-                              </Button>
-                              <Button
-                                variant="outline"
-                                className={REJECT_BUTTON_CLASS}
-                                onClick={() => {
-                                  setDeletionAction("decline");
-                                  setDeletionTarget(w);
-                                }}
-                              >
-                                <XCircle className="h-4 w-4 mr-2" /> Reject
-                              </Button>
-                            </>
-                          ) : (
-                            <ReviewActions
-                              documentTitle={w.title}
-                              version={w.version ?? 1}
-                              onApprove={(note) => approveReviewItem(w, note)}
-                              onReject={(note) => rejectReviewItem(w, note)}
-                            />
-                          )}
-                        </div>
-                      </div>
-                      </Fragment>
-                    );
-                  })}
-                </div>
+                        ) : undefined
+                      }
+                      action={
+                        inReview && !stale && workSelected.size === 0 ? (
+                          <Button
+                            size="sm"
+                            className="h-7 bg-green-600 px-2 text-xs text-white hover:bg-green-700"
+                            onClick={() => {
+                              setWorkSelected(new Set([key]));
+                              setWorkBulkAction("approve");
+                            }}
+                            data-testid="my-work-row-approve"
+                          >
+                            <Check className="mr-1 h-3.5 w-3.5" /> Approve
+                          </Button>
+                        ) : undefined
+                      }
+                    />
+                  );
+                })
               ) : (
-                <p className="px-1 text-sm text-muted-foreground" data-testid="my-work-no-approvals">
-                  No approvals waiting on you.
+                draftList.map((d) => (
+                  <QueueRow
+                    key={`${d.nest_id}:${d.node_id}`}
+                    title={d.title}
+                    path={d.node_id}
+                    who={d.nest_name}
+                    when={relTime(d.updated_at)}
+                    selected={isOpen(d)}
+                    onOpen={() => setOpenRev({ nestId: d.nest_id, nodeId: d.node_id })}
+                  />
+                ))
+              )}
+              {!workLoading && !firstRow && (
+                <p className="px-4 py-10 text-center text-sm text-muted-foreground" data-testid="my-work-no-approvals">
+                  {
+                    {
+                      review: "You're all caught up — nothing waiting on you.",
+                      sent_back: "Nothing has been sent back to you.",
+                      drafts: "No unsubmitted drafts.",
+                      mine: "You are not waiting on anyone.",
+                    }[queue]
+                  }
                 </p>
               )}
-            </section>
+              {(draftData?.pagination.total ?? 0) > (draftData?.drafts.length ?? 0) && (queue === "drafts" || queue === "sent_back") && (
+                <p className="px-4 py-3 text-xs text-muted-foreground">
+                  Showing your {draftData!.drafts.length} latest. My Drafts has the rest.
+                </p>
+              )}
+              {(queue === "review" || queue === "mine") && (<>
             {work.pagination && work.pagination.total > work.pagination.limit && (
               <div className="flex items-center justify-center gap-3 pt-1 text-sm text-muted-foreground">
                 <Button
@@ -820,10 +946,78 @@ export default function MyWorkPage() {
                 </Button>
               </div>
             )}
-            </>)}
-            {/* Tasks assigned to you, across nests: open ones by default,
-                most pressing first, filterable. */}
-            {!workLoading && show("tasks") && (
+              </>)}
+            </div>
+          </div>
+          <div
+            className={cn("min-h-0 min-w-0 overflow-y-auto bg-muted/20 px-5 py-5 lg:block", !openRev && "hidden")}
+            data-testid="my-work-review-pane"
+          >
+            {!openRev ? (
+              <div className="mx-auto mt-24 max-w-sm rounded-lg border border-dashed bg-background px-6 py-8 text-center">
+                <Inbox className="mx-auto mb-3 h-6 w-6 text-muted-foreground" aria-hidden />
+                <p className="text-sm font-medium">Select an item to review</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Pick a draft from the list to read it, compare it with the published version, and approve it or send it back.
+                </p>
+              </div>
+            ) : (
+              <>
+                <Button variant="ghost" size="sm" className="mb-2 lg:hidden" onClick={closePane}>
+                  <ArrowLeft className="mr-1.5 h-4 w-4" /> Queue
+                </Button>
+                {openItem && openItem.type !== "review" ? (
+                  requestPane(openItem)
+                ) : openDraft ? (
+                  <ReviewPane
+                    key={`${openDraft.nest_id}:${openDraft.node_id}`}
+                    layout="workspace"
+                    nestId={openDraft.nest_id}
+                    nestName={openDraft.nest_name}
+                    state={openDraft.status === "rejected" ? "sent_back" : "draft"}
+                    request={{
+                      id: openDraft.node_id,
+                      nodeId: openDraft.node_id,
+                      title: openDraft.title,
+                      version: openDraft.version,
+                      requestedBy: currentUserEmail ?? "You",
+                      requestedAt: openDraft.updated_at,
+                      priority: "normal",
+                    }}
+                    canEditDocs={false}
+                    primeTags={[]}
+                    panel={draftPanel(openDraft)}
+                    onApprove={async () => {}}
+                    onRequestChanges={async () => {}}
+                    onEditDraft={() => {}}
+                    onOpenDocument={(id) => onOpenReview(openDraft.nest_id, openDraft.nest_name, id)}
+                    onClose={closePane}
+                  />
+                ) : (
+                  <MyWorkReviewPane
+                    key={`${openRev.nestId}:${openRev.nodeId}`}
+                    nestId={openRev.nestId}
+                    nodeId={openRev.nodeId}
+                    nestName={openNestName}
+                    panel={openItem && isMine(openItem) ? minePanel(openItem) : undefined}
+                    currentUser={currentUserEmail?.toLowerCase()}
+                    onDecided={afterDecision}
+                    onSkip={
+                      skipTarget && queue === "review"
+                        ? () => setOpenRev({ nestId: skipTarget.nest_id, nodeId: skipTarget.node_id })
+                        : undefined
+                    }
+                    onOpenDocument={(id) => onOpenReview(openRev.nestId, openNestName, id)}
+                    onClose={closePane}
+                  />
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto px-8 py-6">
+          {tab === "tasks" && !workLoading && (
               <AssignedTasks
                 items={work.assigned ?? []}
                 today={localToday()}
@@ -831,11 +1025,9 @@ export default function MyWorkPage() {
                 onStatusChange={(st) => void onTaskStatusChange(st)}
                 onOpen={(a) => onOpenReview(a.nest_id, a.nest_name, a.node_id)}
               />
-            )}
-            {/* Open threads that @mention you, in channels and on documents,
-                waiting on your reply (PO-1180). Reply, resolve or mark done
-                and the row goes. Newest first; click jumps to the thread. */}
-            {show("mentions") && (<MentionRows
+          )}
+          {tab === "mentions" && (mentionCount > 0 ? (
+            <MentionRows
               mentions={work.mentions ?? []}
               viewer={adminStatus?.me ?? null}
               pagination={work.mentions_pagination}
@@ -844,8 +1036,11 @@ export default function MyWorkPage() {
               onOpen={openMention}
               onDone={markMentionDone}
               onPage={goToMentionsPage}
-            />)}
-              {show("notifications") && (work.notifications?.length ?? 0) > 0 && (
+            />
+          ) : (
+            <p className="text-sm text-muted-foreground" data-testid="my-work-tab-empty">No mentions waiting on you.</p>
+          ))}
+          {tab === "notifications" && ((work.notifications?.length ?? 0) > 0 ? (
                 <div className="rounded-lg border border-amber-300/50 bg-amber-500/5">
                   <div className="px-4 py-2 flex items-center gap-2 text-sm font-medium">
                     <Bell className="h-4 w-4 text-amber-600" aria-hidden /> Notifications
@@ -936,147 +1131,47 @@ export default function MyWorkPage() {
                     </div>
                   )}
                 </div>
-              )}
-            {show("waiting") && work.waiting.length > 0 && (
-              <div>
-                <button
-                  type="button"
-                  onClick={() => setWaitingOpen((v) => !v)}
-                  aria-expanded={waitingOpen}
-                  className="mb-2 flex items-center gap-2 text-left"
-                  data-testid="my-work-waiting-toggle"
-                >
-                  <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${waitingOpen ? "" : "-rotate-90"}`} aria-hidden />
-                  <h3 className="text-sm font-medium">
-                    Waiting on others
-                  </h3>
-                  <span className="rounded-full bg-muted text-muted-foreground text-xs font-semibold px-2 py-0.5">
-                    {work.waiting.length}
-                  </span>
-                </button>
-                {(waitingOpen || tab === "waiting") && (
-                <div className="rounded-lg border divide-y overflow-hidden">
-                  {work.waiting.map((w) => (
-                    <div
-                      key={workItemKey(w)}
-                      className="flex items-center gap-3 px-4 py-2 hover:bg-muted/40 group text-sm"
-                    >
-                      <button
-                        onClick={() => openWorkItem(w)}
-                        className="flex-1 min-w-0 text-left"
-                      >
-                        <span className="block truncate font-medium">{w.title}</span>
-                        <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-                          in {w.nest_name} ·{" "}
-                          {w.type === "review" ? "submitted" : "requested"}{" "}
-                          {relTime(w.requested_at)}
-                        </span>
-                      </button>
-                      <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">
-                        {w.type === "access"
-                          ? "Access Requested"
-                          : w.type !== "deletion"
-                            ? "Pending Review"
-                            : isArchiveAsk(w)
-                              ? "Archive Requested"
-                              : "Deletion Requested"}
-                      </span>
-                      {w.type === "deletion" && w.request_id && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="shrink-0 text-muted-foreground h-7 px-2"
-                          onClick={async (e) => {
-                            e.stopPropagation();
-                            try {
-                              await handleWithdrawDeletion(w);
-                              toast.success(
-                                isArchiveAsk(w)
-                                  ? "Archive request withdrawn"
-                                  : "Deletion request withdrawn",
-                              );
-                            } catch (err: any) {
-                              // Same feedback the nest view and the editor give
-                              // for this action — a silent no-op left the row
-                              // sitting there with no explanation.
-                              toast.error(
-                                err?.message || "Failed to withdraw deletion request",
-                              );
-                            }
-                          }}
-                          title="Withdraw this deletion request"
-                        >
-                          Withdraw
-                        </Button>
-                      )}
-                      {w.type === "review" && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="shrink-0 text-muted-foreground h-7 px-2"
-                          onClick={async (e) => {
-                            e.stopPropagation();
-                            try {
-                              await handleWithdrawReview(w);
-                              toast.success(
-                                "Submission withdrawn — back to Draft",
-                              );
-                            } catch (err: any) {
-                              toast.error(
-                                err?.message || "Failed to withdraw submission",
-                              );
-                            }
-                          }}
-                          title="Withdraw this submission and return the document to Draft"
-                        >
-                          Withdraw
-                        </Button>
-                      )}
-                      <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:translate-x-0.5 transition-transform shrink-0" />
-                    </div>
-                  ))}
-                </div>
-                )}
-              </div>
-            )}
-            {!workLoading && tabIsEmpty && tab !== "approvals" && tab !== "tasks" && (
-              <p className="px-1 text-sm text-muted-foreground" data-testid="my-work-tab-empty">
-                {tab === "mentions"
-                  ? "No mentions waiting on you."
-                  : tab === "notifications"
-                    ? "No notifications."
-                    : "You are not waiting on anyone."}
-              </p>
-            )}
-          </div>
-          {openRev && (
-            <div className="min-w-0" data-testid="my-work-review-pane">
-              <MyWorkReviewPane
-                key={`${openRev.nestId}:${openRev.nodeId}`}
-                nestId={openRev.nestId}
-                nodeId={openRev.nodeId}
-                currentUser={currentUserEmail?.toLowerCase()}
-                onDecided={afterDecision}
-                onSkip={
-                  skipTarget
-                    ? () => setOpenRev({ nestId: skipTarget.nest_id, nodeId: skipTarget.node_id })
-                    : undefined
-                }
-                onOpenDocument={(id) => {
-                  const w = [...reviewItems, ...work.waiting].find((x) => x.node_id === id);
-                  onOpenReview(openRev.nestId, w?.nest_name ?? "", id);
-                }}
-                onClose={() => setOpenRev(null)}
-              />
-            </div>
-          )}
-      </div>
+          ) : (
+            <p className="text-sm text-muted-foreground" data-testid="my-work-tab-empty">No notifications.</p>
+          ))}
+        </div>
+      )}
 
+      {submitDraft && (
+        <SubmitForReviewModal
+          isOpen
+          onClose={() => setSubmitDraft(null)}
+          documentTitle={submitDraft.title}
+          currentVersion={submitDraft.version}
+          onSubmit={async (note, priority) => {
+            await api.submitForReview(submitDraft.nest_id, submitDraft.node_id, note, priority);
+            setOpenRev(null);
+            void refreshDrafts();
+            void goToWorkPage(work.pagination?.offset ?? 0);
+          }}
+        />
+      )}
+      {discardTarget && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setDiscardTarget(null)}
+          title={`Discard "${discardTarget.title}"?`}
+          description="A document that was approved before goes back to that version. One that never was is deleted."
+          confirmLabel="Discard draft"
+          destructive
+          onConfirm={() => discard(discardTarget)}
+        />
+      )}
 
       {workBulkAction && (
         <ReasonDialog
           open
-          onOpenChange={(o) => !o && setWorkBulkAction(null)}
+          onOpenChange={(o) => {
+            if (o) return;
+            setWorkBulkAction(null);
+            // A row's own Approve selected just that row; cancelling undoes it.
+            if (workSelected.size === 1) setWorkSelected(new Set());
+          }}
           title={
             workBulkAction === "approve"
               ? `Approve ${workSelected.size} document${workSelected.size === 1 ? "" : "s"}?`

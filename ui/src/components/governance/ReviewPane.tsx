@@ -9,10 +9,11 @@
  * document editor, where the edit-and-approve flow (CU-wdqcq04wnw) lives.
  */
 import { displayNameFor } from "../../lib/person-name";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2,
+  ChevronRight,
   CornerUpLeft,
   Eye,
   FileDiff,
@@ -20,6 +21,7 @@ import {
   Loader2,
   Lock,
   Pencil,
+  Plus,
   Send,
   SkipForward,
   X,
@@ -37,11 +39,13 @@ import {
 } from "../../lib/review-pane";
 import { MarkdownEditor } from "../MarkdownEditor";
 import { DiffViewer } from "./DiffViewer";
-import { ReviewProvenance } from "./ReviewProvenance";
+import { ReviewProvenance, provenanceRows } from "./ReviewProvenance";
 import { ReviewTaskDetails, isTaskLike } from "./ReviewTaskDetails";
 import { summarizeChange } from "./change-summary";
 import { unifiedDiff } from "./diff-util";
 import { rowDiffLines, tableRowDiff } from "../../lib/table-row-diff";
+import { crumbFolders } from "../../lib/review-queues";
+import { reviewActivity } from "../../lib/review-activity";
 import type { ReviewRequest } from "./ReviewQueue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -70,7 +74,21 @@ interface ReviewPaneProps {
   onEditDraft: () => void;
   onOpenDocument: (nodeId: string) => void;
   onClose: () => void;
+  /** "workspace": My Work's full-height layout, with the decision and Activity
+   *  in a right rail. Default: the stacked pane of a nest's Review tab. */
+  layout?: "stacked" | "workspace";
+  nestName?: string;
+  /** Workspace: where this document stands. Default: in review. */
+  state?: "review" | "draft" | "sent_back";
+  /** Workspace: replaces the reviewer's decision (your own draft or submission). */
+  panel?: ReactNode;
 }
+
+const STATE = {
+  review: { label: "In review", cls: "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300", dot: "bg-amber-500" },
+  draft: { label: "Draft", cls: "bg-muted text-muted-foreground", dot: "bg-muted-foreground" },
+  sent_back: { label: "Sent back", cls: "bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300", dot: "bg-red-500" },
+} as const;
 
 function since(dateStr: string) {
   const date = parseServerDate(dateStr);
@@ -97,7 +115,12 @@ export function ReviewPane({
   onEditDraft,
   onOpenDocument,
   onClose,
+  layout = "stacked",
+  nestName,
+  state = "review",
+  panel,
 }: ReviewPaneProps) {
+  const workspace = layout === "workspace";
   const qc = useQueryClient();
   const nodeId = request.nodeId;
 
@@ -126,9 +149,10 @@ export function ReviewPane({
     if (tabChosenFor === nodeId) return;
     // New document, versions still loading: drop the last document's tab.
     if (!versions) return setTab("preview");
-    setTab(defaultReviewTab({ approvedVersion, pendingVersion }));
+    // The workspace opens on the document itself; Changes is one click away.
+    setTab(workspace ? "preview" : defaultReviewTab({ approvedVersion, pendingVersion }));
     setTabChosenFor(nodeId);
-  }, [versions, nodeId, approvedVersion, pendingVersion, tabChosenFor]);
+  }, [versions, nodeId, approvedVersion, pendingVersion, tabChosenFor, workspace]);
 
   // Inline decisions: no second dialog.
   const [mode, setMode] = useState<"idle" | "approve" | "changes" | "reject">("idle");
@@ -214,79 +238,169 @@ export function ReviewPane({
         { key: "published", label: `Live version (v${approvedVersion})`, icon: FileText },
       ]
     : [{ key: "preview", label: "Full draft", icon: Eye }];
+  if (workspace) {
+    tabs.sort((a, b) => ["preview", "changes", "published"].indexOf(a.key) - ["preview", "changes", "published"].indexOf(b.key));
+    for (const t of tabs) {
+      if (t.key === "preview") t.label = "Preview";
+      if (t.key === "published") t.label = `Published v${approvedVersion}`;
+    }
+  }
   const typeLabel = type ? type.charAt(0).toUpperCase() + type.slice(1) : null;
   const changeSummary =
     hasPublished && publishedBody != null ? summarizeChange(publishedBody, body || "").text : null;
 
   const requester = displayNameFor(request.requestedByName ?? request.requestedBy);
-  return (
-    <div className="flex min-w-0 flex-col gap-4" data-testid="review-pane">
-      {/* Header: what this is, who sent it, what it changes. */}
-      <div className="flex items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <h2 className="text-xl font-semibold leading-tight">{title}</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            From <span className="font-medium text-foreground/80">{requester}</span> ·{" "}
-            {since(request.requestedAt)}
-            {" · "}
-            {hasPublished
-              ? `edits live v${approvedVersion} into v${pendingVersion}`
-              : approvedVersion == null
-                ? "first version"
-                : `v${pendingVersion}`}
-            {typeLabel && <> · {typeLabel}</>}
-          </p>
-          <p
-            className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground/70"
-            title={nodeId}
-          >
-            {nodeId}
-          </p>
-        </div>
-        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onClose} aria-label="Close review">
-          <X className="h-4 w-4" />
-        </Button>
-      </div>
+  const provenance = provenanceRows({
+    requestedBy: requester,
+    requestedAt: request.requestedAt,
+    runId: request.runId,
+    lastEdit: (node as { last_edit?: any } | undefined)?.last_edit ?? null,
+  });
+  const verdict = state === "sent_back" ? versions?.versions?.find((v: any) => v.version === pendingVersion) : null;
+  const callout = verdict?.resolutionNote
+    ? { tone: "back" as const, title: `${verdict.resolvedBy} ${verdict.resolutionKind === "reject" ? "rejected this" : "asked for changes"}`, text: verdict.resolutionNote as string }
+    : request.requestNote
+      ? { tone: "note" as const, title: `${requester}’s note · submitted ${since(request.requestedAt)}`, text: request.requestNote }
+      : null;
 
-      {/* Why the author made the change, in full. */}
-      {request.requestNote && (
-        <div
-          className="flex gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm dark:border-blue-900 dark:bg-blue-950/40"
-          data-testid="review-pane-note"
-        >
-          <Send className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
-          <div className="min-w-0">
-            <p className="text-xs font-medium text-blue-800 dark:text-blue-300">
-              {requester}&rsquo;s note
-            </p>
-            <p className="mt-0.5 whitespace-pre-wrap">{request.requestNote}</p>
+  const decision = lockedReason ? (
+          <div className="flex gap-2 text-sm text-muted-foreground" data-testid="review-pane-readonly">
+            <Lock className="mt-0.5 h-4 w-4 shrink-0" />
+            <p>{lockedReason}</p>
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="space-y-2">
+            {mode !== "idle" && (
+              <Textarea
+                autoFocus
+                value={note}
+                onChange={(e) => {
+                  setNote(e.target.value);
+                  setError(null);
+                }}
+                disabled={processing}
+                placeholder={
+                  mode === "changes"
+                    ? "What needs to change? (required)"
+                    : mode === "reject"
+                      ? "Why is this being rejected? (required)"
+                      : "Comment for the author (optional)"
+                }
+                className="min-h-[72px] text-sm"
+                data-testid="review-pane-note-input"
+              />
+            )}
+            {error && <p className="text-xs text-destructive">{error}</p>}
+            <div className={workspace ? "flex flex-col-reverse items-stretch gap-2 [&_button]:w-full" : "flex flex-wrap items-center gap-2"}>
+              <div className={workspace ? "flex flex-col items-stretch gap-1" : "mr-auto flex items-center gap-2"}>
+                {mode === "idle" && canEditDraft && (
+                  <Button
+                    variant={workspace ? "outline" : "ghost"}
+                    size={workspace ? "default" : "sm"}
+                    disabled={processing}
+                    onClick={onEditDraft}
+                    data-testid="review-pane-edit"
+                  >
+                    <Pencil className="mr-1.5 h-4 w-4" /> Edit draft
+                  </Button>
+                )}
+                {mode === "idle" && onSkip && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={processing}
+                    onClick={onSkip}
+                    data-testid="review-pane-skip"
+                    title="Leave this for later and open the next change. It stays in your queue."
+                  >
+                    <SkipForward className="mr-1.5 h-4 w-4" /> Skip
+                  </Button>
+                )}
+                {mode === "idle" && (
+                  <button
+                    type="button"
+                    className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+                    onClick={() => setMode("approve")}
+                  >
+                    Add a comment
+                  </button>
+                )}
+                {mode !== "idle" && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={processing}
+                    onClick={() => {
+                      setMode("idle");
+                      setNote("");
+                      setError(null);
+                    }}
+                    data-testid="review-pane-cancel"
+                  >
+                    Cancel
+                  </Button>
+                )}
+              </div>
+              {onReject && mode !== "approve" && mode !== "changes" && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  disabled={processing}
+                  onClick={() => (mode === "reject" ? decide("reject") : setMode("reject"))}
+                  data-testid="review-pane-reject"
+                  title="Decline this for good. The author is told it is not coming back in this form."
+                >
+                  {processing && mode === "reject" ? (
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                  ) : (
+                    <X className="mr-1.5 h-4 w-4" />
+                  )}
+                  {mode === "reject" ? "Reject with reason" : "Reject"}
+                </Button>
+              )}
+              {mode !== "approve" && mode !== "reject" && (
+                <Button
+                  variant="outline"
+                  className={workspace ? undefined : "border-amber-300 text-amber-800 hover:bg-amber-50 hover:text-amber-900"}
+                  disabled={processing}
+                  onClick={() => (mode === "changes" ? decide("changes") : setMode("changes"))}
+                  data-testid="review-pane-request-changes"
+                  title="Send it back to the author with a reason. They are expected to revise it."
+                >
+                  {processing && mode === "changes" ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <CornerUpLeft className="mr-2 h-4 w-4" />
+                  )}
+                  {mode === "changes" ? "Send back to author" : "Request changes"}
+                </Button>
+              )}
+              {mode !== "changes" && mode !== "reject" && (
+                <Button
+                  className="bg-green-600 text-white shadow-sm hover:bg-green-700 focus-visible:ring-green-600"
+                  disabled={processing || bodyLoading || !versions}
+                  onClick={() => decide("approve")}
+                  data-testid="review-pane-approve"
+                  title={`Publishes v${pendingVersion} as the live version.`}
+                >
+                  {processing ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="mr-2 h-4 w-4" />
+                  )}
+                  {mode === "approve" ? "Post comment & approve" : "Approve & publish"}
+                </Button>
+              )}
+            </div>
+          </div>
+        );
 
-      <ReviewProvenance
-        requestedBy={requester}
-        requestedAt={request.requestedAt}
-        runId={request.runId}
-        lastEdit={(node as { last_edit?: any } | undefined)?.last_edit ?? null}
-      />
-
-      {isTaskLike(node as any) && <ReviewTaskDetails node={node as any} />}
-
-      {changeSummary && (
-        <p
-          className="rounded-lg border bg-muted/40 px-4 py-2 text-sm"
-          data-testid="review-pane-change-summary"
-        >
-          <span className="font-medium">What changed: </span>
-          {changeSummary}
-        </p>
-      )}
-
+  const textCard = (
       <div className="min-w-0">
         {/* The text, three ways. */}
         <div className="min-w-0">
-          {tabs.length > 1 && (
+          {(workspace || tabs.length > 1) && (
             <div className="mb-3 flex gap-1 border-b" role="tablist">
               {tabs.map((t) => (
                 <button
@@ -357,6 +471,219 @@ export function ReviewPane({
         </div>
 
       </div>
+  );
+
+  if (workspace) {
+    return (
+      <div className="min-w-0 space-y-4" data-testid="review-pane">
+        <div>
+          <div className="flex items-center gap-2">
+            <nav aria-label="Location" className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+              {[nestName, ...crumbFolders(nodeId)].filter(Boolean).map((c, i) => (
+                <span key={i} className="flex items-center gap-1.5">
+                  {c}
+                  <ChevronRight className="h-3 w-3 opacity-50" aria-hidden />
+                </span>
+              ))}
+              <span className="font-medium text-foreground">{nodeId.split("/").pop()}</span>
+            </nav>
+            <Button variant="ghost" size="icon" className="h-8 w-8 lg:hidden" onClick={onClose} aria-label="Close review">
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-x-2.5 gap-y-1">
+            <h2 className="text-xl font-semibold leading-tight">{title}</h2>
+            <span className={cn("inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium", STATE[state].cls)}>
+              <span className={cn("h-1.5 w-1.5 rounded-full", STATE[state].dot)} aria-hidden />
+              {STATE[state].label}
+            </span>
+            {type && (
+              <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-primary">
+                {type}
+              </span>
+            )}
+          </div>
+          <p className="mt-1.5 text-sm text-muted-foreground">
+            <span className="font-medium text-foreground/80">{requester}</span>
+            {" · "}
+            {hasPublished ? `based on v${approvedVersion}` : approvedVersion == null ? "first version" : "published"}
+            {" · "}v{pendingVersion}
+            {" · "}
+            {state === "review" ? "submitted" : "updated"} {since(request.requestedAt)}
+            {hasPublished && (
+              <>
+                {" · "}
+                <button type="button" className="text-primary hover:underline" onClick={() => setTab("published")}>
+                  view published v{approvedVersion}
+                </button>
+              </>
+            )}
+          </p>
+        </div>
+
+        {callout && (
+          <div
+            className={cn(
+              "flex gap-3 rounded-lg border px-4 py-3 text-sm",
+              callout.tone === "back"
+                ? "border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950/30"
+                : "border-primary/30 bg-primary/5",
+            )}
+            data-testid="review-pane-note"
+          >
+            {callout.tone === "back" ? (
+              <CornerUpLeft className="mt-0.5 h-4 w-4 shrink-0 text-red-600" aria-hidden />
+            ) : (
+              <Send className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden />
+            )}
+            <div className="min-w-0">
+              <p className="text-xs font-medium">{callout.title}</p>
+              <p className="mt-0.5 whitespace-pre-wrap">{callout.text}</p>
+            </div>
+          </div>
+        )}
+
+        <div className="flex flex-col gap-5 xl:grid xl:grid-cols-[minmax(0,1fr)_260px]">
+          <div className="order-2 min-w-0 space-y-3 xl:order-1">
+            {isTaskLike(node as any) && <ReviewTaskDetails node={node as any} />}
+            {changeSummary && (
+              <p className="text-sm text-muted-foreground" data-testid="review-pane-change-summary">
+                <span className="font-medium text-foreground">What changed: </span>
+                {changeSummary}
+              </p>
+            )}
+            {textCard}
+          </div>
+          <aside className="order-1 space-y-4 xl:order-2 xl:sticky xl:top-0 xl:self-start">
+            <div className="rounded-lg border bg-card p-4 shadow-sm">
+              {panel ?? (
+                <>
+                  <p className="text-sm font-semibold">Waiting for review</p>
+                  <p className="mb-3 mt-0.5 text-xs text-muted-foreground">
+                    A reviewer can approve and publish it, or send it back with feedback.
+                  </p>
+                  {decision}
+                </>
+              )}
+            </div>
+            <div className="rounded-lg border bg-card p-4 shadow-sm" data-testid="review-pane-activity">
+              <p className="mb-3 text-sm font-semibold">Activity</p>
+              <ol className="space-y-3">
+                {reviewActivity(
+                  (versions?.versions ?? []) as any[],
+                  state === "review" ? { by: requester, at: request.requestedAt, note: request.requestNote } : null,
+                ).map((e) => {
+                  const Icon = { edited: Plus, submitted: Send, approved: CheckCircle2, changes: CornerUpLeft, rejected: X }[e.kind];
+                  return (
+                    <li key={e.key} className="flex gap-2.5 text-xs">
+                      <span
+                        className={cn(
+                          "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
+                          e.kind === "submitted"
+                            ? "bg-amber-100 text-amber-700"
+                            : e.kind === "approved"
+                              ? "bg-green-100 text-green-700"
+                              : e.kind === "edited"
+                                ? "bg-muted text-muted-foreground"
+                                : "bg-red-100 text-red-700",
+                        )}
+                      >
+                        <Icon className="h-3 w-3" aria-hidden />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="break-words text-muted-foreground">
+                          <span className="font-medium text-foreground">{e.who}</span> {e.text}
+                          {e.at && ` · ${since(e.at)}`}
+                        </p>
+                        {e.note && <p className="mt-1 whitespace-pre-wrap rounded-md bg-muted/60 px-2 py-1.5">{e.note}</p>}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            </div>
+            <details className="text-xs">
+              <summary className="cursor-pointer text-muted-foreground">Where this came from</summary>
+              <div className="mt-2 space-y-2">
+                {provenance.map((r) => (
+                  <p key={r.label} className="break-words">
+                    <span className="capitalize text-muted-foreground">{r.label}: </span>
+                    {r.value}
+                  </p>
+                ))}
+              </div>
+            </details>
+          </aside>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-w-0 flex-col gap-4" data-testid="review-pane">
+      {/* Header: what this is, who sent it, what it changes. */}
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <h2 className="text-xl font-semibold leading-tight">{title}</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            From <span className="font-medium text-foreground/80">{requester}</span> ·{" "}
+            {since(request.requestedAt)}
+            {" · "}
+            {hasPublished
+              ? `edits live v${approvedVersion} into v${pendingVersion}`
+              : approvedVersion == null
+                ? "first version"
+                : `v${pendingVersion}`}
+            {typeLabel && <> · {typeLabel}</>}
+          </p>
+          <p
+            className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground/70"
+            title={nodeId}
+          >
+            {nodeId}
+          </p>
+        </div>
+        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onClose} aria-label="Close review">
+          <X className="h-4 w-4" />
+        </Button>
+      </div>
+
+      {/* Why the author made the change, in full. */}
+      {request.requestNote && (
+        <div
+          className="flex gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm dark:border-blue-900 dark:bg-blue-950/40"
+          data-testid="review-pane-note"
+        >
+          <Send className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />
+          <div className="min-w-0">
+            <p className="text-xs font-medium text-blue-800 dark:text-blue-300">
+              {requester}&rsquo;s note
+            </p>
+            <p className="mt-0.5 whitespace-pre-wrap">{request.requestNote}</p>
+          </div>
+        </div>
+      )}
+
+      <ReviewProvenance
+        requestedBy={requester}
+        requestedAt={request.requestedAt}
+        runId={request.runId}
+        lastEdit={(node as { last_edit?: any } | undefined)?.last_edit ?? null}
+      />
+
+      {isTaskLike(node as any) && <ReviewTaskDetails node={node as any} />}
+
+      {changeSummary && (
+        <p
+          className="rounded-lg border bg-muted/40 px-4 py-2 text-sm"
+          data-testid="review-pane-change-summary"
+        >
+          <span className="font-medium">What changed: </span>
+          {changeSummary}
+        </p>
+      )}
+
+      {textCard}
 
       {/* Decision bar: sticks to the bottom of the screen so the decision never
           scrolls away from the change, however long the diff. */}
@@ -364,138 +691,7 @@ export function ReviewPane({
         className="sticky bottom-0 z-10 -mx-1 rounded-lg border bg-background/95 p-3 shadow-[0_-4px_12px_rgba(0,0,0,0.06)] backdrop-blur"
         data-testid="review-pane-actions"
       >
-        {lockedReason ? (
-          <div className="flex gap-2 text-sm text-muted-foreground" data-testid="review-pane-readonly">
-            <Lock className="mt-0.5 h-4 w-4 shrink-0" />
-            <p>{lockedReason}</p>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {mode !== "idle" && (
-              <Textarea
-                autoFocus
-                value={note}
-                onChange={(e) => {
-                  setNote(e.target.value);
-                  setError(null);
-                }}
-                disabled={processing}
-                placeholder={
-                  mode === "changes"
-                    ? "What needs to change? (required)"
-                    : mode === "reject"
-                      ? "Why is this being rejected? (required)"
-                      : "Comment for the author (optional)"
-                }
-                className="min-h-[72px] text-sm"
-                data-testid="review-pane-note-input"
-              />
-            )}
-            {error && <p className="text-xs text-destructive">{error}</p>}
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="mr-auto flex items-center gap-2">
-                {mode === "idle" && canEditDraft && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={processing}
-                    onClick={onEditDraft}
-                    data-testid="review-pane-edit"
-                  >
-                    <Pencil className="mr-1.5 h-4 w-4" /> Edit draft
-                  </Button>
-                )}
-                {mode === "idle" && onSkip && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={processing}
-                    onClick={onSkip}
-                    data-testid="review-pane-skip"
-                    title="Leave this for later and open the next change. It stays in your queue."
-                  >
-                    <SkipForward className="mr-1.5 h-4 w-4" /> Skip
-                  </Button>
-                )}
-                {mode === "idle" && (
-                  <button
-                    type="button"
-                    className="text-xs text-muted-foreground underline-offset-2 hover:underline"
-                    onClick={() => setMode("approve")}
-                  >
-                    Add a comment
-                  </button>
-                )}
-                {mode !== "idle" && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={processing}
-                    onClick={() => {
-                      setMode("idle");
-                      setNote("");
-                      setError(null);
-                    }}
-                    data-testid="review-pane-cancel"
-                  >
-                    Cancel
-                  </Button>
-                )}
-              </div>
-              {onReject && mode !== "approve" && mode !== "changes" && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                  disabled={processing}
-                  onClick={() => (mode === "reject" ? decide("reject") : setMode("reject"))}
-                  data-testid="review-pane-reject"
-                  title="Decline this for good. The author is told it is not coming back in this form."
-                >
-                  {processing && mode === "reject" ? (
-                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-                  ) : (
-                    <X className="mr-1.5 h-4 w-4" />
-                  )}
-                  {mode === "reject" ? "Reject with reason" : "Reject"}
-                </Button>
-              )}
-              {mode !== "approve" && mode !== "reject" && (
-                <Button
-                  variant="outline"
-                  className="border-amber-300 text-amber-800 hover:bg-amber-50 hover:text-amber-900"
-                  disabled={processing}
-                  onClick={() => (mode === "changes" ? decide("changes") : setMode("changes"))}
-                  data-testid="review-pane-request-changes"
-                  title="Send it back to the author with a reason. They are expected to revise it."
-                >
-                  {processing && mode === "changes" ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <CornerUpLeft className="mr-2 h-4 w-4" />
-                  )}
-                  {mode === "changes" ? "Send back to author" : "Request changes"}
-                </Button>
-              )}
-              {mode !== "changes" && mode !== "reject" && (
-                <Button
-                  className="bg-green-600 text-white shadow-sm hover:bg-green-700 focus-visible:ring-green-600"
-                  disabled={processing || bodyLoading || !versions}
-                  onClick={() => decide("approve")}
-                  data-testid="review-pane-approve"
-                  title={`Publishes v${pendingVersion} as the live version.`}
-                >
-                  {processing ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <CheckCircle2 className="mr-2 h-4 w-4" />
-                  )}
-                  {mode === "approve" ? "Post comment & approve" : "Approve & publish"}
-                </Button>
-              )}
-            </div>
-          </div>
-        )}
+        {decision}
       </div>
     </div>
   );

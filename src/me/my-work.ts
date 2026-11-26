@@ -29,6 +29,7 @@ import { listOpenMentions } from "../mentions/mention-index.js";
 import { isCommentMentionNotice } from "../governance/mention-notify.js";
 import { SAVED_PAGE_DEFAULT, listSaved, type SavedList } from "../channels/saved.js";
 import { config } from "../config.js";
+import { getDb } from "../db/client.js";
 import { ValidationError } from "../shared/errors.js";
 import { chatUnreadSummary } from "../chat/unread.js";
 
@@ -170,8 +171,22 @@ export async function buildMyWork(params: {
         offset,
       })
     : { requests: [], total: 0 };
+  // The newest version of each document on this page, so the list can say
+  // which reviews are still of the latest text (select all up-to-date).
+  const newest = new Map<string, number>();
+  if (requests.length) {
+    const rows = (await getDb().all(
+      `SELECT nest_id, node_id, MAX(version) AS v FROM node_versions
+        WHERE ${requests.map(() => "(nest_id = ? AND node_id = ?)").join(" OR ")}
+        GROUP BY nest_id, node_id`,
+      requests.flatMap((r) => [r.nestId, r.nodeId]),
+    )) as Array<{ nest_id: string; node_id: string; v: number | string }>;
+    for (const r of rows) newest.set(`${r.nest_id}:${r.node_id}`, Number(r.v));
+  }
   const toItem = (r: (typeof requests)[number]) => ({
     type: "review" as const,
+    // False when a newer version exists than the one under review.
+    up_to_date: (newest.get(`${r.nestId}:${r.nodeId}`) ?? r.version) <= r.version,
     nest_id: r.nestId,
     nest_name: nestName.get(r.nestId)!,
     node_id: r.nodeId,
