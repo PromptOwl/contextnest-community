@@ -21,6 +21,8 @@ import {
   canRequestDeletion,
   filterAccessible,
   readableDeletionRequests,
+  versionHistoryScope,
+  versionVisible,
 } from "../governance/access-guard.js";
 import {
   matchDocuments,
@@ -5240,7 +5242,16 @@ async function runTool(
       // See context_update: an id wins over a title sent with it.
       const label = args.id ? node.frontmatter.title : args.title;
 
-      const allVersions = await versions.getVersions(ctx.nestId, node.id);
+      // Same scope as REST GET .../versions (PO-1465): a visibility-only
+      // reader lists approved versions only (plus their own draft), and a
+      // read-only credential never learns who wrote or reviewed them.
+      const scope = await versionHistoryScope(ctx.nestId, node.id, ctx.userId, ctx.userEmail, {
+        readOnlyKey: ctx.capability === "read",
+        liveVersion: node.frontmatter.version ?? 1,
+      });
+      const allVersions = (await versions.getVersions(ctx.nestId, node.id)).filter((v) =>
+        versionVisible(scope, v),
+      );
       const approved = await versions.getApprovedVersion(ctx.nestId, node.id);
 
       if (allVersions.length === 0) {
@@ -5253,10 +5264,10 @@ async function runTool(
       const list = allVersions
         .map(
           (v) =>
-            `- **v${v.version}** ${v.status}${v.version === approved ? " (AI-active)" : ""} — by ${v.editedBy} at ${v.editedAt}${v.changeNote ? ` "${v.changeNote}"` : ""}${
+            `- **v${v.version}** ${v.status}${v.version === approved ? " (AI-active)" : ""} — ${scope.identities ? `by ${v.editedBy} ` : ""}at ${v.editedAt}${v.changeNote ? ` "${v.changeNote}"` : ""}${
               // §9.4: which agent wrote it. In the prose as well as the
               // structured payload — a chat client reads only this half.
-              v.client?.agent ? ` [via ${v.client.agent}]` : ""
+              scope.identities && v.client?.agent ? ` [via ${v.client.agent}]` : ""
             }`,
         )
         .join("\n");
@@ -5278,13 +5289,13 @@ async function runTool(
           versions: allVersions.map((v) => ({
             version: v.version,
             status: v.status,
-            edited_by: v.editedBy,
+            ...(scope.identities ? { edited_by: v.editedBy } : {}),
             edited_at: v.editedAt,
             note: v.changeNote,
             // §9.4: which agent wrote this version, in which session. Omitted
             // (not `{}`) when the write carried no attribution — "not
             // attributed" and "attributed to nobody" are different claims.
-            ...(v.client ? { client: v.client } : {}),
+            ...(scope.identities && v.client ? { client: v.client } : {}),
           })),
         },
       };

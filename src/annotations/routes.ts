@@ -3,7 +3,8 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { NotFoundError, ValidationError } from "../shared/errors.js";
 import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
 import { injectArtifactBridge } from "../shared/artifact-bridge.js";
-import { resolveCallerEmail, canReadNode } from "../governance/access-guard.js";
+import { resolveCallerEmail, canReadNode, canReadVersionNumber } from "../governance/access-guard.js";
+import { engineCache } from "../nodes/engine.js";
 import {
   createThread,
   addComment,
@@ -252,6 +253,14 @@ annotationRoutes.get("/:nodeId{.+}/hosted", async (c) => {
   const vNum = vRaw !== undefined ? Number(vRaw) : NaN;
   const version =
     Number.isFinite(vNum) && vNum > 0 ? Math.floor(vNum) : undefined;
+  // A pinned snapshot is a read of that version (PO-1465): a visibility-only
+  // reader may pin only a version the version list shows them.
+  if (
+    version !== undefined &&
+    !(await canReadVersionNumber(nestId, nodeId, userId, userEmail, version, (await engineCache.get(nestId)).storage))
+  ) {
+    return c.json({ error: "Version not found" }, 404);
+  }
 
   const { html, version: served, type } = await readArtifact(
     nestId,
