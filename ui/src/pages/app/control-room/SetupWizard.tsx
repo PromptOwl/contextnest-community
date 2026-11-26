@@ -487,8 +487,9 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
   const [manifest, setManifest] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
 
+  // A nest that is gone (deleted, archived, not yours) can't be the target: the server refuses it.
   useEffect(() => {
-    if (!homeNest && state.nests[0]) setHomeNest(state.nests[0].id);
+    if (state.nests[0] && !state.nests.some((n) => n.id === homeNest)) setHomeNest(state.nests[0].id);
   }, [state.nests, homeNest]);
 
   useEffect(() => {
@@ -637,7 +638,8 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
         </Note>
       ) : (
         <div className="rounded-lg border p-4">
-          {!inst && (
+          {/* Hosted connects start a fresh install for the chosen nest, so the picker stays. */}
+          {(!inst || hosted) && (
             <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
               <Label htmlFor="setup-home-nest" className="text-sm font-normal">
                 Saved notes land in

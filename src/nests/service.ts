@@ -917,6 +917,9 @@ export async function archiveNest(nestId: string): Promise<void> {
       [nestId],
     );
   });
+  // An archived nest takes no new notes: pause its channels (an admin resumes them after a restore).
+  const { stopNestBindings } = await import("../surfaces/services/binding-service.js");
+  await stopNestBindings(nestId, "archived");
 }
 
 /** Bring it back exactly as it was — same documents, versions, stewards. */
@@ -1196,6 +1199,9 @@ export async function deleteNest(nestId: string): Promise<void> {
   // drop them, and let a seal already running finish first.
   const { dropSeals } = await import("../nodes/seal-queue.js");
   await dropSeals(nestId);
+  // Channels bound here stop first: their hooks withdraw cards while the nest still exists.
+  const { stopNestBindings } = await import("../surfaces/services/binding-service.js");
+  await stopNestBindings(nestId, "deleted");
 
   // Foreign-key CASCADE handles most of this (see migrations.ts) but the
   // explicit deletes inside a single transaction give us two guarantees:
@@ -1240,6 +1246,8 @@ export async function deleteNest(nestId: string): Promise<void> {
     // Surfaces private (sealed) nest marker (migration 081, no FK): left behind
     // it would keep the owner "sealed" forever (no admin reset, alerts on).
     await tx.run("DELETE FROM surface_personal_nests WHERE nest_id = ?", [id]);
+    // A half-finished Slack connect homed here would keep sending a dead nest id to OAuth.
+    await tx.run("DELETE FROM surface_installs WHERE home_nest_id = ? AND status = 'pending'", [id]);
     await tx.run("DELETE FROM nests WHERE id = ?", [id]);
   });
 
