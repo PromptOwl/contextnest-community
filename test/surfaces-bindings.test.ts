@@ -519,6 +519,30 @@ describe("guard re-checks (§4.17)", () => {
     expect(h[1].reason).toMatch(/^Paused by Nest/);
   });
 
+  it("archiving a nest pauses its listening channels as an admin pause; deleting removes them and its pending installs", async () => {
+    const nests = await import("../src/nests/service.js");
+    const a = await newNest(alice);
+    setConv("C-arch", ["SA"]);
+    const aId = (await bind({ conversation_id: "C-arch", nest_id: a })).data.binding.id;
+    paused.length = 0;
+    await nests.archiveNest(a);
+    expect(await row(aId)).toMatchObject({ status: "paused_guard", pause_reason: "admin" });
+    expect(paused).toEqual([{ bindingId: aId, reason: "admin" }]);
+
+    const d = await newNest(alice);
+    setConv("C-del", ["SA"]);
+    const dId = (await bind({ conversation_id: "C-del", nest_id: d })).data.binding.id;
+    const pending = await S.installs.createInstall({ surface: "slack", mode: "hosted", tenantKey: `pending:${randomUUID()}`, homeNestId: d, installedByUserId: alice.userId });
+    paused.length = 0;
+    await nests.deleteNest(d);
+    // Stopped first (hooks purge + withdraw), then the nest's FK cascade drops the row.
+    expect(paused).toEqual([{ bindingId: dId, reason: "removed" }]);
+    expect(await row(dId)).toBeUndefined();
+    expect(await S.installs.getInstall(pending.id)).toBeNull();
+    // The active install homed elsewhere is untouched.
+    expect((await S.installs.getInstall(installId))?.status).toBe("active");
+  });
+
   it("po-1437: moving a channel to another nest = remove, then bind the same channel to the new nest", async () => {
     const n1 = await newNest(alice);
     const n2 = await newNest(alice);

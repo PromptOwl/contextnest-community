@@ -985,6 +985,33 @@ export async function markRemoved(row: BindingRow, systemWhy: string | null = SY
   }
 }
 
+/**
+ * A nest going away stops its channels. Archive pauses the listening ones as an
+ * admin pause (only an admin Resume restarts them); delete removes them, since
+ * there is no nest left to resume into.
+ */
+export async function stopNestBindings(nestId: string, how: "archived" | "deleted"): Promise<void> {
+  const rows = (await getDb().all(
+    `SELECT * FROM surface_bindings WHERE nest_id = ? AND status ${how === "archived" ? "= 'active'" : "<> 'removed'"}`,
+    [nestId],
+  )) as BindingRow[];
+  for (const row of rows) {
+    if (how === "deleted") {
+      await markRemoved(row, "Removed by Nest: the nest was deleted.");
+      continue;
+    }
+    const now = nowIso();
+    const r = await getDb().run(
+      `UPDATE surface_bindings SET status = 'paused_guard', pause_reason = '${ADMIN_PAUSE}', status_changed_at = ?, version = version + 1, updated_at = ?
+        WHERE id = ? AND status = 'active'`,
+      [now, now, row.id],
+    );
+    if (r.changes === 0) continue;
+    await recordBindingHistory(row, "paused", "Paused by Nest: the nest was archived.", null);
+    await pause(row, "paused_guard", "admin");
+  }
+}
+
 export async function updateBinding(
   id: string,
   actorUserId: string,
