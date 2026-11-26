@@ -27,6 +27,7 @@ import { invalidateInstallGuards } from "../invalidate.js";
 import { getInstall, homeTenant, installRef, type InstallRow } from "./install-store.js";
 import { recordNotice } from "./notices.js";
 import { ORG_ID } from "../flags.js";
+import { logCaught } from "../log.js";
 
 export const LINK_TOKEN_TTL_MS = 15 * 60_000;
 /** At most this many one-time links per (install, surface user) per TTL window (L4). */
@@ -158,7 +159,8 @@ export async function getProfile(installId: string, surfaceUserId: string, opts:
   let fetched: SurfaceUserProfile | null = null;
   try {
     fetched = await connector.userProfile(installRef(install), surfaceUserId);
-  } catch {
+  } catch (err) {
+    logCaught("identity", err, { install: installId, call: "user_profile" }, "warn");
     fetched = null;
   }
   if (!fetched) return fallback;
@@ -278,7 +280,9 @@ async function createLink(input: {
         now,
       ],
     );
-  } catch {
+  } catch (err) {
+    // Usually the unique index (already linked); the line says if it was not.
+    logCaught("identity", err, { install: input.install.id, call: "insert_link" }, "warn");
     throw new ConflictError("That surface user is already linked.");
   }
   await invalidateInstallGuards(input.install.id);
@@ -481,7 +485,8 @@ export async function resolveActor(input: { installId: string; surfaceUserId: st
           confirmed: false,
           surfaceEmail: profile?.email ?? null,
         });
-      } catch {
+      } catch (err) {
+        logCaught("identity", err, { install: install.id, call: "auto_link" }, "warn");
         link = await activeLink(install.id, input.surfaceUserId); // a concurrent click linked it
       }
     }

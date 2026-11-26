@@ -32,6 +32,7 @@ import { COMMIT_VERBS, type CommitVerb } from "../../core/identity-rules.js";
 import { ACTION, VIEW, renderBootModal, renderEditModal, renderRejectModal, validateView } from "./blockkit.js";
 import { botToken } from "./connector.js";
 import { slackCall, slackErrorCode } from "./api.js";
+import { logCaught } from "../../log.js";
 
 export interface HandlerResult {
   status: number;
@@ -45,7 +46,8 @@ export async function respondTo(url: string | null | undefined, body: Record<str
   try {
     const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), redirect: "error", signal: AbortSignal.timeout(10_000) });
     return r.ok;
-  } catch {
+  } catch (err) {
+    logCaught("interactions", err, { call: "response_url" }, "warn");
     return false;
   }
 }
@@ -55,8 +57,8 @@ async function dm(install: InstallRow, user: string, text: string, blocks?: unkn
     const tk = await botToken(install.id);
     const ch = String((await slackCall("conversations.open", { users: user }, { token: tk })).channel?.id ?? "");
     if (ch) await slackCall("chat.postMessage", { channel: ch, text, ...(blocks ? { blocks: JSON.stringify(blocks) } : {}) }, { token: tk });
-  } catch {
-    /* best effort */
+  } catch (err) {
+    logCaught("interactions", err, { install: install.id, call: "dm" }, "warn");
   }
 }
 
@@ -73,8 +75,8 @@ function responder(install: InstallRow, p: Record<string, any>): Responder {
         if (channel) await slackCall("chat.postEphemeral", { channel, user, text, ...(blocks ? { blocks: JSON.stringify(blocks) } : {}) }, { token: tk });
         // App Home has no channel: the note (and any confirm buttons) go by DM.
         else await dm(install, user, text, blocks);
-      } catch {
-        /* best effort */
+      } catch (err) {
+        logCaught("interactions", err, { install: install.id, call: "ephemeral" }, "warn");
       }
     },
   };
@@ -260,7 +262,7 @@ async function onBlockAction(install: InstallRow, p: Record<string, any>): Promi
     return;
   }
   const after = async () => {
-    if (home) await publishHome(install.id, user).catch(() => {});
+    if (home) await publishHome(install.id, user).catch((err) => logCaught("home", err, { install: install.id }, "warn"));
   };
   switch (id) {
     case ACTION.approve:

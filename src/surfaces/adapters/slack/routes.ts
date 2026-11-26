@@ -35,6 +35,7 @@ import { buildManifest, BOT_SCOPES, slackUrls, publicUrlProblem, originMismatch,
 import { verifySlackSignature } from "./verify.js";
 import { normalizeSlack } from "./connector.js";
 import { slackCall } from "./api.js";
+import { logCaught } from "../../log.js";
 import { listInstallChannels, channelListFailure } from "./channels.js";
 import { handleCommand, handleInteraction } from "./interactions.js";
 
@@ -300,6 +301,7 @@ slackAdminRoutes.get("/installs/:id/channels", async (c) => {
   try {
     return c.json(await listInstallChannels(i));
   } catch (err) {
+    logCaught("channels", err, { install: i.id }, "warn");
     const f = channelListFailure(err);
     if (f.retryAfterSec) c.header("Retry-After", String(f.retryAfterSec));
     return c.json({ error: f.error }, f.status);
@@ -390,7 +392,7 @@ slackAdminRoutes.get("/hosted/oauth/self-serve", async (c) => {
   const userId = c.get("userId");
   if (!credentialMayContribute(c)) return c.json({ error: "Connecting Slack needs your own full credential (a browser session)." }, 403);
   const admin = await isOrgAdmin(userId);
-  if (!config.SURFACES_SLACK_SELF_SERVE && !admin) return c.json({ error: "A server admin must turn on self-serve Slack first." }, 403);
+  if (!config.SURFACES_SLACK_SELF_SERVE && !admin) return c.json({ error: "Self-serve Slack is not turned on for this server. Contact your server admin to turn it on." }, 403);
   const nestId = c.req.query("home_nest_id") ?? "";
   const nest = nestId ? ((await getDb().get("SELECT user_id FROM nests WHERE id = ? AND archived_at IS NULL", [nestId])) as { user_id: string } | undefined) : undefined;
   // Your own nest only (a server admin may target any nest, as on the admin path).
@@ -501,14 +503,15 @@ slackAdminRoutes.get("/oauth/callback", async (c) => {
       code,
       redirect_uri: slackUrls(config.PUBLIC_BASE_URL, hosted ? "hosted" : install.id).redirect,
     });
-  } catch {
+  } catch (err) {
+    logCaught("oauth", err, { install: install.id });
     return done(c, 502, "Slack didn't accept the sign-in. No token was kept.");
   }
   const token = typeof res.access_token === "string" ? res.access_token : "";
   const team = res.team?.id ? String(res.team.id) : "";
   const enterprise = res.enterprise?.id ? String(res.enterprise.id) : null;
   const revoke = async () => {
-    if (token) await slackCall("auth.revoke", {}, { token }).catch(() => {});
+    if (token) await slackCall("auth.revoke", {}, { token }).catch((err) => logCaught("oauth", err, { install: install.id, call: "auth.revoke" }, "warn"));
   };
   // A refusal revokes only the token Slack just issued. A live install keeps
   // its own secrets and stays as it was (round 2, L5); only an install that
@@ -517,7 +520,7 @@ slackAdminRoutes.get("/oauth/callback", async (c) => {
     await revoke();
     if (install.status === "pending") {
       const r = await getDb().run("UPDATE surface_installs SET status = 'disconnected', updated_at = ? WHERE id = ? AND status = 'pending'", [iso(Date.now()), install.id]);
-      if (r.changes) await deleteSecrets(install.id).catch(() => 0);
+      if (r.changes) await deleteSecrets(install.id).catch((err) => logCaught("oauth", err, { install: install.id, call: "delete_secrets" }));
     }
     return done(c, status, `${why} ${REFUSED_NO_TOKEN}`);
   };
@@ -541,12 +544,14 @@ slackAdminRoutes.get("/oauth/callback", async (c) => {
       [tenantKey, team, enterprise, res.bot_user_id ? String(res.bot_user_id) : null, iso(Date.now()), install.id],
     );
     if (r.changes === 0) return refuse(409, "This install changed while connecting.");
-  } catch {
+  } catch (err) {
+    // Usually the tenant_key unique index (a race with another install); the line says if it was not.
+    logCaught("oauth", err, { install: install.id, call: "activate" }, "warn");
     return refuse(409, "This Slack workspace is already connected to Nest.");
   }
   await setSecret(install.id, "bot_token", token, row.user_id);
   if (res.authed_user?.id) {
-    await completeInstallerLink({ installId: install.id, authedUserId: String(res.authed_user.id), communityUserId: row.user_id }).catch(() => {});
+    await completeInstallerLink({ installId: install.id, authedUserId: String(res.authed_user.id), communityUserId: row.user_id }).catch((err) => logCaught("identity", err, { install: install.id, call: "installer_link" }));
   }
   const back = safeReturnPath(row.return_to);
   if (back && !(c.req.header("Accept") || "").includes("application/json")) {

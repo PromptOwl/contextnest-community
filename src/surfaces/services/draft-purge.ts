@@ -12,6 +12,7 @@
 import { getDb } from "../../db/client.js";
 import { withdrawReviewAsSystem } from "../../governance/review-service.js";
 import { discardDraftIfOurs } from "./proposal-service.js";
+import { logCaught } from "../log.js";
 
 export async function purgeSurfaceDraft(input: {
   nestId: string;
@@ -26,7 +27,10 @@ export async function purgeSurfaceDraft(input: {
 }): Promise<void> {
   let author: string | null = null;
   if (input.cancel && input.reviewId) {
-    const w = await withdrawReviewAsSystem({ nestId: input.nestId, reviewId: input.reviewId, reason: input.reason ?? "expired" }).catch(() => null);
+    const w = await withdrawReviewAsSystem({ nestId: input.nestId, reviewId: input.reviewId, reason: input.reason ?? "expired" }).catch((err) => {
+      logCaught("purge", err, { proposal: input.proposalId, call: "withdraw_review" }, "warn");
+      return null;
+    });
     author = w?.requestedBy ?? null;
   }
   if (input.discard === false) return;

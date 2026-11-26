@@ -27,6 +27,7 @@ import { effectiveReaders } from "./readers.js";
 import { evaluateAutoMatch, getProfile, resolveIdentity } from "./identity-service.js";
 import { runPauseHooks, runSurfaceOkLostHooks, type PauseReason } from "./pause-hooks.js";
 import { recordNotice } from "./notices.js";
+import { logCaught } from "../log.js";
 
 export { SERVER_ADMIN_DISCLOSURE };
 
@@ -415,7 +416,12 @@ async function previewPeople(nestId: string, ev: Evaluation) {
   const members_not_readers = [];
   for (const m of outsiders) {
     const u = m.community_user_id ? users.get(m.community_user_id) : undefined;
-    const profile = u?.name ? null : await getProfile(install.id, m.surface_user_id).catch(() => null);
+    const profile = u?.name
+      ? null
+      : await getProfile(install.id, m.surface_user_id).catch((err) => {
+          logCaught("guard", err, { install: install.id, call: "profile" }, "warn");
+          return null;
+        });
     const name = u?.name ?? profile?.display_name ?? null;
     // po-1445: the email Slack has for someone with no account match, so the
     // admin can spot a mismatch. Only a confirmed one; preview only, never stored.
@@ -539,7 +545,9 @@ export async function createBinding(input: BindInput) {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 1, 1, ?)`,
         [...values, id, install.id, ORG_ID, input.conversationId, now, now, now],
       );
-    } catch {
+    } catch (err) {
+      // Usually the unique index (already bound); the line says if it was not.
+      logCaught("guard", err, { install: install.id, call: "insert_binding" }, "warn");
       throw new ConflictError("This conversation is already bound.");
     }
   }
@@ -660,7 +668,7 @@ export async function recheckBinding(id: string): Promise<BindingRow> {
     });
     await bindingTestHooks.afterEvaluate?.(id);
   } catch (err) {
-    console.error(`[surfaces] guard re-check failed for binding ${id}; failing closed`, err instanceof Error ? err.message : err);
+    logCaught("guard", err, { binding: id, call: "recheck" }); // failing closed
     await failClosed(row);
     return rowOrThrow(id);
   }

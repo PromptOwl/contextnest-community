@@ -31,6 +31,7 @@ import { safeMembers } from "./members.js";
 import { getSettings } from "./settings-service.js";
 import { getItems, getProposal, postCard, type ItemRow, type ProposalRow } from "./card-service.js";
 import { withdrawProposalItems } from "./proposal-service.js";
+import { logCaught } from "../log.js";
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -45,12 +46,16 @@ export async function canReviewAll(nestId: string, userId: string, items: Array<
   if (!email) return false;
   try {
     if (permissionLevel(await resolveNestPermission(nestId, userId)) < permissionLevel("read")) return false;
-  } catch {
+  } catch (err) {
+    logCaught("routing", err, { nest: nestId, call: "nest_permission" }, "warn");
     return false;
   }
   for (const it of items) {
     if (!it.node_id) return false;
-    const v = await canUserApprove(nestId, it.node_id, email, opts).catch(() => ({ allowed: false }));
+    const v = await canUserApprove(nestId, it.node_id, email, opts).catch((err) => {
+      logCaught("routing", err, { nest: nestId, call: "can_approve" }, "warn");
+      return { allowed: false };
+    });
     if (!v.allowed) return false;
   }
   return true;
@@ -66,7 +71,10 @@ export async function conversationUsers(binding: BindingRow): Promise<{ known: b
   const home = homeTenant(install);
   for (const mem of m.members) {
     if (mem.is_bot || mem.is_guest || mem.is_external || (mem.home_tenant && mem.home_tenant !== home)) continue;
-    const u = await resolveIdentity(install.id, mem.surface_user_id).catch(() => null);
+    const u = await resolveIdentity(install.id, mem.surface_user_id).catch((err) => {
+      logCaught("routing", err, { install: install.id, binding: binding.id, call: "identity" }, "warn");
+      return null;
+    });
     if (u && !users.has(u)) users.set(u, mem.surface_user_id);
   }
   return { known: true, users };

@@ -60,6 +60,7 @@ import { getConnector } from "../registry.js";
 import { describeJudgeFailure, judgeFailureLogLine, judgeFailureText, ruleText, JudgeRunError, type JudgeFailure, type JudgeStage, type JudgeUsage } from "./judge-failure.js";
 import { assess, mayRepairInvalid, repairPrompt } from "../core/judge-repair.js";
 import { DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT_SECONDS, readJudgeTuning } from "./judge-tuning.js";
+import { logCaught } from "../log.js";
 
 export { JudgeRunError } from "./judge-failure.js";
 
@@ -229,16 +230,25 @@ export async function judgeWindow(windowId: string, nowMs: number = Date.now()):
         token,
         { status: "judged", verdict: "error", reason_code: failure.code, model: progress.model, cost_micros: progress.cost },
         Date.now(),
-      ).catch(() => false);
+      ).catch((err) => {
+        logCaught("judge", err, { window: windowId, call: "finalize" });
+        return false;
+      });
       // The failed attempt as a run, so the trace has one to follow. A commit-stage
       // throw already recorded its run (succeeded), so it gets no second one.
       if (ended && progress.stage !== "commit" && progress.nestId && progress.agentNode) {
-        await recordRun(progress.nestId, progress.agentNode, progress, null, w.id, failure).catch(() => undefined);
+        await recordRun(progress.nestId, progress.agentNode, progress, null, w.id, failure).catch((err) => logCaught("judge", err, { window: w.id, call: "record_run" }));
       }
-      const asked = ended && w.forced && progress.stage !== "commit" ? await getBindingRow(w.binding_id).catch(() => null) : null;
+      const asked =
+        ended && w.forced && progress.stage !== "commit"
+          ? await getBindingRow(w.binding_id).catch((err) => {
+              logCaught("judge", err, { window: w.id, binding: w.binding_id, call: "binding" });
+              return null;
+            })
+          : null;
       if (asked) await noteRequester(asked as BindingRow, w, FAILED_NOTE);
       if (ended && failure.code === "model_billing" && progress.nestId) {
-        await alertModelBilling(progress.nestId, w.binding_id).catch(() => undefined);
+        await alertModelBilling(progress.nestId, w.binding_id).catch((err) => logCaught("alert", err, { nest: progress.nestId, binding: w.binding_id, call: "model_billing" }));
       }
     }
     return false;
@@ -358,7 +368,8 @@ async function nestView(nestId: string, ownerUserId: string, scope: { folders: s
       let working = "";
       try {
         working = String((await storage.readDocument(n.id)).body ?? "");
-      } catch {
+      } catch (err) {
+        logCaught("judge", err, { nest: nestId, call: "read_document" }, "warn");
         working = "";
       }
       approved = (await resolveExportBody(nestId, n.id, working)) ?? "";
@@ -412,7 +423,10 @@ async function renderWindow(
   const names = new Map<string, string>();
   const nameOf = async (uid: string) => {
     if (!names.has(uid)) {
-      const p = await getProfile(installId, uid).catch(() => null);
+      const p = await getProfile(installId, uid).catch((err) => {
+        logCaught("judge", err, { install: installId, call: "profile" }, "warn");
+        return null;
+      });
       names.set(uid, (p?.display_name || uid).replace(/[\r\n<>"]/g, " ").slice(0, 60));
     }
     return names.get(uid)!;
@@ -555,7 +569,8 @@ async function runJudge(
                   .join("\n"),
               };
             }
-          } catch {
+          } catch (err) {
+            logCaught("judge", err, { tool: String(b.name), call: "tool" }, "warn");
             out = { isError: true, content: "That failed." };
           }
           const room = Math.min(MAX_TOOL_RESULT_CHARS, MAX_READ_CHARS_PER_RUN - readChars);
@@ -922,8 +937,8 @@ export async function noteRequester(binding: BindingRow, w: WindowRow, text: str
       text,
       w.thread_key !== "channel" ? w.thread_key : w.forced_target_id,
     );
-  } catch {
-    /* best effort */
+  } catch (err) {
+    logCaught("notice", err, { window: w.id, binding: binding.id, call: "requester_note" }, "warn");
   }
   void installRef;
 }
@@ -1046,7 +1061,7 @@ async function alertNoTargetFolder(binding: BindingRow): Promise<void> {
       detail: { windows: 1 },
       subject: "Nest can't file this yet",
       text: NO_TARGET_FOLDER_DM_TEXT,
-    }).catch(() => "");
+    }).catch((err) => logCaught("notice", err, { binding: binding.id, call: "no_target_folder" }));
     return;
   }
   await recordNotice({
@@ -1057,7 +1072,7 @@ async function alertNoTargetFolder(binding: BindingRow): Promise<void> {
     detail: { windows: 1 },
     subject: "Nest has nowhere to propose in a bound conversation",
     text: "A conversation is bound to a nest whose listener has no folders to propose into, so Nest is keeping nothing from it. Apply a seed to the nest (or set the listener's folders) in Surfaces.",
-  }).catch(() => "");
+  }).catch((err) => logCaught("notice", err, { binding: binding.id, call: "no_target_folder" }));
 }
 
 /**
@@ -1081,8 +1096,8 @@ async function trustedThesis(binding: BindingRow, nodeId: string, nv: NestView):
     const v = approved === null ? undefined : ((await getDb().get("SELECT author FROM node_versions WHERE nest_id = ? AND node_id = ? AND version = ?", [binding.nest_id, nodeId, approved])) as { author?: string } | undefined);
     const u = v?.author ? ((await getDb().get("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", [v.author])) as { id: string } | undefined) : undefined;
     if (u && permissionLevel(await resolveNestPermission(binding.nest_id, u.id)) >= permissionLevel("admin")) return body;
-  } catch {
-    /* fall through: not trusted */
+  } catch (err) {
+    logCaught("judge", err, { binding: binding.id, call: "thesis" }, "warn"); // not trusted
   }
   const since = new Date(Date.now() - 24 * 3600_000).toISOString();
   if (!(await getDb().get("SELECT 1 AS x FROM surface_notices WHERE kind = 'thesis_ignored' AND binding_id = ? AND created_at > ?", [binding.id, since]))) {
@@ -1096,7 +1111,7 @@ async function trustedThesis(binding: BindingRow, nodeId: string, nv: NestView):
       detail: { windows: 1 },
       subject: "Nest is ignoring a changed thesis",
       text: "The nest's thesis was last changed by someone who isn't a nest admin, so Nest's listener isn't reading it. A nest admin can review and re-save it.",
-    }).catch(() => "");
+    }).catch((err) => logCaught("notice", err, { binding: binding.id, call: "thesis_ignored" }));
   }
   return null;
 }

@@ -531,6 +531,22 @@ describe("install", () => {
     expect(slack.revoked).toContain("Bearer xoxb-T5-token");
   });
 
+  it("po-1447: a failed OAuth code exchange writes one [surfaces] oauth line with the install and Slack's code, no secret", async () => {
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...a: any[]) => void errors.push(a.map(String).join(" ")));
+    slack.fail.set("oauth.v2.access", "invalid_code");
+    try {
+      const r = await installWorkspace("T7", N);
+      expect(r.status).toBe(502);
+      const lines = errors.filter((l) => l.startsWith("[surfaces] oauth"));
+      expect(lines).toEqual([`[surfaces] oauth failed: code=invalid_code install=${r.id}`]);
+      expect(errors.join("\n")).not.toContain("csecret-xyz");
+    } finally {
+      slack.fail.delete("oauth.v2.access");
+      spy.mockRestore();
+    }
+  });
+
   it("AC-INS-06: a bad signature or a timestamp older than 300 s → 401, nothing processed", async () => {
     const before = (await all("SELECT * FROM surface_events_seen")).length;
     const body = envelope({ type: "message", channel: "C1", user: "U_ALICE", text: "hello world there", ts: nextTs() });
