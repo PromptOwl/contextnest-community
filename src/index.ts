@@ -6,7 +6,7 @@ import { lowercaseHostServer } from "./shared/http-server.js";
 import { config } from "./config.js";
 import { createApp } from "./app.js";
 import { initDb } from "./db/client.js";
-import { loadServerSettings } from "./db/settings.js";
+import { loadServerSettings, seedNewInstallDefaults } from "./db/settings.js";
 import {
   backfillNodeVersionsFromHistory,
   backfillNotificationTitles,
@@ -69,6 +69,13 @@ async function main() {
   // makes those values survive a Cloud Run rebuild and stay consistent across
   // instances (see db/settings.ts). MUST run before validateLicense() below,
   // since PROMPTOWL_KEY may be one of the persisted settings.
+  // A new installation (empty database) starts with the defaults in
+  // NEW_INSTALL_DEFAULTS — team chat on. Existing servers are untouched.
+  try {
+    if (await seedNewInstallDefaults()) console.log("  New installation: team chat on by default");
+  } catch (err) {
+    console.error("[settings] failed to seed new-install defaults:", err);
+  }
   try {
     const loaded = await loadServerSettings();
     if (loaded > 0) {

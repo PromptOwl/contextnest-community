@@ -921,7 +921,9 @@ export const config = {
   /**
    * The team chat harness (PO-1197): channels, direct and group messages,
    * private channels, presence, the live event stream and the chat MCP tools.
-   * Default OFF. On by `TEAM_CHAT_ENABLED=true` (or its older alias
+   * Off unless set, but a NEW installation stores it on at first boot
+   * (db/settings.ts seedNewInstallDefaults); an existing server keeps what it
+   * has. On by `TEAM_CHAT_ENABLED=true` (or its older alias
    * `EXPERIMENTAL_AGENT_STREAM=true`), or by a superadmin under Settings
    * (`team_chat_enabled`), live, no restart. Off → every /nests/:id/channels,
    * /conversations and /chat route and every /me/chat route answers 404, the

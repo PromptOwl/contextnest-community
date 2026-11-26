@@ -139,3 +139,41 @@ export async function loadServerSettings(): Promise<number> {
   }
   return applied;
 }
+
+/**
+ * Settings a NEW installation starts with, written as ordinary server_settings
+ * rows — exactly what a superadmin's Settings toggle would write — so turning
+ * one off later (a tombstone) and the deploy-env precedence rule work the same
+ * as for any other setting. Groups are seeded all-or-nothing: a group is
+ * skipped when the deploy env already sets any of its keys (the operator
+ * decided), so an alias can't switch on what the env switched off.
+ */
+const NEW_INSTALL_DEFAULTS: Array<Record<string, string>> = [
+  // Team chat (PO-1197) and its older alias, which reads the same switch.
+  { TEAM_CHAT_ENABLED: "true", EXPERIMENTAL_AGENT_STREAM: "true" },
+];
+
+/**
+ * Boot step, BEFORE loadServerSettings(): on a new installation — a database
+ * with no users, no nests and no stored settings — seed NEW_INSTALL_DEFAULTS.
+ * Any existing server (anything signed up, created or configured) is left
+ * exactly as it is. Returns whether it seeded. Runs once: the rows it writes
+ * make the next boot an existing server.
+ */
+export async function seedNewInstallDefaults(): Promise<boolean> {
+  const db = getDb();
+  const count = async (sql: string, params: string[] = []) =>
+    Number(((await db.get(sql, params)) as { n: number | string } | undefined)?.n ?? 0);
+  const existing =
+    (await count("SELECT COUNT(*) AS n FROM users")) +
+    (await count("SELECT COUNT(*) AS n FROM nests")) +
+    (await count("SELECT COUNT(*) AS n FROM server_settings WHERE key <> ?", [MASTER_KEY_SETTING]));
+  if (existing > 0) return false;
+  let seeded = false;
+  for (const group of NEW_INSTALL_DEFAULTS) {
+    if (Object.keys(group).some((k) => norm(process.env[k]) !== null)) continue;
+    for (const [k, v] of Object.entries(group)) await persistSetting(k, v);
+    seeded = true;
+  }
+  return seeded;
+}
