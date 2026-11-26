@@ -535,8 +535,9 @@ describe("guard re-checks (§4.17)", () => {
     const pending = await S.installs.createInstall({ surface: "slack", mode: "hosted", tenantKey: `pending:${randomUUID()}`, homeNestId: d, installedByUserId: alice.userId });
     paused.length = 0;
     await nests.deleteNest(d);
-    expect((await row(dId)).status).toBe("removed");
+    // Stopped first (hooks purge + withdraw), then the nest's FK cascade drops the row.
     expect(paused).toEqual([{ bindingId: dId, reason: "removed" }]);
+    expect(await row(dId)).toBeUndefined();
     expect(await S.installs.getInstall(pending.id)).toBeNull();
     // The active install homed elsewhere is untouched.
     expect((await S.installs.getInstall(installId))?.status).toBe("active");
