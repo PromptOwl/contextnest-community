@@ -515,6 +515,15 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
   const homeName = state.nests.find((n) => n.id === inst?.home_nest_id)?.name;
   const sharedDeployment = !!state.status?.shared_deployment;
   const domainsNest = inst?.home_nest_id ?? homeNest;
+  const redirectBox = !readiness?.redirect_url || urlBad ? null : (
+    <div className="text-sm" data-testid="setup-redirect-url">
+      <p className="text-muted-foreground">Your Slack app must list this exact address under OAuth &amp; Permissions → Redirect URLs:</p>
+      <div className="mt-1 flex min-w-0 items-center gap-2">
+        <code className="min-w-0 truncate rounded bg-muted px-1.5 py-0.5">{readiness.redirect_url}</code>
+        <CopyButton text={readiness.redirect_url} toastMessage="Redirect URL copied" />
+      </div>
+    </div>
+  );
 
   const download = async () => {
     setBusy(true);
@@ -641,7 +650,16 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
               <li>Approve the install in Slack. Slack shows exactly which permissions it asks for.</li>
             ) : (
               <>
-                <li>Create the app from our manifest. Slack shows exactly which permissions it asks for.</li>
+                <li>
+                  Create the app from our manifest. Slack shows exactly which permissions it asks for.
+                  <div className="mt-2">
+                    <Button variant="outline" className={small} onClick={download} disabled={busy || urlBad || (!inst && !homeNest)}>
+                      <Download className="mr-1.5 h-4 w-4" aria-hidden />
+                      Download manifest
+                    </Button>
+                  </div>
+                </li>
+                <li>{redirectBox ?? "Check that the app's OAuth & Permissions → Redirect URLs keeps the address the manifest set."}</li>
                 <li>
                   Paste the three values Slack gives you. They are stored encrypted and never shown again.
                   {inst && (
@@ -679,12 +697,6 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
             )}
           </ol>
           <div className="mt-3 flex flex-wrap gap-2">
-            {!hosted && (
-              <Button variant="outline" onClick={download} disabled={busy || urlBad || (!inst && !homeNest)}>
-                <Download className="mr-1.5 h-4 w-4" aria-hidden />
-                Download manifest
-              </Button>
-            )}
             <Button onClick={approve} disabled={busy || urlBad || (hosted ? !homeNest : !inst || !allCreds)}>
               Open Slack to approve
             </Button>
@@ -694,15 +706,7 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
               Slack can&apos;t connect from here yet. Fix the address problem above first.
             </p>
           )}
-          {readiness?.redirect_url && !urlBad && (
-            <div className="mt-3 text-sm" data-testid="setup-redirect-url">
-              <p className="text-muted-foreground">Your Slack app must list this exact address under OAuth &amp; Permissions → Redirect URLs:</p>
-              <div className="mt-1 flex min-w-0 items-center gap-2">
-                <code className="min-w-0 truncate rounded bg-muted px-1.5 py-0.5">{readiness.redirect_url}</code>
-                <CopyButton text={readiness.redirect_url} toastMessage="Redirect URL copied" />
-              </div>
-            </div>
-          )}
+          {hosted && redirectBox && <div className="mt-3">{redirectBox}</div>}
           {!hosted && (
             <p className="mt-2 text-sm text-muted-foreground" data-testid="setup-manifest-note">
               The manifest uses this server&apos;s current address. If that address changes, download it again and update the app&apos;s URLs in Slack.
@@ -1055,8 +1059,8 @@ export function BindingManage({
     } catch (e) {
       toast.error(errText(e, "That didn't work. Try again."));
       // Part of it may have happened (a move that removed but couldn't re-bind): show what is true now.
-      await Promise.resolve(state.reload()).catch(() => {});
-      await Promise.resolve(onChanged()).catch(() => {});
+      await Promise.resolve(state.reload()).catch(() => { });
+      await Promise.resolve(onChanged()).catch(() => { });
     } finally {
       setBusy(false);
     }
@@ -1289,66 +1293,66 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
         </div>
       ) : (
         <>
-        <div className="mb-2 flex justify-end">
-          {/* po-1445: a channel Nest was just invited to shows without a page reload. */}
-          <Button variant="ghost" className={small} onClick={load} disabled={loading} data-testid="setup-channels-refresh">
-            <RefreshCw className="mr-1.5 h-4 w-4" aria-hidden />
-            {loading ? "Refreshing…" : "Refresh list"}
-          </Button>
-        </div>
-        <div className="rounded-lg border px-4" data-testid="setup-channels">
-          {channels.map((ch) => {
-            const p = pickOf(ch);
-            const bound = ch.binding;
-            const on = !!bound || !!p?.on;
-            const nest = bound?.nest_id ?? p?.nestId ?? defaultNest;
-            return (
-              <div
-                key={ch.id}
-                className="grid grid-cols-[24px_minmax(0,1fr)] gap-x-3 gap-y-2 border-b py-3 last:border-b-0 min-[801px]:grid-cols-[24px_minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1.6fr)] min-[801px]:items-start"
-                data-testid={`channel-row-${ch.id}`}
-              >
-                <input
-                  type="checkbox"
-                  className="mt-0.5 h-[18px] w-[18px] accent-[hsl(var(--primary))]"
-                  aria-label={`Listen in #${ch.name ?? ch.id}`}
-                  checked={on}
-                  disabled={!!bound}
-                  onChange={(e) => update(ch, { on: e.target.checked, nestId: nest })}
-                />
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1 font-medium">
-                    {ch.is_private || ch.is_ext_shared ? <Lock className="h-3.5 w-3.5 shrink-0" aria-hidden /> : <Hash className="h-3.5 w-3.5 shrink-0" aria-hidden />}
-                    <span className="truncate">{ch.name ?? ch.id}</span>
+          <div className="mb-2 flex justify-end">
+            {/* po-1445: a channel Nest was just invited to shows without a page reload. */}
+            <Button variant="ghost" className={small} onClick={load} disabled={loading} data-testid="setup-channels-refresh">
+              <RefreshCw className="mr-1.5 h-4 w-4" aria-hidden />
+              {loading ? "Refreshing…" : "Refresh list"}
+            </Button>
+          </div>
+          <div className="rounded-lg border px-4" data-testid="setup-channels">
+            {channels.map((ch) => {
+              const p = pickOf(ch);
+              const bound = ch.binding;
+              const on = !!bound || !!p?.on;
+              const nest = bound?.nest_id ?? p?.nestId ?? defaultNest;
+              return (
+                <div
+                  key={ch.id}
+                  className="grid grid-cols-[24px_minmax(0,1fr)] gap-x-3 gap-y-2 border-b py-3 last:border-b-0 min-[801px]:grid-cols-[24px_minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1.6fr)] min-[801px]:items-start"
+                  data-testid={`channel-row-${ch.id}`}
+                >
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 h-[18px] w-[18px] accent-[hsl(var(--primary))]"
+                    aria-label={`Listen in #${ch.name ?? ch.id}`}
+                    checked={on}
+                    disabled={!!bound}
+                    onChange={(e) => update(ch, { on: e.target.checked, nestId: nest })}
+                  />
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1 font-medium">
+                      {ch.is_private || ch.is_ext_shared ? <Lock className="h-3.5 w-3.5 shrink-0" aria-hidden /> : <Hash className="h-3.5 w-3.5 shrink-0" aria-hidden />}
+                      <span className="truncate">{ch.name ?? ch.id}</span>
+                    </div>
+                    <div className="text-sm text-muted-foreground">{channelMeta(ch)}</div>
                   </div>
-                  <div className="text-sm text-muted-foreground">{channelMeta(ch)}</div>
+                  <div className="col-start-2 min-[801px]:col-start-auto">
+                    {bound ? (
+                      <span className="text-sm text-muted-foreground">Into {nestName(bound.nest_id)}</span>
+                    ) : (
+                      <NestSelect label={`Nest for #${ch.name ?? ch.id}`} value={nest} nests={state.nests} onChange={(v) => update(ch, { nestId: v, on: true })} className="w-full" />
+                    )}
+                  </div>
+                  <div className="col-start-2 min-[801px]:col-start-auto">
+                    {bound ? (
+                      <BindingManage channel={ch} binding={bound} state={state} onChanged={load} />
+                    ) : (
+                      <GuardCell
+                        view={p?.on ? viewFor(p) : undefined}
+                        channel={ch}
+                        addTo={(() => {
+                          const v = p?.on ? viewFor(p) : undefined;
+                          if (!p || !v || v === "loading" || !v.add?.length) return null;
+                          return <AddToNest members={v.add} nestId={p.nestId} nestName={nestName(p.nestId)} channel={ch.name ?? ch.id} onAdded={() => recheck(p)} />;
+                        })()}
+                      />
+                    )}
+                  </div>
                 </div>
-                <div className="col-start-2 min-[801px]:col-start-auto">
-                  {bound ? (
-                    <span className="text-sm text-muted-foreground">Into {nestName(bound.nest_id)}</span>
-                  ) : (
-                    <NestSelect label={`Nest for #${ch.name ?? ch.id}`} value={nest} nests={state.nests} onChange={(v) => update(ch, { nestId: v, on: true })} className="w-full" />
-                  )}
-                </div>
-                <div className="col-start-2 min-[801px]:col-start-auto">
-                  {bound ? (
-                    <BindingManage channel={ch} binding={bound} state={state} onChanged={load} />
-                  ) : (
-                    <GuardCell
-                      view={p?.on ? viewFor(p) : undefined}
-                      channel={ch}
-                      addTo={(() => {
-                        const v = p?.on ? viewFor(p) : undefined;
-                        if (!p || !v || v === "loading" || !v.add?.length) return null;
-                        return <AddToNest members={v.add} nestId={p.nestId} nestName={nestName(p.nestId)} channel={ch.name ?? ch.id} onAdded={() => recheck(p)} />;
-                      })()}
-                    />
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
         </>
       )}
       {truncated && <p className="mt-2 text-sm text-muted-foreground">Nest is in more channels than this list shows, so some may be missing here.</p>}
@@ -1527,7 +1531,7 @@ function StarterStep({ state, back, next }: { state: SetupState; back: () => voi
       if (state.seeded.includes(n)) continue;
       getSurfacesSeedStatus(n)
         .then((r) => live && !r.no_seed && state.markSeeded(n))
-        .catch(() => {});
+        .catch(() => { });
     }
     return () => {
       live = false;

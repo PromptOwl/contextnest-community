@@ -56,6 +56,16 @@ describe("ConnectStep readiness", () => {
     expect(out).not.toContain("setup-redirect-url");
   });
 
+  it("po-1523: self-serve steps run manifest, redirect URL, values, approve", () => {
+    const s = state({ id: "i1", surface: "slack", mode: "manifest", status: "pending", home_nest_id: "n1" }) as any;
+    s.status = { ...s.status, slack_hosted: false, readiness: ready };
+    s.nests = [{ id: "n1", name: "Ops" }];
+    const out = renderToStaticMarkup(<ConnectStep state={s} next={() => {}} />);
+    const at = ["Download manifest", "setup-redirect-url", "setup-credentials", "Open Slack to approve"].map((t) => out.indexOf(t));
+    expect(at.every((i) => i >= 0)).toBe(true);
+    expect(at).toEqual([...at].sort((a, b) => a - b));
+  });
+
   it("a page opened at another address than the public base URL is flagged", () => {
     expect(wrongAddress(ready, "https://nest.acme.com")).toBeNull();
     expect(wrongAddress(ready, "http://localhost:3838")).toBe("http://localhost:3838");
