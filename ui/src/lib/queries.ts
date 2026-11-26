@@ -1218,7 +1218,7 @@ export const reads = {
       queryFn: () => api.listConversations(nestId),
       staleTime: 0,
     }),
-  containerMembers: (nestId: string, key: string, fetcher: () => Promise<api.ChatMember[]>) =>
+  containerMembers: (nestId: string, key: string, fetcher: () => Promise<api.ContainerMembers>) =>
     queryOptions({
       queryKey: keys.containerMembers(nestId, key),
       queryFn: fetcher,

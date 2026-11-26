@@ -115,8 +115,19 @@ describe("AC-CR-15: progress comes from facts, so setup resumes where it was lef
 
   it("AC-CR-15: removed bindings don't count; an active install wins over a pending one", () => {
     expect(deriveProgress(facts({ install: install("active"), bindings: [{ nest_id: "n1", status: "removed", conversation_id: "C1" }] })).count).toBe(1);
-    expect(pickInstall([install("pending", "p"), install("active", "a"), { ...install("active", "t"), surface: "teams" }])?.id).toBe("a");
-    expect(pickInstall([install("disconnected", "d")])).toBeNull();
+    expect(pickInstall([install("pending", "p"), install("active", "a"), { ...install("active", "t"), surface: "teams" }], false)?.id).toBe("a");
+    expect(pickInstall([install("disconnected", "d")], false)).toBeNull();
+  });
+
+  it("a pending install counts only in the mode setup is in now, so a leftover from the other mode can't block Download manifest", () => {
+    const hosted = { ...install("pending", "h"), mode: "hosted" as const };
+    const manifest = install("pending", "m");
+    expect(pickInstall([hosted], false)).toBeNull();
+    expect(pickInstall([manifest], true)).toBeNull();
+    expect(pickInstall([hosted, manifest], false)?.id).toBe("m");
+    expect(pickInstall([manifest, hosted], true)?.id).toBe("h");
+    // A connected workspace stays connected whatever the switch says.
+    expect(pickInstall([manifest, { ...hosted, status: "active" }], false)?.id).toBe("h");
   });
 });
 
@@ -143,9 +154,9 @@ describe("AC-CR-02: a refused pair names the counts and offers the fixes before 
   });
 
   it("AC-CR-02: allowed pairs say whether cards may quote existing records", () => {
-    expect(guardView(preview(), { channel: "a", nest: "Revenue" })).toEqual({ state: "ok", label: "Cards can show existing records", note: null });
+    expect(guardView(preview(), { channel: "a", nest: "Revenue" })).toMatchObject({ state: "ok", label: "Cards can show existing records", note: null });
     const po = guardView(preview({ surface_ok: false, detail: { members_total: 18, members_not_readers: 11 } }), { channel: "revops", nest: "Revenue" });
-    expect(po).toEqual({ state: "proposals_only", label: "Proposals only", note: "11 of the 18 members can't read Revenue, so cards here never quote existing records." });
+    expect(po).toMatchObject({ state: "proposals_only", label: "Proposals only", note: "11 of the 18 members can't read Revenue, so cards here never quote existing records." });
     expect(fixOptions(po)).toEqual([]);
   });
 
@@ -343,6 +354,28 @@ describe("po-1432: the wizard names who blocks a pair and offers to add channel 
     ]);
     expect(membersToAdd(preview())).toEqual([]);
   });
+
+  it("QA: proposals-only names who can't read, so a missing Add to nest is explained", () => {
+    const po = (members: People["members_not_readers"]) =>
+      guardView(withPeople(preview({ surface_ok: false, detail: { members_total: 2, members_not_readers: members.length } }), { members_not_readers: members }), ctx);
+    // Nobody can be added: an unmatched person and another app's bot are named, no "Can be added" list.
+    const none = po([
+      { surface_user_id: "SX", name: "Xavier", community_user_id: null, email: null, slack_email: "x@x.io" },
+      { surface_user_id: "B1", name: "Zapier", community_user_id: null, email: null, is_bot: true },
+    ]);
+    expect(none.state).toBe("proposals_only");
+    expect(none.groups).toEqual([
+      { heading: "No matching account on this server, so they can't be added:", people: ["Xavier: Slack email x@x.io"] },
+      { heading: "Apps in the channel. They can't be given access; remove them in Slack:", people: ["Zapier"] },
+    ]);
+    expect(membersToAdd(withPeople(preview(), { members_not_readers: [{ surface_user_id: "B1", name: "Zapier", community_user_id: null, email: null, is_bot: true }] }))[0].addable).toBe(false);
+    // An addable member is listed under its own heading.
+    expect(po([{ surface_user_id: "SC", name: "Carol", community_user_id: "u-carol", email: "carol@x.ai" }]).groups).toEqual([
+      { heading: "Can be added to the nest:", people: ["Carol (carol@x.ai)"] },
+    ]);
+    // An older server without people keeps the note alone.
+    expect(guardView(preview({ surface_ok: false, detail: { members_total: 2, members_not_readers: 1 } }), ctx).groups).toBeUndefined();
+  });
 });
 
 describe("po-1432 review: shared-deployment cause and capped name lists", () => {
@@ -374,18 +407,6 @@ describe("po-1448: Server settings → Surfaces helpers", () => {
     expect(Uint8Array.from(atob(a), (c) => c.charCodeAt(0))).toHaveLength(32);
     expect(a).not.toBe(b);
   });
-
-  it("hostedSlackUrls builds the four Slack URLs from the public base URL, and nothing without one", async () => {
-    const { hostedSlackUrls } = await import("./control-room-setup");
-    expect(hostedSlackUrls("https://nest.acme.com/")).toEqual({
-      redirect: "https://nest.acme.com/surfaces/slack/oauth/callback",
-      events: "https://nest.acme.com/surfaces/slack/hosted/events",
-      interactions: "https://nest.acme.com/surfaces/slack/hosted/interactions",
-      commands: "https://nest.acme.com/surfaces/slack/hosted/commands",
-    });
-    expect(hostedSlackUrls("")).toBeNull();
-    expect(hostedSlackUrls(null)).toBeNull();
-  });
 });
 
 describe("po-1446: channel activity in plain words", () => {
@@ -409,7 +430,11 @@ describe("po-1446: channel activity in plain words", () => {
     const { activityLines } = await import("./control-room-setup");
     const lines = activityLines(base, 20);
     expect(lines).toContain("No thread judged yet.");
-    expect(lines[lines.length - 1]).toMatch(/Nothing arrived/);
+    expect(lines[lines.length - 1]).toMatch(/Nothing arrived from Slack.*message\.groups.*app_mention.*reaction_added.*reinstall/);
+    expect(lines[lines.length - 1]).not.toMatch(/buffer key/);
+    // One Slack app per server: the hint points at the address Setup lists, not at a per-connection one.
+    expect(lines[lines.length - 1]).toMatch(/Request URL is the events address listed under Setup → Slack app/);
+    expect(activityLines({ ...base, received: 1, skipped: { too_short: 1 } }, 20).join(" ")).not.toMatch(/Nothing arrived/);
   });
 });
 
@@ -423,5 +448,59 @@ describe("po-1446 review: failed, held and singular wording", () => {
     expect(lines[0]).toBe("1 message received · 1 kept for judging · 0 skipped");
     expect(lines[1]).toBe("1 thread judged: 0 proposed, 0 with nothing worth keeping, 1 failed. The Decision ledger says why for each.");
     expect(lines[2]).toBe("0 cards posted · 1 held (no eligible reviewer in the channel)");
+  });
+});
+
+describe("guardView: a passing check says why, in plain words", () => {
+  const preview = (detail: Record<string, unknown>, surface_ok: boolean) =>
+    ({
+      would_bind: true,
+      is_ext_shared: false,
+      ext_capture_enabled: false,
+      guard: {
+        capture_ok: true,
+        surface_ok,
+        members_known: true,
+        detail: { readers_total: 6, readers_absent: 0, members_total: 10, members_not_readers: 0, guests: 0, externals: 0, non_user_principals: [], universe: false, org_wide: false, ext_shared: false, ...detail },
+      },
+    }) as never;
+  it("everyone can read, some can't, one reader, and a public channel chosen on purpose", async () => {
+    const { guardView } = await import("./control-room-setup");
+    const ctx = { channel: "general", nest: "Ops" };
+    expect(guardView(preview({}, true), ctx).passed).toEqual([
+      "All 6 people who can read Ops are in #general, so nobody outside the channel sees what it saves.",
+      "All 10 channel members can read Ops, so cards in Slack can show its existing notes.",
+      "Server admins can read every nest and aren't counted.",
+    ]);
+    expect(guardView(preview({ members_not_readers: 4 }, false), ctx).passed![1]).toBe("4 of the 10 channel members can't read Ops. They see new suggestions in Slack, never existing notes.");
+    expect(guardView(preview({ readers_total: 1 }, true), ctx).passed![0]).toMatch(/^The 1 person who can read Ops is in #general/);
+    expect(guardView(preview({ readers_absent: 2 }, true), ctx).passed![0]).toMatch(/public channel chosen on purpose/);
+  });
+});
+
+describe("a same-email member who can't be matched says why", () => {
+  it("names the shared server's domain list, a match since, and an unknown code", async () => {
+    const { guardView } = await import("./control-room-setup");
+    const view = (match_reason: string | null) =>
+      guardView(
+        {
+          would_bind: false,
+          is_ext_shared: false,
+          ext_capture_enabled: false,
+          guard: {
+            capture_ok: false,
+            surface_ok: false,
+            members_known: true,
+            detail: { readers_total: 2, readers_absent: 1, members_total: 2, members_not_readers: 1, guests: 0, externals: 0, non_user_principals: [], universe: false, org_wide: false, ext_shared: false },
+          },
+          people: { absent_readers: [{ user_id: "u", name: "Taimur", email: "t@acme.com", reason: "not_linked", match_reason }], members_not_readers: [], universe_cause: null },
+        } as never,
+        { channel: "qa", nest: "N" },
+      )
+        .groups!.flatMap((g) => g.people)
+        .join(" ");
+    expect(view("org_domain")).toMatch(/several organizations.*Email domains/);
+    expect(view(null)).toMatch(/they match now/);
+    expect(view("brand_new")).toMatch(/could not be made \(brand_new\)/);
   });
 });

@@ -12,8 +12,9 @@
 import type { ActivityEntry } from "./api";
 import { displayNameFor } from "./person-name";
 
+/** A task's own timeline: what was logged on it, its moves and its tag changes. */
 export function taskActivityEntries(activity: ActivityEntry[] | undefined): ActivityEntry[] {
-  return (activity ?? []).filter((a) => a.type === "task_activity");
+  return (activity ?? []).filter((a) => ["task_activity", "moved", "tags_changed"].includes(a.type));
 }
 
 export function describeTaskEntry(
@@ -29,7 +30,9 @@ export function describeTaskEntry(
 }
 
 /** The note without the "status · " prefix the server puts in `detail`. */
-export function taskEntryNote(entry: Pick<ActivityEntry, "detail" | "status">): string {
+export function taskEntryNote(entry: Pick<ActivityEntry, "detail" | "status"> & { type?: ActivityEntry["type"] }): string {
   const d = entry.detail ?? "";
+  if (entry.type === "moved") return `Moved: ${d}`;
+  if (entry.type === "tags_changed") return `Tags: ${d}`;
   return entry.status && d.startsWith(`${entry.status} · `) ? d.slice(entry.status.length + 3) : d;
 }

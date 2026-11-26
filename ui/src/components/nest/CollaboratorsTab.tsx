@@ -55,8 +55,8 @@ export function CollaboratorsTab({
             does not make anyone a steward.
             {stewardshipEnabled ? (
               canManageGovernance
-                ? " Use the Reviewer switch to let someone approve documents across the nest; narrower stewards (a tag or one document) are on the Stewards tab."
-                : " Stewards are assigned on the Stewards tab."
+                ? " Use the Reviewer switch to let someone approve documents across the nest; narrower stewards (a tag or one document) are under Stewards, below."
+                : " Nest owners and admins assign stewards."
             ) : canManageGovernance ? (
               // Naming the setting without a way to reach it left the reader
               // hunting through a menu (CU-wdqcq01e75). Only owner/admin can

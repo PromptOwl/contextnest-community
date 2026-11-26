@@ -12,6 +12,7 @@
  * for that call (non-admins are refused). Logs counts only.
  */
 import { getDb } from "../db/client.js";
+import { logCaught } from "./log.js";
 
 /** Tests only. */
 export const adminFolderTestHooks: { failLookup?: boolean; failWith?: string } = {};
@@ -61,7 +62,8 @@ async function isNestAdmin(nestId: string, userEmail: string): Promise<boolean> 
   const { resolveNestPermission, permissionLevel } = await import("../shared/access.js");
   try {
     return permissionLevel(await resolveNestPermission(nestId, u.id)) >= permissionLevel("admin");
-  } catch {
+  } catch (err) {
+    logCaught("guard", err, { nest: nestId, call: "is_nest_admin" }, "warn");
     return false;
   }
 }

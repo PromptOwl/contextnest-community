@@ -139,7 +139,7 @@ Everything after v1 is the ordinary review cycle, and separation of duties is un
 
 **Prime wins.** A prime document still lands as a draft: its creator is made its reviewer, but someone else has to approve the first version.
 
-Only **future** creates are affected. Turning it on doesn't steward anyone on existing documents, and turning it off leaves every steward row it created in place — remove them from the Stewards tab like any other. Every create surface participates (the editor, the REST and MCP APIs, and `ctx push` — the pusher authored what they pushed); the derived annotations document is the one exception, since nobody authored it.
+Only **future** creates are affected. Turning it on doesn't steward anyone on existing documents, and turning it off leaves every steward row it created in place — remove them under Stewards on the Collaborators tab like any other. Every create surface participates (the editor, the REST and MCP APIs, and `ctx push` — the pusher authored what they pushed); the derived annotations document is the one exception, since nobody authored it.
 
 Like prime, this only applies to **governed** nests. With stewardship off there is nothing to review, so the flag is inert until you turn stewardship on.
 

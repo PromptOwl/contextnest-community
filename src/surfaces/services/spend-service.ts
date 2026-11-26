@@ -16,6 +16,7 @@ import { estimateCostUsd } from "../../metacognition/model.js";
 import { nestAdminEmails } from "../../governance/review-service.js";
 import { thresholdsCrossed } from "../core/budget.js";
 import { recordNotice } from "./notices.js";
+import { logCaught } from "../log.js";
 
 /** Default cap: $50 per nest per calendar month (§4.1, D10). */
 export const DEFAULT_CAP_MICROS = 50_000_000;
@@ -36,8 +37,8 @@ export function costMicros(model: string, input: number, output: number, cacheRe
   return Math.round(((input + cacheRead + cacheWrite) * FALLBACK.input + output * FALLBACK.output));
 }
 
-export function reservationMicros(model: string): number {
-  return costMicros(model, MAX_INPUT_TOKENS, MAX_OUTPUT_TOKENS);
+export function reservationMicros(model: string, maxOutputTokens: number = MAX_OUTPUT_TOKENS): number {
+  return costMicros(model, MAX_INPUT_TOKENS, maxOutputTokens);
 }
 
 async function ensureRow(nestId: string, month: string): Promise<void> {
@@ -105,7 +106,8 @@ async function alert(nestId: string, threshold: 90 | 100, month: string): Promis
   let admins: string[] = [];
   try {
     admins = await nestAdminEmails(nestId);
-  } catch {
+  } catch (err) {
+    logCaught("budget", err, { nest: nestId, call: "admin_emails" }, "warn");
     admins = [];
   }
   await recordNotice({

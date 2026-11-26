@@ -6,6 +6,7 @@
  * - governanceNodeRoutes: mounted at /nests/:nestId/nodes BEFORE nodeRoutes catch-all
  */
 
+import { personaNames } from "../metacognition/managed.js";
 import { isChannelId, isChannelNode } from "../channels/channel-node.js";
 import { Hono } from "hono";
 import { recordNodeAccess } from "./access-log.js";
@@ -67,6 +68,7 @@ import {
 } from "./access-guard.js";
 import { handleAnnotationReply } from "../annotations/routes.js";
 import { notifyComment } from "./mention-notify.js";
+import { isArchivedForCaller } from "../nodes/service.js";
 import { readableDeletionRequests } from "./access-guard.js";
 
 const CHANNEL_USES_THREADS =
@@ -247,6 +249,7 @@ governanceRoutes.get("/review-queue", async (c) => {
   // "Org contributor (not a collaborator)": the requester reaches this nest
   // only through the org-contributions setting — the reviewer should know the
   // author isn't someone they added.
+  const agentNames = await personaNames(result.requests.map((r) => r.requestedBy));
   const contributors = await orgContributorRequesters(
     nestId,
     result.requests.map((r) => r.requestedBy),
@@ -255,6 +258,7 @@ governanceRoutes.get("/review-queue", async (c) => {
     ...r,
     canReview: verdicts.get(r.nodeId)?.allowed ?? false,
     requestedByOrgContributor: contributors.has(r.requestedBy.toLowerCase()),
+    ...(agentNames.has(r.requestedBy) ? { requestedByName: agentNames.get(r.requestedBy) } : {}),
   }));
 
   return c.json({ ...result, requests });
@@ -798,6 +802,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
       403,
     );
   }
+  if (await isArchivedForCaller(nestId, nodeId, userEmail)) throw new NotFoundError("Node not found");
 
   // getVersions returns content:"" (bodies live on disk, not the table). Attach
   // each version's stored change log — the unified diff from the version before
@@ -910,6 +915,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions/:version{[0-9]+}", async (c) => 
       403,
     );
   }
+  if (await isArchivedForCaller(nestId, nodeId, userEmail)) throw new NotFoundError("Node not found");
 
   const { storage, versions: versionManager } = await engineCache.get(nestId);
   // The node gate clears the document, not every version of it (PO-1465): a
@@ -983,6 +989,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/comments", async (c) => {
   if (!(await callerCanReadNode(nestId, nodeId, userId))) {
     return c.json({ comments: [] });
   }
+  if (await isArchivedForCaller(nestId, nodeId, await resolveCallerEmail(userId))) throw new NotFoundError("Node not found");
   const list = await comments.listComments(nestId, nodeId, {
     status: status === "open" || status === "resolved" ? status : undefined,
   });

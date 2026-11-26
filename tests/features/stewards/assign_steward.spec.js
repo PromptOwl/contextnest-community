@@ -130,14 +130,14 @@ test.describe('Assign Steward', () => {
     // Stewardship off.
     const off = await ownerNest(primary_user, commonFunction, 'stew-off', { governed: false });
     expect(await off.page.nestMenuItems(off.nest.id)).not.toContain('Assign Steward');
-    expect(await off.page.tabNames(off.nest.id)).not.toContain('Stewards');
+    expect(await off.page.hasStewards(off.nest.id)).toBe(false);
 
     // An Editor and a Viewer.
     for (const permission of ['write', 'read']) {
       const owner = await ownerNest(primary_user, commonFunction, `stew-${permission}`);
       const member = await share(owner, secondary_user, permission);
       expect(await member.page.nestMenuItems(owner.nest.id)).not.toContain('Assign Steward');
-      expect(await member.page.tabNames(owner.nest.id)).not.toContain('Stewards');
+      expect(await member.page.hasStewards(owner.nest.id)).toBe(false);
     }
 
     // Archived, even for the owner.
@@ -145,7 +145,7 @@ test.describe('Assign Steward', () => {
     await archived.api.archiveNest(archived.nest.id);
     cleanups.push(() => archived.api.restoreNest(archived.nest.id));
     expect(await archived.page.nestMenuItems(archived.nest.id)).not.toContain('Assign Steward');
-    expect(await archived.page.tabNames(archived.nest.id)).not.toContain('Stewards');
+    expect(await archived.page.hasStewards(archived.nest.id)).toBe(false);
   });
 
   // ── The dialog and its checks ──────────────────────────────────────────────
@@ -370,6 +370,9 @@ test.describe('Assign Steward', () => {
   test('CN-STEW-008: Verify that Edit Role shows the email fixed and the current role and scope filled in, that Save with no change just closes, and that a changed role or scope saves with "Steward updated" and takes effect', async ({ primary_user, secondary_user, commonFunction }) => {
     const owner = await ownerNest(primary_user, commonFunction, 'stew-edit');
     const { page, api, nest } = owner;
+    // The roster sits on the Collaborators tab; there is no Stewards tab (po-1428).
+    expect(await page.tabNames(nest.id)).not.toContain('Stewards');
+    expect(await page.hasStewards(nest.id)).toBe(true);
     const tagged = await pending(owner, 'Tagged', ['qa']);
     const one = await pending(owner, 'One');
     const steward = await openSecondary(owner, secondary_user);

@@ -225,6 +225,7 @@ async function syncOne(
       name: poTeam.name,
       callerUserId,
       allowAdmin: false,
+      fromImport: true,
     });
   }
 

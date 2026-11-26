@@ -22,6 +22,7 @@ import { AppError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { summarizeConfig } from "../metacognition/summary.js";
 import { listAgents } from "../metacognition/store.js";
+import { MANAGED_BY_SLACK, managedAgents } from "../metacognition/managed.js";
 import { resolveExportBody } from "../nodes/readable-body.js";
 import {
   NOT_ENABLED,
@@ -224,10 +225,11 @@ export async function runMetacognitionTool(
             ),
           ),
         );
+        const managed = await managedAgents(ctx.nestId);
         const agents = (await listAgents(ctx.nestId)).map((a) => ({
-          ...agentView(a),
+          ...agentView(a, managed.get(a.node_id)),
           instructions_approved: approved.get(a.node_id) ?? false,
-          summary: summarizeConfig(a.config, { enabled: a.enabled }),
+          summary: managed.has(a.node_id) ? MANAGED_BY_SLACK : summarizeConfig(a.config, { enabled: a.enabled }),
         }));
         const configured = new Set(agents.map((a) => a.node_id));
         const unconfigured = agentDocs
@@ -246,7 +248,9 @@ export async function runMetacognitionTool(
           agents.length ? "## Metacognition agents" : "No metacognition agents yet.",
           ...agents.map(
             (a) =>
-              `- ${a.persona.name} (${a.node_id})${a.enabled ? "" : " — switched off"}${a.instructions_approved ? "" : notApproved}: ${a.summary}`,
+              a.managed_by
+                ? `- ${a.persona.name} (${a.node_id}): ${a.summary}`
+                : `- ${a.persona.name} (${a.node_id})${a.enabled ? "" : " — switched off"}${a.instructions_approved ? "" : notApproved}: ${a.summary}`,
           ),
         ];
         if (unconfigured.length) {

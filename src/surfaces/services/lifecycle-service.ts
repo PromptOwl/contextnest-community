@@ -27,6 +27,7 @@ import { track } from "./work.js";
 import { recordPurge } from "./purge-audit.js";
 import { getSettings } from "./settings-service.js";
 import { effectiveTtlHours } from "../core/settings.js";
+import { logCaught } from "../log.js";
 
 let hooked = false;
 
@@ -231,10 +232,13 @@ export async function disconnectInstall(installId: string, actorUserId: string |
     for (const ownerId of await sealedOwnersLinkedTo(installId)) await alertSealedOwnerSlackRemoval(ownerId, installId, "install");
   }
   const { getSecret } = await import("./secret-store.js");
-  const token = await getSecret(installId, "bot_token").catch(() => null);
+  const token = await getSecret(installId, "bot_token").catch((err) => {
+    logCaught("lifecycle", err, { install: installId, call: "bot_token" }, "warn");
+    return null;
+  });
   if (token) {
     const { slackCall } = await import("../adapters/slack/api.js");
-    await slackCall("auth.revoke", {}, { token }).catch(() => {});
+    await slackCall("auth.revoke", {}, { token }).catch((err) => logCaught("lifecycle", err, { install: installId, call: "auth.revoke" }, "warn"));
   }
   await uninstall(installId, "uninstalled");
   await db.run("UPDATE surface_installs SET status = 'disconnected', revoked_at = COALESCE(revoked_at, ?), updated_at = ? WHERE id = ?", [
@@ -242,5 +246,17 @@ export async function disconnectInstall(installId: string, actorUserId: string |
     new Date().toISOString(),
     installId,
   ]);
+  // A full disconnect: this nest's half-finished connects go too, or Setup resumes one (old keys).
+  // Other nests' are left alone: with self-serve, someone else may be mid-connect.
+  const install = await getInstall(installId);
+  const stale = (await db.all("SELECT id FROM surface_installs WHERE surface = ? AND status = 'pending' AND home_nest_id = ?", [
+    install?.surface ?? "slack",
+    install?.home_nest_id ?? "",
+  ])) as Array<{ id: string }>;
+  const { deleteSecrets } = await import("./secret-store.js");
+  for (const s of stale) {
+    await db.run("UPDATE surface_installs SET status = 'disconnected', updated_at = ? WHERE id = ? AND status = 'pending'", [new Date().toISOString(), s.id]);
+    await deleteSecrets(s.id).catch((err) => logCaught("lifecycle", err, { install: s.id, call: "delete_secrets" }, "warn"));
+  }
   return { withdrawn, told };
 }

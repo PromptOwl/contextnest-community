@@ -57,6 +57,7 @@ import { DocumentsHome, EmptyNest } from "./nest/DocumentsHome";
 import { DEFAULT_NEST_TAB, nestTabOpening, nestViewMenuItems } from "../lib/nest-tabs";
 // Each tab is its own chunk, loaded when first opened.
 const ExternalEditsTab = lazyChunk(() => import("./nest/ExternalEditsTab").then((m) => ({ default: m.ExternalEditsTab })));
+const NestChatPanel = lazyChunk(() => import("./nest/NestChatPanel").then((m) => ({ default: m.NestChatPanel })));
 const FieldsTab = lazyChunk(() => import("./nest/FieldsTab").then((m) => ({ default: m.FieldsTab })));
 const DocStream = lazyChunk(() => import("./DocStream").then((m) => ({ default: m.DocStream })));
 const InstructionsTab = lazyChunk(() =>
@@ -434,7 +435,12 @@ export function NestView({
       // Folders are path-derived, so the server records the path rather than
       // seeding a starter document that would count as real content
       // (CU-wdqcpzzzut). Nesting works via "parent/child".
-      await api.createFolder(nestId, folder);
+      const { created } = await api.createFolder(nestId, folder);
+      if (!created) {
+        // The dialog stays open, so another name can be typed.
+        toast.error(`Folder "${prettyFolderPath(folder)}" already exists`);
+        return;
+      }
       setNewFolderPath("");
       setShowNewFolder(false);
       // An empty folder barely changes the tree, so say it landed
@@ -917,7 +923,12 @@ export function NestView({
     (feedFirstPage?.items ?? []).filter((i) => i.type === "comment").length;
   const showReviewTab = reviewTabShownAnyway || feedCommentsTotal > 0;
 
-  // A shared ?tab= link can name a tab this viewer doesn't get (Stewards on a
+  // The steward roster is admin-only and sits in Collaborators, so it can open
+  // that tab on its own, without the access controls.
+  const showAccess = canManage || collabCanWrite;
+  const showStewards = stewardshipEnabled && canManageGovernance;
+
+  // A shared ?tab= link can name a tab this viewer doesn't get (Collaborators on a
   // nest they only read, Review Queue while read-only). Radix would render an
   // empty content area against a value with no trigger, so fall back to
   // Documents once the permission flags have resolved.
@@ -926,8 +937,7 @@ export function NestView({
     instructions: !grantOnly,
     review: showReviewTab && !isReadOnly,
     "external-edits": !isReadOnly,
-    stewards: stewardshipEnabled && canManageGovernance,
-    collaborators: canManage || collabCanWrite,
+    collaborators: showAccess || showStewards,
     settings: !grantOnly,
     activity: canManageGovernance,
     // Experimental document stream, pinned to this nest.
@@ -1723,9 +1733,9 @@ export function NestView({
           </span>
         </div>
       )}
-      {/* Tabbed layout — Documents / Review Queue / Stewards.
-          When stewardship is off the latter two tabs are hidden because
-          their data is empty by definition. */}
+      {/* Tabbed layout — Documents / Review Queue / Collaborators.
+          When stewardship is off the review queue and the steward roster are
+          hidden because their data is empty by definition. */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full min-w-0">
         {/* New Folder sits beside the tab row — it acts on the content area
             below (Overview/Documents), not on the nest as a whole.
@@ -1759,17 +1769,12 @@ export function NestView({
                 )}
               </TabsTrigger>
             )}
-            {/* Steward roster is admin-only (list + manage), and hidden when
-              the admin is viewing a real user's nest. */}
-            {stewardshipEnabled && canManageGovernance && (
-              <TabsTrigger value="stewards" className={NEST_TAB}>Stewards</TabsTrigger>
-            )}
             {/* Collaborators — plain access sharing, independent of
-              stewardship. Owner/admin manage the full roster; write
+              stewardship, with the steward roster below it. Owner/admin manage the full roster; write
               collaborators can invite (escalation-capped server-side), so
               they see the tab too. The roster controls cap themselves by the
               caller's permission (see CollaboratorManager). */}
-            {(canManage || collabCanWrite) && (
+            {(showAccess || showStewards) && (
               <TabsTrigger value="collaborators" className={NEST_TAB}>Collaborators</TabsTrigger>
             )}
             {/* Settings: fields (readable by everyone on the nest — they explain
@@ -1793,7 +1798,6 @@ export function NestView({
               <Button
                 variant="outline"
                 size="sm"
-                className="text-muted-foreground"
                 onClick={() => setShowNewFolder(true)}
                 title="Create a folder (nest with parent/child)"
                 aria-label="New Folder"
@@ -1932,21 +1936,6 @@ export function NestView({
           </Suspense>
         </TabsContent>
 
-        {stewardshipEnabled && canManageGovernance && (
-          <TabsContent value="stewards" className="space-y-4">
-            <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
-              <StewardsTab
-                nestId={nestId}
-                canManage={canManageGovernance && !caps.isReadOnly}
-                currentUserEmail={currentEmail}
-                onAssign={() => setShowAssignSteward(true)}
-                onRemove={setRemoveStewardId}
-                onEditRole={setEditingSteward}
-              />
-            </Suspense>
-          </TabsContent>
-        )}
-
         {!grantOnly && (
           <TabsContent value="instructions" className="space-y-4">
             <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
@@ -1983,6 +1972,10 @@ export function NestView({
               </div>
             </section>
             )}
+            {/* Team chat (C2/C3): the nest's own switch and my default level. */}
+            <Suspense fallback={null}>
+              <NestChatPanel nestId={nestId} canManage={canManageGovernance && !isReadOnly} />
+            </Suspense>
             {!grantOnly && (
               <section className="space-y-2" aria-labelledby="settings-fields">
                 <h2 id="settings-fields" className="text-base font-semibold">Fields and task rules</h2>
@@ -2056,20 +2049,34 @@ export function NestView({
           </TabsContent>
         )}
 
-        {(canManage || collabCanWrite) && (
+        {(showAccess || showStewards) && (
           <TabsContent value="collaborators" className="space-y-4">
             <Suspense fallback={<div className="py-12 text-center text-muted-foreground">Loading...</div>}>
-              <CollaboratorsTab
-                nestId={nestId}
-                nestName={nestName}
-                canManage={canManage}
-                canManageGovernance={canManageGovernance}
-                stewardshipEnabled={stewardshipEnabled}
-                currentUserEmail={currentEmail}
-                callerPermission={permission ?? undefined}
-                onOpenSettings={() => setShowSettings(true)}
-                onChanged={fetchData}
-              />
+              {showAccess && (
+                <CollaboratorsTab
+                  nestId={nestId}
+                  nestName={nestName}
+                  canManage={canManage}
+                  canManageGovernance={canManageGovernance}
+                  stewardshipEnabled={stewardshipEnabled}
+                  currentUserEmail={currentEmail}
+                  callerPermission={permission ?? undefined}
+                  onOpenSettings={() => setShowSettings(true)}
+                  onChanged={fetchData}
+                />
+              )}
+              {showStewards && (
+                <section aria-label="Stewards" className="space-y-4" data-testid="nest-stewards-section">
+                  <StewardsTab
+                    nestId={nestId}
+                    canManage={canManageGovernance && !caps.isReadOnly}
+                    currentUserEmail={currentEmail}
+                    onAssign={() => setShowAssignSteward(true)}
+                    onRemove={setRemoveStewardId}
+                    onEditRole={setEditingSteward}
+                  />
+                </section>
+              )}
             </Suspense>
           </TabsContent>
         )}
@@ -2163,7 +2170,7 @@ export function NestView({
           onChanged={(next) => {
             setShowSettings(false);
             // Flip the governance UI (Pending/AI Ready/Review Queue tiles,
-            // Stewards tab, etc.) instantly instead of waiting for the full
+            // steward roster, etc.) instantly instead of waiting for the full
             // refetch to land — then reconcile counts in the background.
             setStewardshipEnabled(next.stewardshipEnabled);
             setAllowSelfApprove(next.allowSelfApprove);

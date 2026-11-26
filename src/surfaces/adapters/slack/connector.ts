@@ -42,6 +42,7 @@ function blocksFor(view: ProposalView): { text: string; blocks: unknown[] } {
   return { text: escapeMrkdwn(renderCardText(view)), blocks: renderCard(view) };
 }
 import { REMEMBER_RE, SKIP_ME_RE } from "../../core/gate.js";
+import { logCaught } from "../../log.js";
 
 const MAX_MEMBER_PAGES = 50;
 
@@ -76,7 +77,8 @@ async function userInfo(installId: string, userId: string): Promise<SurfaceUserP
   try {
     const r = await slackCall("users.info", { user: userId }, { token: await token(installId) });
     return r.user ? profileOf(r.user) : null;
-  } catch {
+  } catch (err) {
+    logCaught("identity", err, { install: installId, call: "users.info" }, "warn");
     return null;
   }
 }
@@ -261,7 +263,8 @@ export function createSlackConnector(): SurfaceConnector {
             enumerable: true,
           },
         };
-      } catch {
+      } catch (err) {
+        logCaught("guard", err, { install: install.id, call: "members" }, "warn"); // unknown members: fails closed
         return { known: false, reason: "error" };
       }
     },
@@ -346,7 +349,8 @@ export function createSlackConnector(): SurfaceConnector {
       try {
         const r = await slackCall("chat.getPermalink", { channel: conversation, message_ts: messageId }, { token: await token(install.id) });
         return typeof r.permalink === "string" && /^https:\/\//.test(r.permalink) ? r.permalink : null;
-      } catch {
+      } catch (err) {
+        logCaught("card", err, { install: install.id, call: "chat.getPermalink" }, "warn");
         return null;
       }
     },

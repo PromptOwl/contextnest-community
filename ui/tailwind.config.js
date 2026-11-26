@@ -5,6 +5,8 @@ import tailwindcssTypography from "@tailwindcss/typography";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+const TOP_BAR_STEPS = { sm: "48rem", md: "64rem", lg: "74rem", xl: "86rem", "2xl": "98rem" };
+
 /** @type {import('tailwindcss').Config} */
 export default {
   darkMode: ["class"],
@@ -92,5 +94,16 @@ export default {
       },
     },
   },
-  plugins: [tailwindcssAnimate, tailwindcssTypography],
+  plugins: [
+    tailwindcssAnimate,
+    tailwindcssTypography,
+    // The app's top bar (po-1454): what fits depends on the bar's own width,
+    // not the window's, since the sidebar takes part of the window.
+    ({ addVariant }) => {
+      for (const [name, width] of Object.entries(TOP_BAR_STEPS)) {
+        addVariant(`bar-${name}`, `@container topbar (min-width: ${width})`);
+        addVariant(`bar-max-${name}`, `@container topbar (max-width: calc(${width} - 0.02px))`);
+      }
+    },
+  ],
 };

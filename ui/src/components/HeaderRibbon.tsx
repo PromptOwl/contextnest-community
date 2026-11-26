@@ -5,8 +5,7 @@
  *
  * The header row is shared with the breadcrumb, Docs and the account
  * menu. My Work and My Drafts are the two people look for, so they are spelled
- * out from a laptop-width window up (1024px+). Instructions is
- * secondary and spells out from 1500px+. Below that an item is its icon plus its
+ * out once the bar (not the window) is wide enough: bar-md in ui/tailwind.config.js. Below that an item is its icon plus its
  * count, with the name in its tooltip.
  */
 import { useQuery } from "@tanstack/react-query";
@@ -82,7 +81,7 @@ export function HeaderRibbon({
             >
               <Icon className="h-4 w-4 shrink-0" aria-hidden />
               <span
-                className={`hidden whitespace-nowrap lg:inline`}
+                className="hidden whitespace-nowrap bar-md:inline"
               >
                 {item.label}
               </span>

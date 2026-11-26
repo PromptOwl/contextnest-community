@@ -10,6 +10,8 @@ export type AutoMatchReason =
   | "not_a_member"
   | "email_unconfirmed"
   | "no_match"
+  /** Shared server: an account has the email, but its domain is not on the connection's list. */
+  | "org_domain"
   | "ambiguous"
   | "unverified"
   | "domain"
