@@ -130,7 +130,8 @@ describe("setup facts the wizard reads", () => {
     const r = await jsonRequest(app, "GET", "/surfaces/status", undefined, root.apiKey);
     expect(r.status).toBe(200);
     expect(r.data.org_name).toBe("Larkspur");
-    expect(r.data.slack_hosted).toBe(false);
+    // One Slack app per server: always live with Surfaces.
+    expect(r.data.slack_hosted).toBe(true);
     expect(r.data.installs.map((i: any) => i.id)).toContain(installId);
   });
 

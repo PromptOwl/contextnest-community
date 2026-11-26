@@ -1092,8 +1092,7 @@ export function createApp(): Hono<AuthEnv> {
     surfaces_default_cap_usd: config.SURFACES_DEFAULT_CAP_MICROS ? config.SURFACES_DEFAULT_CAP_MICROS / 1_000_000 : null,
     surfaces_org_name: config.SURFACES_ORG_NAME ?? "",
     surfaces_quiet_minutes: (await getSurfaceSettings()).quiet_minutes,
-    // Hosted one-click Slack app (PromptOwl's own); secrets are presence only.
-    surfaces_slack_hosted_enabled: config.FEATURE_SURFACES_SLACK_HOSTED,
+    // The server's one Slack app; secrets are presence only.
     surfaces_slack_hosted_client_id: config.SURFACES_SLACK_HOSTED_CLIENT_ID ?? "",
     surfaces_slack_hosted_client_secret_set: !!config.SURFACES_SLACK_HOSTED_CLIENT_SECRET,
     surfaces_slack_hosted_signing_secret_set: !!config.SURFACES_SLACK_HOSTED_SIGNING_SECRET,
@@ -1610,12 +1609,8 @@ export function createApp(): Hono<AuthEnv> {
         addError("surfaces_quiet_minutes", `Quiet window must be a whole number of minutes from 5 to 240 (empty uses the default, ${DEFAULT_SURFACE_SETTINGS.quiet_minutes}).`);
       }
     }
-    if ("surfaces_slack_hosted_enabled" in body) {
-      const surfacesOn = "surfaces_enabled" in body ? !!body.surfaces_enabled : config.FEATURE_SURFACES;
-      if (body.surfaces_slack_hosted_enabled && !surfacesOn) addError("surfaces_slack_hosted_enabled", "Turn Surfaces on first.");
-      else pending.push({ name: "FEATURE_SURFACES_SLACK_HOSTED", value: body.surfaces_slack_hosted_enabled ? "true" : null });
-    }
-    // Hosted Slack app id and secrets: single tokens; the secrets are write-only.
+    // The server's Slack app id and secrets: single tokens; the secrets are write-only.
+    const slackKeys: Record<string, string> = {};
     for (const [key, name] of [
       ["surfaces_slack_hosted_client_id", "SURFACES_SLACK_HOSTED_CLIENT_ID"],
       ["surfaces_slack_hosted_client_secret", "SURFACES_SLACK_HOSTED_CLIENT_SECRET"],
@@ -1624,7 +1619,18 @@ export function createApp(): Hono<AuthEnv> {
       if (!(key in body)) continue;
       const v = typeof body[key] === "string" ? body[key].trim() : "";
       if (/\s/.test(v) || v.length > 256) addError(key, "Must be a single value with no spaces, up to 256 characters (or empty to clear it).");
-      else pending.push({ name, value: v || null });
+      else {
+        pending.push({ name, value: v || null });
+        slackKeys[key] = v;
+      }
+    }
+    // A new Client ID or secret is checked with Slack before it is saved, so a wrong key fails here, not at approval.
+    if (slackKeys.surfaces_slack_hosted_client_id || slackKeys.surfaces_slack_hosted_client_secret) {
+      const id = slackKeys.surfaces_slack_hosted_client_id ?? config.SURFACES_SLACK_HOSTED_CLIENT_ID;
+      const secret = slackKeys.surfaces_slack_hosted_client_secret ?? config.SURFACES_SLACK_HOSTED_CLIENT_SECRET;
+      const { refusedClientPair } = await import("./surfaces/adapters/slack/api.js");
+      const refused = id && secret ? await refusedClientPair(id, secret) : null;
+      if (refused) addError(`surfaces_slack_hosted_${refused.field}`, refused.error);
     }
     // Experimental: the cross-nest document stream. Its own switch, no
     // dependencies. Off writes a tombstone (null): the switch is off now and

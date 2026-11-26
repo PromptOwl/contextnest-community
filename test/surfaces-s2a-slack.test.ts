@@ -321,7 +321,7 @@ async function mcp(path: string, method: string, params: Record<string, unknown>
 }
 
 /** Full manifest-install flow for a workspace: create → credentials → OAuth. */
-async function installWorkspace(team: string, homeNest: string, opts: { botUserId?: string; authedUser?: string; enterprise?: boolean } = {}) {
+async function installWorkspace(team: string, homeNest: string, opts: { botUserId?: string; authedUser?: string; enterprise?: boolean; failExchange?: string } = {}) {
   const created = await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: homeNest }, root.apiKey);
   expect(created.status).toBe(201);
   const id = created.data.install_id as string;
@@ -342,6 +342,8 @@ async function installWorkspace(team: string, homeNest: string, opts: { botUserI
     is_enterprise_install: !!opts.enterprise,
     authed_user: { id: opts.authedUser ?? "U_ROOT" },
   };
+  // Set after the credentials save, which checks the keys with the same Slack call.
+  if (opts.failExchange) slack.fail.set("oauth.v2.access", opts.failExchange);
   const cb = await app.request(`/surfaces/slack/oauth/callback?code=c-${team}&state=${encodeURIComponent(state)}`, { headers: { Cookie: cookie, Accept: "application/json" } });
   return { id, status: cb.status, body: await cb.json().catch(() => ({})), cookie, state };
 }
@@ -534,9 +536,8 @@ describe("install", () => {
   it("po-1447: a failed OAuth code exchange writes one [surfaces] oauth line with the install and Slack's code, no secret", async () => {
     const errors: string[] = [];
     const spy = vi.spyOn(console, "error").mockImplementation((...a: any[]) => void errors.push(a.map(String).join(" ")));
-    slack.fail.set("oauth.v2.access", "invalid_code");
     try {
-      const r = await installWorkspace("T7", N);
+      const r = await installWorkspace("T7", N, { failExchange: "invalid_code" });
       expect(r.status).toBe(502);
       const lines = errors.filter((l) => l.startsWith("[surfaces] oauth"));
       expect(lines).toEqual([`[surfaces] oauth failed: code=invalid_code install=${r.id}`]);
@@ -545,6 +546,46 @@ describe("install", () => {
       slack.fail.delete("oauth.v2.access");
       spy.mockRestore();
     }
+  });
+
+  it("a refused client secret says which keys to fix and where; a manifest install keeps its values to fix", async () => {
+    try {
+      const r = await installWorkspace("T8", N, { failExchange: "bad_client_secret" });
+      expect(r.status).toBe(502);
+      expect(r.body.message).toMatch(/Client ID or Client secret/);
+      expect(r.body.steps.join(" ")).toContain("Control room → Setup");
+      expect((await S.db.getDb().get("SELECT status FROM surface_installs WHERE id = ?", [r.id])) as any).toMatchObject({ status: "pending" });
+    } finally {
+      slack.fail.delete("oauth.v2.access");
+    }
+  });
+
+  it("saving a Client ID or secret Slack refuses → 422 naming the field, nothing stored; a good pair saves", async () => {
+    const id = (await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: N }, root.apiKey)).data.install_id as string;
+    const put = (body: Record<string, string>) => jsonRequest(app, "PUT", `/surfaces/slack/installs/${id}/credentials`, body, root.apiKey);
+    try {
+      slack.fail.set("oauth.v2.access", "bad_client_secret");
+      const bad = await put({ client_id: "cid.1", client_secret: "wrong", signing_secret: SIGNING });
+      expect(bad.status).toBe(422);
+      expect(bad.data).toMatchObject({ field: "client_secret" });
+      const view = await jsonRequest(app, "GET", `/surfaces/slack/installs/${id}`, undefined, root.apiKey);
+      expect(view.data.install.credentials).toMatchObject({ client_id: false, client_secret: false, signing_secret: false });
+      slack.fail.set("oauth.v2.access", "invalid_client_id");
+      expect((await put({ client_id: "nope", client_secret: "csecret-xyz" })).data).toMatchObject({ field: "client_id" });
+    } finally {
+      slack.fail.delete("oauth.v2.access");
+    }
+    // Slack answers invalid_code for a good pair: it saves.
+    expect((await put({ client_id: "cid.1", client_secret: "csecret-xyz", signing_secret: SIGNING })).status).toBe(200);
+  });
+
+  it("disconnect also closes half-finished connects, so Setup never resumes one", async () => {
+    const a = (await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: N }, root.apiKey)).data.install_id as string;
+    const b = (await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: N }, root.apiKey)).data.install_id as string;
+    const { disconnectInstall } = await import("../src/surfaces/services/lifecycle-service.js");
+    await disconnectInstall(a);
+    const rows = (await S.db.getDb().all("SELECT id, status FROM surface_installs WHERE id IN (?, ?)", [a, b])) as any[];
+    expect(rows.map((x) => x.status)).toEqual(["disconnected", "disconnected"]);
   });
 
   it("AC-INS-06: a bad signature or a timestamp older than 300 s → 401, nothing processed", async () => {
@@ -565,11 +606,26 @@ describe("install", () => {
     expect((await postEvent(`/surfaces/slack/${installId}/events`, { type: "url_verification", challenge: "x" }, { secret: "nope" })).status).toBe(401);
   });
 
-  it("AC-INS-08: /hosted/* is 404 while FEATURE_SURFACES_SLACK_HOSTED is off", async () => {
-    delete process.env.FEATURE_SURFACES_SLACK_HOSTED;
-    expect((await postEvent("/surfaces/slack/hosted/events", envelope({ type: "message" }))).status).toBe(404);
-    expect((await postEvent("/surfaces/slack/hosted/interactions", {})).status).toBe(404);
-    expect((await app.request("/surfaces/slack/hosted/oauth/start", { headers: { Authorization: `Bearer ${root.apiKey}` } })).status).toBe(404);
+  it("AC-INS-08 (one Slack app): its routes are live whenever Surfaces is; a request not signed with its secret is refused", async () => {
+    delete process.env.SURFACES_SLACK_HOSTED_SIGNING_SECRET;
+    expect((await postEvent("/surfaces/slack/hosted/events", envelope({ type: "message" }))).status).toBe(401);
+    expect((await postEvent("/surfaces/slack/hosted/interactions", {})).status).toBe(401);
+    expect((await app.request("/surfaces/slack/hosted/oauth/start", { headers: { Authorization: `Bearer ${root.apiKey}` } })).status).toBe(422);
+  });
+
+  it("GET /surfaces/slack/app: the server app's manifest and addresses, which keys are saved; admins only", async () => {
+    process.env.SURFACES_SLACK_HOSTED_CLIENT_ID = "app-cid";
+    try {
+      const r = await jsonRequest(app, "GET", "/surfaces/slack/app", undefined, root.apiKey);
+      expect(r.status).toBe(200);
+      expect(r.data.urls).toMatchObject({ events: `${BASE}/surfaces/slack/hosted/events`, redirect: `${BASE}/surfaces/slack/oauth/callback` });
+      expect(r.data.manifest.settings.event_subscriptions.request_url).toBe(`${BASE}/surfaces/slack/hosted/events`);
+      expect(r.data.credentials).toMatchObject({ client_id: true });
+      expect(JSON.stringify(r.data)).not.toContain("app-cid");
+      expect((await jsonRequest(app, "GET", "/surfaces/slack/app", undefined, alice.apiKey)).status).toBe(403);
+    } finally {
+      delete process.env.SURFACES_SLACK_HOSTED_CLIENT_ID;
+    }
   });
 
   it("CF-3: with FEATURE_SURFACES off every Slack entry point is 404 and nothing is stored", async () => {

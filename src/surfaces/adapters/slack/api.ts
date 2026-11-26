@@ -43,3 +43,20 @@ export async function slackCall(
   if (!res.ok || !body || body.ok !== true) throw new SlackApiError(String(body?.error ?? `http_${res.status}`));
   return body;
 }
+
+/**
+ * Slack checks the client pair before the code, so a dummy code tells a wrong
+ * key (invalid_client_id / bad_client_secret) from a good one (invalid_code).
+ * Anything else (Slack down, rate limit) does not block a save.
+ */
+export async function refusedClientPair(clientId: string, clientSecret: string): Promise<{ field: "client_id" | "client_secret"; error: string } | null> {
+  try {
+    await slackCall("oauth.v2.access", { client_id: clientId, client_secret: clientSecret, code: "nest-key-check" });
+    return null;
+  } catch (err) {
+    const code = slackErrorCode(err);
+    if (code === "invalid_client_id") return { field: "client_id", error: "Slack doesn't recognize this Client ID. Copy it again from your Slack app's Basic Information page." };
+    if (code === "bad_client_secret") return { field: "client_secret", error: "Slack refused this Client secret for this Client ID. Copy it again from your Slack app's Basic Information page." };
+    return null;
+  }
+}

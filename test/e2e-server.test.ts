@@ -75,8 +75,8 @@ describe("e2e server launcher (Playwright against this checkout's own build)", (
       const config = readFileSync(join(repoRoot, "src/config.ts"), "utf8");
       const switches = [...config.matchAll(/process\.env\.((?:FEATURE|EXPERIMENTAL)_[A-Z_]+) === "true"/g)].map((m) => m[1]);
       expect(switches.length).toBeGreaterThan(3);
-      // Left off on purpose: needs Slack app credentials / a security review.
-      const leftOff = ["FEATURE_SURFACES_SLACK_HOSTED", "FEATURE_SUBAGENT_RUNS"];
+      // Left off on purpose: needs a security review.
+      const leftOff = ["FEATURE_SUBAGENT_RUNS"];
       for (const name of new Set(switches)) {
         if (leftOff.includes(name)) expect(FEATURE_ENV).not.toHaveProperty(name);
         else expect(FEATURE_ENV, name).toHaveProperty(name, "true");

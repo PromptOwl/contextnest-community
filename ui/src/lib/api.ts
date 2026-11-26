@@ -405,8 +405,7 @@ export interface AdminSettings {
   distill_enabled?: boolean;
   /** Any person may connect their own Slack workspace to a nest they own. */
   surfaces_slack_self_serve?: boolean;
-  /** Hosted one-click Slack app (FEATURE_SURFACES_SLACK_HOSTED) and its credentials. */
-  surfaces_slack_hosted_enabled?: boolean;
+  /** The server's one Slack app: its credentials. */
   surfaces_slack_hosted_client_id?: string;
   surfaces_slack_hosted_client_secret_set?: boolean;
   surfaces_slack_hosted_signing_secret_set?: boolean;
@@ -5757,6 +5756,13 @@ export const createSlackInstall = (homeNestId: string) =>
   request<{ install_id: string; manifest: unknown }>("/surfaces/slack/installs", surfacesJson({ home_nest_id: homeNestId }));
 export const getSlackInstall = (id: string) =>
   request<{ install: SurfacesInstallRef & { credentials: Record<string, boolean> }; manifest: unknown | null }>(`/surfaces/slack/installs/${encodeURIComponent(id)}`);
+/** The server's one Slack app: manifest, the addresses it must keep, which keys are saved. */
+export const getSlackApp = () =>
+  request<{
+    manifest: unknown;
+    urls: { events: string; interactions: string; commands: string; redirect: string };
+    credentials: { client_id: boolean; client_secret: boolean; signing_secret: boolean };
+  }>("/surfaces/slack/app");
 /** Write-only: values go to the server and never come back. */
 export const putSlackCredentials = (id: string, creds: { client_id?: string; client_secret?: string; signing_secret?: string }) =>
   request<{ stored: string[]; credentials: Record<string, boolean> }>(`/surfaces/slack/installs/${encodeURIComponent(id)}/credentials`, {
