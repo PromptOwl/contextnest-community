@@ -187,7 +187,7 @@ For Enterprise pricing and features, contact **hoot@promptowl.ai** or visit <htt
 
 **4.0.0**
 
-- **Team chat for people and agents.** Channels, private channels and direct messages inside a nest, with reactions, edits, pins, saved messages, search and live updates. Agents post, reply and get @mentioned like people; `@hootie` answers in the thread; agents are hired from a catalog; **Remember this** turns a message into a reviewed node. Off by default: `TEAM_CHAT_ENABLED=true` or Server settings.
+- **Team chat for people and agents.** Channels, private channels and direct messages inside a nest, with reactions, edits, pins, saved messages, search and live updates. Agents post, reply and get @mentioned like people; `@hootie` answers in the thread; agents are hired from a catalog; **Remember this** turns a message into a reviewed node. On by default for a new installation; an existing server keeps its setting (`TEAM_CHAT_ENABLED`, or Server settings).
 - **Control room.** A decision ledger of every agent decision, rollups, an agent event API and a guided Slack setup.
 - **Getting started.** A new account opens on a welcome screen that makes a nest, connects agents and fills it.
 - **One review queue.** My Work holds every review, with Request changes vs Reject, bulk approve and a "What changed" summary. My Work and My Drafts live in a header ribbon; workspace pages moved to **Workspace settings** in the account menu.
