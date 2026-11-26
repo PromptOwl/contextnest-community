@@ -5670,8 +5670,8 @@ export interface SurfacesBindingPreview {
       reason: "not_in_channel" | "no_slack_link" | "no_account" | "not_linked";
       match_reason?: string | null;
     }>;
-    /** `slack_email`: the confirmed email Slack has, for a member with no account match (po-1445). */
-    members_not_readers: Array<{ surface_user_id: string; name: string | null; community_user_id: string | null; email: string | null; slack_email?: string | null }>;
+    /** `slack_email`: the confirmed email Slack has, for a member with no account match (po-1445). `is_bot`: another app's bot. */
+    members_not_readers: Array<{ surface_user_id: string; name: string | null; community_user_id: string | null; email: string | null; slack_email?: string | null; is_bot?: boolean }>;
     universe_cause: "public" | "link" | "shared_deployment" | null;
   };
 }
