@@ -199,6 +199,9 @@ export async function decryptWindow(windowId: string): Promise<Array<BufferedRow
 export async function windowTick(nowMs: number = Date.now()): Promise<string[]> {
   const db = getDb();
   const s = await getSettings();
+  const { judgeWindow, recoverStuckWindows } = await import("./judge-service.js");
+  // Recovery must never stop the tick itself.
+  await recoverStuckWindows().catch((err) => console.error(`[surfaces] stuck windows not recovered: ${err instanceof Error ? err.name : "error"}`));
   const open = (await db.all("SELECT * FROM surface_windows WHERE status = 'open' AND forced = 0")) as WindowRow[];
   for (const w of open) {
     const reason = shouldClose(
@@ -209,7 +212,6 @@ export async function windowTick(nowMs: number = Date.now()): Promise<string[]> 
     if (reason) await claimClose(w.id, reason, nowMs);
   }
   const closing = (await db.all("SELECT id FROM surface_windows WHERE status = 'closing' ORDER BY closed_at")) as Array<{ id: string }>;
-  const { judgeWindow } = await import("./judge-service.js");
   const judged: string[] = [];
   for (const { id } of closing) {
     if (await judgeWindow(id, nowMs)) judged.push(id);

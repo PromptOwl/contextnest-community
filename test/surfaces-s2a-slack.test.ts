@@ -104,6 +104,7 @@ const slack = {
   convs: new Map<string, { info: Record<string, unknown>; members: string[] }>(),
   history: new Map<string, Array<{ ts: string; user: string; text: string; thread_ts?: string }>>(),
   rateLimit: new Map<string, number>(),
+  fail: new Map<string, string>(),
   oauth: null as null | Record<string, unknown>,
   posted: [] as Array<Record<string, string>>,
   ephemerals: [] as Array<Record<string, string>>,
@@ -147,6 +148,8 @@ async function fakeFetch(url: any, init?: any): Promise<Response> {
     slack.rateLimit.delete(method);
     return json({ ok: false, error: "ratelimited" }, 429, { "retry-after": String(limited) });
   }
+  const failing = slack.fail.get(method);
+  if (failing) return json({ ok: false, error: failing });
   switch (method) {
     case "oauth.v2.access":
       return json(slack.oauth ?? { ok: false, error: "invalid_code" });
@@ -1181,6 +1184,171 @@ describe("explicit asks", () => {
     }
     times.sort((a, b) => a - b);
     expect(times[Math.ceil(0.95 * times.length) - 1]).toBeLessThan(60_000);
+  });
+});
+
+// ═══ Recovery after a restart or a Slack error ═══════════════════════════════
+
+describe("recovery", () => {
+  const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+  const win = (id: string) => one("SELECT * FROM surface_windows WHERE id = ?", [id]);
+  const proposalsOf = (id: string) => all("SELECT * FROM surface_proposals WHERE window_id = ?", [id]);
+  /** As a restart leaves it: claimed, and nobody working on it. */
+  const strand = (id: string, min: number, token = "tok") =>
+    db().run("UPDATE surface_windows SET status = 'judging', verdict = NULL, reason_code = NULL, claim_token = ?, updated_at = ? WHERE id = ?", [token, ago(min), id]);
+  const asked = (id: string) =>
+    db().run("UPDATE surface_windows SET forced = 1, forced_by_surface_user_id = 'U_ALICE', forced_target_id = '1.1' WHERE id = ?", [id]);
+  const FAILED = /Something went wrong while drafting/;
+  // Unlike the shared titles, these never count as duplicates of each other.
+  const proposeOwn = (req: any) => propose(req, { title: Array.from({ length: 3 }, () => `w${randomUUID().slice(0, 6)}`).join(" ") });
+  const open = async (text: string) => {
+    const root = nextTs();
+    await say("C1", "U_BOB", `${text}, a message long enough to be judged here`, { thread_ts: root });
+    return (await one("SELECT id FROM surface_windows WHERE binding_id = ? AND thread_key = ?", [bindingC1, root])).id as string;
+  };
+  /** 🧠 on a message that isn't buffered; its fetch job. */
+  const askOld = async (user: string, text: string) => {
+    const ts = nextTs();
+    slack.history.set("C1", [...(slack.history.get("C1") ?? []), { ts, user, text }]);
+    await send({ type: "reaction_added", user: "U_ALICE", reaction: "brain", item: { type: "message", channel: "C1", ts }, event_ts: nextTs() });
+    return one("SELECT * FROM surface_fetch_queue WHERE install_id = ? ORDER BY created_at DESC LIMIT 1", [installId]);
+  };
+  const job = (id: string) => one("SELECT * FROM surface_fetch_queue WHERE id = ?", [id]);
+  const runQueue = async (plusMs = 0) => {
+    await S.fetchq.runFetchQueue(Date.now() + plusMs);
+    await S.work.waitForSurfacesWork();
+  };
+  /** Ephemerals the function caused, the "Drafting from" status note left out. */
+  const notesOf = async (fn: () => Promise<unknown>) => {
+    const from = slack.ephemerals.length;
+    await fn();
+    return slack.ephemerals.slice(from).map((e) => e.text).filter((t) => !/Drafting from/.test(t));
+  };
+
+  beforeAll(async () => {
+    modelImpl = () => submit(noop());
+    await tick(21);
+    await db().run("DELETE FROM surface_ask_counts WHERE surface_user_id = 'U_ALICE'");
+  });
+
+  it("EX-1: a window judging for more than 15 minutes is judged once more; one judging for 5 minutes is left alone", async () => {
+    const stuck = await open("we agreed to ship the recovery");
+    const live = await open("we agreed to keep the live one");
+    await strand(stuck, 16);
+    await strand(live, 5);
+    modelImpl = proposeOwn;
+    await tick(0);
+    expect((await win(stuck)).verdict).toBe("proposed");
+    expect(await proposalsOf(stuck)).toHaveLength(1);
+    expect((await win(live)).status).toBe("judging");
+    expect(await proposalsOf(live)).toHaveLength(0);
+    await db().run("UPDATE surface_windows SET status = 'closing' WHERE id = ?", [live]);
+    modelImpl = () => submit(noop());
+    await tick(0);
+  });
+
+  it("EX-2: a stuck window whose proposal exists is closed as proposed, with no model call and no second proposal", async () => {
+    modelImpl = proposeOwn;
+    const id = await open("we agreed on the thing that is already proposed");
+    await tick(21);
+    expect(await proposalsOf(id)).toHaveLength(1);
+    await strand(id, 16);
+    const calls = modelCalls.length;
+    await tick(0);
+    expect(await win(id)).toMatchObject({ status: "judged", verdict: "proposed", reason_code: "proposed", item_count: 1 });
+    expect(modelCalls.length).toBe(calls);
+    expect(await proposalsOf(id)).toHaveLength(1);
+  });
+
+  it("EX-3: stuck a second time, or with its messages gone: failed with server_stopped, and the person who asked is told once", async () => {
+    const again = await open("the second time it is stuck");
+    await asked(again);
+    await strand(again, 16, "r:tok");
+    const gone = await open("its messages are gone");
+    await asked(gone);
+    await strand(gone, 16);
+    await db().run("DELETE FROM surface_buffer WHERE window_id = ?", [gone]);
+    const calls = modelCalls.length;
+    const notes = await notesOf(async () => {
+      await tick(0);
+      await tick(0);
+    });
+    for (const id of [again, gone]) expect(await win(id)).toMatchObject({ status: "judged", verdict: "error", reason_code: "server_stopped" });
+    expect(await all("SELECT * FROM surface_buffer WHERE window_id = ?", [again])).toHaveLength(0);
+    expect(notes).toHaveLength(2);
+    for (const n of notes) expect(n).toMatch(FAILED);
+    expect(modelCalls.length).toBe(calls);
+  });
+
+  it("EX-4: a worker that finishes after its window was recovered changes nothing", async () => {
+    const id = await open("we agreed while the worker was slow");
+    let first = true;
+    modelImpl = async (req) => {
+      if (first) {
+        first = false;
+        await db().run("UPDATE surface_windows SET updated_at = ? WHERE id = ?", [ago(16), id]);
+        expect(await S.judge.recoverStuckWindows()).toBe(1);
+      }
+      return proposeOwn(req);
+    };
+    await tick(21);
+    expect((await win(id)).status).toBe("closing");
+    expect(await proposalsOf(id)).toHaveLength(0);
+    await tick(0);
+    expect((await win(id)).verdict).toBe("proposed");
+    expect(await proposalsOf(id)).toHaveLength(1);
+    modelImpl = () => submit(noop());
+  });
+
+  it("EX-5: a fetch running for more than 5 minutes is tried again and blocks no other; one running for 1 minute is left alone", async () => {
+    modelImpl = () => submit(noop());
+    slack.rateLimit.set("conversations.history", 30);
+    const a = await askOld("U_BOB", "an old decision that was being fetched when the server stopped");
+    await db().run("UPDATE surface_fetch_queue SET status = 'running', attempts = 0, updated_at = ? WHERE id = ?", [ago(1), a.id]);
+    const b = await askOld("U_BOB", "another old decision that waits behind it");
+    await runQueue();
+    expect((await job(a.id)).status).toBe("running");
+    expect((await job(b.id)).status).toBe("queued");
+    await db().run("UPDATE surface_fetch_queue SET updated_at = ? WHERE id = ?", [ago(6), a.id]);
+    await runQueue();
+    for (const j of [a, b]) {
+      expect((await job(j.id)).status).toBe("done");
+      expect((await win(j.window_id)).status).toBe("judged");
+    }
+    expect((await job(a.id)).attempts).toBe(2);
+  });
+
+  it("EX-6, EX-9: a fetch that fails 3 times tells the person once, and the log has Slack's code and no message text", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    slack.fail.set("conversations.history", "missing_scope");
+    try {
+      let j: any;
+      const notes = await notesOf(async () => {
+        j = await askOld("U_BOB", "sentinel-old-message");
+        await runQueue(31_000);
+        await runQueue(62_000);
+        await runQueue(93_000);
+      });
+      expect((await job(j.id)).status).toBe("failed");
+      expect(await win(j.window_id)).toMatchObject({ status: "discarded", verdict: "fetch_failed" });
+      expect(notes).toEqual(["I couldn't read that message from Slack, so nothing was saved. Try again in a few minutes."]);
+      const log = warn.mock.calls.flat().join("\n");
+      expect(log).toMatch(/fetch failed: method=conversations\.history code=missing_scope/);
+      expect(log).not.toContain("sentinel-old-message");
+    } finally {
+      slack.fail.delete("conversations.history");
+      warn.mockRestore();
+    }
+  });
+
+  it("EX-6: nothing usable in what Slack returned: one note, and it gives no reason", async () => {
+    let j: any;
+    const notes = await notesOf(async () => {
+      j = await askOld("U_GUEST", "a guest wrote this one a while ago");
+      await runQueue();
+    });
+    expect(await win(j.window_id)).toMatchObject({ status: "discarded", verdict: "nothing_fetched" });
+    expect(notes).toEqual(["I couldn't use that message, so nothing was saved."]);
   });
 });
 

@@ -18,6 +18,7 @@ import { config } from "../../config.js";
 import type { BindingRef, CardRef, ProposalView } from "../contract.js";
 import type { CardItem, CardModel, CardOutcome } from "../core/card-model.js";
 import { getConnector } from "../registry.js";
+import { slackErrorCode } from "../adapters/slack/api.js";
 import { getBindingRow, type BindingRow } from "./binding-service.js";
 import { getInstall, installRef, type InstallRow } from "./install-store.js";
 import { activeLink } from "./identity-service.js";
@@ -259,7 +260,8 @@ export async function postCard(proposalId: string): Promise<boolean> {
   let ref: CardRef;
   try {
     ref = await connector.postProposal(bindingRef(binding), viewOf(model, await threadRefFor(p, binding)));
-  } catch {
+  } catch (err) {
+    console.warn(`[surfaces] card not posted: code=${slackErrorCode(err)} proposal=${p.id} binding=${binding.id}`);
     await getDb().run("UPDATE surface_proposals SET card_ref = NULL WHERE id = ? AND card_ref = 'posting'", [p.id]);
     return false;
   }
