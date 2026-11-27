@@ -5191,6 +5191,7 @@ async function runTool(
           nestId: ctx.nestId,
           nodeId: node.id,
           approvedBy: ctx.userEmail,
+          deciderKeyId: ctx.apiKeyId ?? null,
           note: args.note,
           baseUrl: ctx.baseUrl,
           client: ctx.client,
@@ -5214,6 +5215,7 @@ async function runTool(
           nestId: ctx.nestId,
           nodeId: node.id,
           rejectedBy: ctx.userEmail,
+          deciderKeyId: ctx.apiKeyId ?? null,
           note: args.note,
           baseUrl: ctx.baseUrl,
         });

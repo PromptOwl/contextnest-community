@@ -175,31 +175,34 @@ export async function proposeInThread(
   const preview = previewOf(content);
   let proposal: AgentProposalView;
   try {
-  await beforeCard?.(created.node.id);
-  // The card: model text, made inert like Hootie's (no live links, escaped).
-  const body = inertAnswer(`Approval needed — ${title}\n\n${preview}`);
-  const thread = await addComment(caller.nestId, nodeId, threadId, caller.userEmail, body, client);
-  const messageId = justWritten(thread, caller.userEmail);
-  if (!messageId) throw new Error("proposal card not written");
-  proposal = {
-    kind: "create_node",
-    node_id: created.node.id,
-    version: created.version,
-    review_id: review.id,
-    title,
-    preview,
-    status: "pending",
-    reason: null,
-    message_id: messageId,
-    proposed_by: proposedBy,
-    thread_id: threadId,
-    channel,
-  };
-  // The server-only mark, written after the message exists (the handoff path).
-  await getDb().run("UPDATE annotation_comments SET client_json = ? WHERE id = ?", [
-    serializeClient({ ...(client ?? {}), proposal } as unknown as ClientMetadata),
-    messageId,
-  ]);
+    await beforeCard?.(created.node.id);
+    // The card: model text, made inert like Hootie's (no live links, escaped).
+    const body = inertAnswer(`Approval needed — ${title}\n\n${preview}`);
+    const thread = await addComment(caller.nestId, nodeId, threadId, caller.userEmail, body, client);
+    const messageId = justWritten(thread, caller.userEmail);
+    if (!messageId) throw new Error("proposal card not written");
+    proposal = {
+      kind: "create_node",
+      node_id: created.node.id,
+      version: created.version,
+      review_id: review.id,
+      title,
+      preview,
+      status: "pending",
+      reason: null,
+      message_id: messageId,
+      proposed_by: proposedBy,
+      thread_id: threadId,
+      channel,
+    };
+    // The proposer's key (tagged), so the wake tells the agent's key from its hirer's login.
+    const { proposalKeyTag } = await import("../stream/agent-wake.js");
+    const proposed_key = proposedBy && caller.apiKeyId ? proposalKeyTag(caller.apiKeyId) : undefined;
+    // The server-only mark, written after the message exists (the handoff path).
+    await getDb().run("UPDATE annotation_comments SET client_json = ? WHERE id = ?", [
+      serializeClient({ ...(client ?? {}), proposal: { ...proposal, proposed_key } } as unknown as ClientMetadata),
+      messageId,
+    ]);
   } catch (err) {
     // No card, so nobody can be asked from the thread: take the review back
     // out of the queue rather than leave one that wakes nobody. The plan

@@ -219,7 +219,7 @@ async function overLimit(nestId: string, threadId: string, handle: string): Prom
 // ─── Delivery ───────────────────────────────────────────────────────────
 
 const SEALED_REASON = "this nest sends nothing outside";
-const NOT_PUBLIC_REASON = "not a public address";
+const NOT_PUBLIC_REASON = "not a public address or a named internal host";
 
 /** What a delivery ended as, in the words the webhooks panel shows. */
 export interface DeliveryView {
@@ -572,6 +572,11 @@ export type DecidedOutcome = "sent" | "none" | "skipped";
  * target passes the same fence as a mention at use time; one delivery per
  * (review, handle), so a decision dispatched twice sends once. Never throws.
  */
+/** A card's mark names the proposer's key by this tag, so thread readers never see a key id. */
+export function proposalKeyTag(keyId: string): string {
+  return createHash("sha256").update(`agent-proposal-key:v1:${keyId}`).digest("hex").slice(0, 32);
+}
+
 /** The thread a plan was filed from (its metadata.source_thread), or null. */
 async function planThread(nestId: string, nodeId: string): Promise<string | null> {
   const { engineCache } = await import("../nodes/engine.js");
@@ -587,8 +592,10 @@ export async function wakeOnProposalDecided(params: {
   reviewId: string;
   status: "approved" | "rejected";
   decidedBy: string;
+  /** The key the decision came on: null for a session, undefined when unknown. */
+  deciderKeyId?: string | null;
 }): Promise<DecidedOutcome> {
-  const { nestId, nodeId, reviewId, status, decidedBy } = params;
+  const { nestId, nodeId, reviewId, status, decidedBy, deciderKeyId } = params;
   try {
     if (!config.EXPERIMENTAL_AGENT_STREAM || !reviewId) return "none";
     const db = getDb();
@@ -607,18 +614,24 @@ export async function wakeOnProposalDecided(params: {
         WHERE t.id = ? AND t.nest_id = ? AND c.client_json LIKE ?`,
       [source, nestId, `%"review_id":"${reviewId.replace(/[^0-9A-Za-z-]/g, "")}"%`],
     )) as Array<{ id: string; thread_id: string; author: string; client_json: string | null; thread_node: string }>;
-    let card: { id: string; thread_id: string; author: string; thread_node: string; handle: string } | null = null;
+    let card: { id: string; thread_id: string; author: string; thread_node: string; handle: string; key: string | null } | null = null;
     for (const r of rows) {
       const p = (deserializeClient(r.client_json) as Record<string, any> | undefined)?.proposal;
       if (p && p.review_id === reviewId && typeof p.proposed_by === "string" && p.proposed_by) {
-        card = { id: r.id, thread_id: r.thread_id, author: r.author, thread_node: r.thread_node, handle: normHandle(p.proposed_by) };
+        const key = typeof p.proposed_key === "string" ? p.proposed_key : null;
+        card = { id: r.id, thread_id: r.thread_id, author: r.author, thread_node: r.thread_node, handle: normHandle(p.proposed_by), key };
         break;
       }
     }
     if (!card || !card.handle) return "none";
-    // The gate is a person's: the agent's own login deciding it wakes nobody.
+    // The gate is a person's: the agent deciding its own card wakes nobody. A
+    // hired key shares its hirer's login, so when both keys are known compare keys, not emails.
     const by = String(decidedBy ?? "").toLowerCase();
-    if (by === String(card.author).toLowerCase() || by === String(review.requested_by).toLowerCase()) return "skipped";
+    const self =
+      card.key && deciderKeyId !== undefined
+        ? !!deciderKeyId && proposalKeyTag(deciderKeyId) === card.key
+        : by === String(card.author).toLowerCase() || by === String(review.requested_by).toLowerCase();
+    if (self) return "skipped";
     const { sealedNest } = await import("../surfaces/sealed.js");
     if (await sealedNest(nestId)) return "skipped";
     const target = await agentWakeTarget(nestId, card.handle);

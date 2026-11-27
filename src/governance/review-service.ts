@@ -298,6 +298,8 @@ export async function approve(params: {
   client?: ClientMetadata;
   /** The reviewer edited the document just before approving (approve-with-edits). */
   withEdits?: boolean;
+  /** The API key the decision came on (null: a session). Tells an agent's own key from its hirer's login. */
+  deciderKeyId?: string | null;
 }): Promise<ReviewRequest> {
   return withWriteStats(params.nestId, "approve", () => approveInner(params));
 }
@@ -406,6 +408,7 @@ async function approveInner(params: Parameters<typeof approve>[0]): Promise<Revi
     pending,
     version,
     withEdits: params.withEdits,
+    deciderKeyId: params.deciderKeyId,
   });
 
   return (await getReviewRequest(pending.id))!;
@@ -426,6 +429,7 @@ export async function approveMany(params: {
   note?: string;
   baseUrl?: string;
   client?: ClientMetadata;
+  deciderKeyId?: string | null;
 }): Promise<Array<{ nodeId: string; ok: boolean; error?: string }>> {
   const ids = [...new Set(params.nodeIds)];
   const outcome = new Map<string, string | null>(); // null = approved
@@ -509,6 +513,7 @@ export async function approveMany(params: {
       baseUrl: params.baseUrl,
       pending: a.pending,
       version: a.version,
+      deciderKeyId: params.deciderKeyId,
     });
   }
 
@@ -605,10 +610,10 @@ async function mirrorPublished(p: {
 }
 
 /** Wake the agent whose approve card this review is, if any (stream/agent-wake.ts). */
-async function wakeProposer(nestId: string, nodeId: string, reviewId: string, status: "approved" | "rejected", decidedBy: string): Promise<void> {
+async function wakeProposer(nestId: string, nodeId: string, reviewId: string, status: "approved" | "rejected", decidedBy: string, deciderKeyId?: string | null): Promise<void> {
   try {
     const { wakeOnProposalDecided } = await import("../stream/agent-wake.js");
-    await wakeOnProposalDecided({ nestId, nodeId, reviewId, status, decidedBy });
+    await wakeOnProposalDecided({ nestId, nodeId, reviewId, status, decidedBy, deciderKeyId });
   } catch (err) {
     console.error("[review] decision wake failed", nestId, nodeId, err instanceof Error ? err.message : err);
   }
@@ -624,6 +629,7 @@ async function notifyApproved(p: {
   pending: { id: string; requested_by: string };
   version: number;
   withEdits?: boolean;
+  deciderKeyId?: string | null;
 }): Promise<void> {
   const ctx = await buildDocContext(p.nestId, p.nodeId, p.baseUrl);
   const verdict = p.withEdits ? "edited and approved" : "approved";
@@ -637,7 +643,7 @@ async function notifyApproved(p: {
 
   // An agent's approve card (chat as orchestration): the decision wakes the
   // agent that filed it. Fire-and-forget; never fails the approval.
-  void wakeProposer(p.nestId, p.nodeId, p.pending.id, "approved", p.approvedBy);
+  void wakeProposer(p.nestId, p.nodeId, p.pending.id, "approved", p.approvedBy, p.deciderKeyId);
 
   // Verdict fan-out: submitter + watchers hear the approval. Best-effort.
   await notifyReviewResolved({
@@ -697,6 +703,7 @@ export async function reject(params: {
   kind?: "changes" | "reject";
   /** Request origin, for building the notification's document link. */
   baseUrl?: string;
+  deciderKeyId?: string | null;
 }): Promise<ReviewRequest> {
   const kind = params.kind === "reject" ? "reject" : "changes";
   // Same lock as approve: serialize against a concurrent author edit so the
@@ -778,7 +785,7 @@ export async function reject(params: {
     }, { nestId: params.nestId });
   }
 
-  void wakeProposer(params.nestId, params.nodeId, pending.id, "rejected", params.rejectedBy);
+  void wakeProposer(params.nestId, params.nodeId, pending.id, "rejected", params.rejectedBy, params.deciderKeyId);
 
   // Verdict fan-out: submitter + watchers hear the rejection. Best-effort.
   await notifyReviewResolved({

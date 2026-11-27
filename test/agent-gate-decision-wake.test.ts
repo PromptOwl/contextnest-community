@@ -403,3 +403,67 @@ describe("the private-network transport is for operator-named hosts only", () =>
     }
   });
 });
+
+describe("a hired key shares its hirer's login: the decision is told apart by key", () => {
+  it("the hirer's own decision wakes the hired agent; the hired key's decision does not", async () => {
+    const h = await jsonRequest(app, "POST", `/nests/${nestId}/hire`, { kind: "key", handle: "helper" }, alice.apiKey);
+    expect(h.status, JSON.stringify(h.data)).toBeLessThan(300);
+    const helperKey = h.data.api_key as string;
+    expect((await jsonRequest(app, "PUT", `/nests/${nestId}/agent-webhooks/helper`, { url: RUNNER }, owner.apiKey)).status).toBeLessThan(300);
+    const { getDb } = await import("../src/db/client.js");
+    const { ref } = (await getDb().get("SELECT ref FROM hired_agents WHERE nest_id = ? AND kind = 'key' AND handle = 'helper'", [nestId])) as { ref: string };
+
+    const t = await open(alice, "@helper tidy the docs");
+    const r = await callTool(helperKey, "context_propose", { thread: t.id, title: "Plan: tidy docs", content: "1. Tidy", client: { agent: "helper" } });
+    expect(r.isError, r.text).toBe(false);
+    const p = r.data.proposal as { review_id: string; node_id: string; proposed_by: string };
+    expect(p.proposed_by).toBe("helper");
+
+    captureWakes();
+    const args = { nestId, nodeId: p.node_id, reviewId: p.review_id, status: "approved" as const, decidedBy: alice.email };
+    expect(await wake.wakeOnProposalDecided({ ...args, deciderKeyId: ref })).toBe("skipped");
+    expect(await wake.wakeOnProposalDecided({ ...args, deciderKeyId: null })).toBe("sent");
+    await vi.waitFor(() => expect(decided().length).toBe(1), { timeout: 2000, interval: 10 });
+    expect(JSON.parse(decided()[0].body).mentioned).toBe("helper");
+  });
+});
+
+describe("A11 and bulk: the wake never stands in the decision's way", () => {
+  it("a webhook that is down does not fail the approval", async () => {
+    const t = await open(alice, "@builder down");
+    const p = await propose(t.id, "Plan: while down");
+    captureWakes(500);
+    const a = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${p.node_id}/approve`, { note: "go" }, alice.apiKey);
+    expect(a.status, JSON.stringify(a.data)).toBe(200);
+    await vi.waitFor(() => expect(decided().length).toBeGreaterThanOrEqual(1), { timeout: 2000, interval: 10 });
+  });
+
+  it("a bulk approve wakes the agent once", async () => {
+    const t = await open(alice, "@builder bulk");
+    const p = await propose(t.id, "Plan: in bulk");
+    captureWakes();
+    const b = await jsonRequest(app, "POST", `/nests/${nestId}/review-queue/bulk`, { action: "approve", nodeIds: [p.node_id], note: "go" }, alice.apiKey);
+    expect(b.status, JSON.stringify(b.data)).toBe(200);
+    await vi.waitFor(() => expect(decided().length).toBe(1), { timeout: 2000, interval: 10 });
+    expect(JSON.parse(decided()[0].body).proposal).toMatchObject({ review_id: p.review_id, status: "approved", decided_by: alice.email });
+  });
+});
+
+describe("the super admin names internal runner hosts from Server settings", () => {
+  it("sets, shows and clears the list; refuses IPs and localhost; nobody else may", async () => {
+    const set = (u: User, v: string) => jsonRequest(app, "PATCH", "/admin/settings", { agent_webhook_internal_hosts: v }, u.apiKey);
+    const ok = await set(owner, "Runner, other-runner, runner");
+    expect(ok.status, JSON.stringify(ok.data)).toBe(200);
+    expect((await jsonRequest(app, "GET", "/admin/settings", undefined, owner.apiKey)).data.agent_webhook_internal_hosts).toBe("runner, other-runner");
+    const hook = await jsonRequest(app, "PUT", `/nests/${nestId}/agent-webhooks/inner2`, { url: "http://runner:8787/wake" }, owner.apiKey);
+    expect(hook.status, JSON.stringify(hook.data)).toBeLessThan(300);
+
+    const bad = await set(owner, "runner, 10.0.0.5, localhost");
+    expect(bad.status).toBe(400);
+    expect(bad.data.fieldErrors.agent_webhook_internal_hosts).toMatch(/10\.0\.0\.5, localhost/);
+    expect((await set(alice, "evil")).status).toBe(403);
+
+    expect((await set(owner, "")).status).toBe(200);
+    expect((await jsonRequest(app, "GET", "/admin/settings", undefined, owner.apiKey)).data.agent_webhook_internal_hosts).toBe("");
+  });
+});

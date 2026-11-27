@@ -57,6 +57,14 @@ export function isEmailish(v: string): boolean {
   // header-injection shape a trailing "\n" could otherwise sneak past.
   return EMAIL_SCHEMA.safeParse(v.trim()).success && !/[\r\n]/.test(v);
 }
+/** An AGENT_WEBHOOK_INTERNAL_HOSTS entry: a bare DNS name, never an IP literal or localhost.
+ *  Shared by the getter and the /admin/settings validator. */
+export function isInternalRunnerHost(h: string): boolean {
+  return (
+    /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/.test(h) &&
+    h !== "localhost" && !h.endsWith(".localhost") && !/^[0-9.]+$/.test(h)
+  );
+}
 /** Comma-separated recipient list where every entry is isEmailish(). */
 export function isEmailListish(v: string): boolean {
   return v.split(",").every((e) => isEmailish(e.trim()));
@@ -910,13 +918,13 @@ export const config = {
    * server's own network (ai-os-reference). http or https, exact host match,
    * no userinfo. IP literals and localhost are ignored: name the service.
    * Unset (the default) → only public https targets, as before.
+   * Superadmin-editable at runtime via /admin/settings (agent_webhook_internal_hosts).
    */
   get AGENT_WEBHOOK_INTERNAL_HOSTS(): string[] {
     return (process.env.AGENT_WEBHOOK_INTERNAL_HOSTS || "")
       .split(",")
       .map((h) => h.trim().toLowerCase())
-      .filter((h) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/.test(h))
-      .filter((h) => h !== "localhost" && !h.endsWith(".localhost") && !/^[0-9.]+$/.test(h));
+      .filter(isInternalRunnerHost);
   },
   /**
    * Experimental: the agent team stream, S1 channels (PO-1179). Slack-style

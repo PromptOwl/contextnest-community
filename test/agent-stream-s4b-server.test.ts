@@ -842,7 +842,7 @@ describe("AC-UX-16: agent webhooks show their last delivery, can be tested and r
     wake.setAgentWebhookResolver(async () => ({ url: "https://169.254.169.254/latest/meta-data", secret: "whsec_x" }));
     const priv = await test(owner, "guarded");
     expect(priv.status).toBe(200);
-    expect(priv.data).toMatchObject({ ok: false, delivery: { status: "failed", reason: "not a public address" } });
+    expect(priv.data).toMatchObject({ ok: false, delivery: { status: "failed", reason: "not a public address or a named internal host" } });
     expect(sent.length).toBe(0);
     wake.setAgentWebhookResolver(null);
     // A burst: the first few go out, then 429 until the window passes.
@@ -965,7 +965,7 @@ describe("SEC-S4: review findings", () => {
     expect(deliveryReason("Webhook responded 502 Bad Gateway")).toBe("HTTP 502");
     expect(deliveryReason("request timed out after 3000ms")).toBe("timed out");
     // Decided from the URL as typed, before any lookup: safe to say.
-    expect(deliveryReason("not a public address")).toBe("not a public address");
+    expect(deliveryReason("not a public address or a named internal host")).toBe("not a public address or a named internal host");
     expect(deliveryReason(null)).toBeNull();
   });
 
