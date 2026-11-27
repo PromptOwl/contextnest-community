@@ -321,7 +321,7 @@ async function mcp(path: string, method: string, params: Record<string, unknown>
 }
 
 /** Full manifest-install flow for a workspace: create → credentials → OAuth. */
-async function installWorkspace(team: string, homeNest: string, opts: { botUserId?: string; authedUser?: string; enterprise?: boolean; failExchange?: string } = {}) {
+async function installWorkspace(team: string, homeNest: string, opts: { botUserId?: string; authedUser?: string; enterprise?: boolean; failExchange?: string; token?: string } = {}) {
   const created = await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: homeNest }, root.apiKey);
   expect(created.status).toBe(201);
   const id = created.data.install_id as string;
@@ -333,7 +333,7 @@ async function installWorkspace(team: string, homeNest: string, opts: { botUserI
   const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
   slack.oauth = {
     ok: true,
-    access_token: `xoxb-${team}-token`,
+    access_token: opts.token ?? `xoxb-${team}-token`,
     token_type: "bot",
     bot_user_id: opts.botUserId ?? "UBOT",
     app_id: "A1",
@@ -517,13 +517,21 @@ describe("install", () => {
   });
 
   it("AC-INS-04: a workspace already owned by another install is refused, its token revoked, nothing stored", async () => {
-    const r = await installWorkspace("T1", N);
+    const r = await installWorkspace("T1", N, { token: "xoxb-T1-other-app" });
     expect(r.status).toBe(409);
     expect(JSON.stringify(r.body)).toMatch(/no token was kept/i);
     expect(JSON.stringify(r.body)).toMatch(/nothing was read/i);
-    expect(slack.revoked).toContain("Bearer xoxb-T1-token");
+    expect(slack.revoked).toContain("Bearer xoxb-T1-other-app");
     expect(await one("SELECT 1 AS x FROM surface_secrets WHERE install_id = ? AND name = 'bot_token'", [r.id])).toBeUndefined();
     expect((await one("SELECT status FROM surface_installs WHERE id = ?", [r.id])).status).not.toBe("active");
+  });
+
+  it("a refused re-OAuth that returns the live install's own token (one app per server) never revokes it", async () => {
+    const r = await installWorkspace("T1", N);
+    expect(r.status).toBe(409);
+    expect(slack.revoked).not.toContain("Bearer xoxb-T1-token");
+    expect((await one("SELECT status FROM surface_installs WHERE id = ?", [installId])).status).toBe("active");
+    expect(await one("SELECT 1 AS x FROM surface_secrets WHERE install_id = ? AND name = 'bot_token'", [installId])).toBeTruthy();
   });
 
   it("AC-INS-05: an Enterprise Grid org-wide install is refused", async () => {
