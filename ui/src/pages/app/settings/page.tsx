@@ -131,6 +131,7 @@ const TABS: {
       "experimental_doc_stream_enabled",
       "experimental_doc_pins",
       "team_chat_enabled",
+      "agent_webhook_internal_hosts",
       "subagent_max_depth",
       "subagent_max_children",
       "promptowl_teams_enabled",
@@ -1462,6 +1463,21 @@ function SettingsPage({ settings, onUpdate }: SettingsPageProps) {
                     aria-label="Team chat"
                     data-testid="settings-team-chat-switch"
                   />
+                </div>
+                <div className="space-y-1.5 mt-4">
+                  <Label htmlFor="agent-internal-hosts">Internal agent runner hosts</Label>
+                  <TextField
+                    id="agent-internal-hosts"
+                    error={fieldErrors.agent_webhook_internal_hosts}
+                    value={draft.agent_webhook_internal_hosts ?? ""}
+                    placeholder="runner"
+                    onChange={(v) => set({ agent_webhook_internal_hosts: v })}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Host names on this server's own network that an agent webhook may target, comma separated
+                    (e.g. <code>runner</code> for <code>http://runner:8787/wake</code>). Every other private
+                    address stays blocked. Leave empty to allow public https targets only.
+                  </p>
                 </div>
               </CardContent>
             </Card>

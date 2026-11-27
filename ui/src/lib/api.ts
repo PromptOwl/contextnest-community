@@ -404,6 +404,8 @@ export interface AdminSettings {
   /** First-run onboarding switches (PO-1185). */
   onboarding_enabled?: boolean;
   distill_enabled?: boolean;
+  /** AGENT_WEBHOOK_INTERNAL_HOSTS, comma separated: internal hosts an agent webhook may target. */
+  agent_webhook_internal_hosts?: string;
   /** Any person may connect their own Slack workspace to a nest they own. */
   surfaces_slack_self_serve?: boolean;
   /** The server's one Slack app: its credentials. */

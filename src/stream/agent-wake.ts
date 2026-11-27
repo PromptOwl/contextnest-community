@@ -71,7 +71,7 @@ import { postWebhook, resolveNestName, type WebhookFetch } from "../notify/webho
 import { senderFor } from "../notify/outbound-log.js";
 import { guardedFetch } from "../metacognition/net.js";
 import { justWritten, MENTION_EXCERPT_MAX } from "../mentions/mention-index.js";
-import { isPublicAgentWebhookUrl, storedAgentWebhook } from "./agent-webhooks.js";
+import { isAllowedAgentWebhookUrl, isInternalAgentWebhookUrl, storedAgentWebhook } from "./agent-webhooks.js";
 import { isReservedHandle } from "../agents/reserved.js";
 import { displayNames, namedActor, normHandle, writerHandles } from "../channels/message-meta.js";
 
@@ -110,11 +110,25 @@ export function setAgentWebhookResolver(fn: AgentWebhookResolver | null): void {
 // The transport. Proxy-free and checked at connect time: a public name that
 // resolves to a private address never gets a socket (metacognition/net.ts).
 const defaultFetch: WebhookFetch = guardedFetch({ maxBytes: 64 * 1024, timeoutMs: 3000, allowPrivate: false });
-let transport: WebhookFetch = defaultFetch;
+// An operator-allowed internal runner (AGENT_WEBHOOK_INTERNAL_HOSTS) resolves
+// to a private address by design; only a URL whose host is on that list is
+// ever handed to this transport (transportFor).
+const internalFetch: WebhookFetch = guardedFetch({ maxBytes: 64 * 1024, timeoutMs: 3000, allowPrivate: true });
+let override: WebhookFetch | null = null;
 
 /** Replace the transport (tests); null restores the guarded fetch. */
 export function setAgentWakeFetch(fn: WebhookFetch | null): void {
-  transport = fn ?? defaultFetch;
+  override = fn;
+}
+
+/** Whether this URL may take the transport that reaches private addresses. */
+export function usesInternalTransport(url: string): boolean {
+  return isInternalAgentWebhookUrl(url);
+}
+
+function transportFor(url: string): WebhookFetch {
+  if (override) return override;
+  return usesInternalTransport(url) ? internalFetch : defaultFetch;
 }
 
 let backoff: readonly number[] = WAKE_RETRY_BACKOFF_MS;
@@ -139,7 +153,7 @@ export async function agentWakeTarget(nestId: string, handle: string): Promise<A
     return null;
   });
   if (!target?.url || !target.secret) return null;
-  if (!isPublicAgentWebhookUrl(target.url)) return null;
+  if (!isAllowedAgentWebhookUrl(target.url)) return null;
   return target;
 }
 
@@ -205,7 +219,7 @@ async function overLimit(nestId: string, threadId: string, handle: string): Prom
 // ─── Delivery ───────────────────────────────────────────────────────────
 
 const SEALED_REASON = "this nest sends nothing outside";
-const NOT_PUBLIC_REASON = "not a public address";
+const NOT_PUBLIC_REASON = "not a public address or a named internal host";
 
 /** What a delivery ended as, in the words the webhooks panel shows. */
 export interface DeliveryView {
@@ -301,7 +315,7 @@ async function deliver(params: {
       null,
       `agent-wake:${handle}`,
       { nestId, ...(nodeId ? { nodeId } : {}), channel: "webhook", ...senderFor(params.sender) },
-      { rawBody: body, headers, fetchImpl: (u, init) => transport(u, init) },
+      { rawBody: body, headers, fetchImpl: (u, init) => transportFor(String(u))(u, init) },
     ).catch((err) => ({ ok: false, error: err instanceof Error ? err.message : String(err) }));
     // A 4xx other than 408/429 is the runner refusing the event: retrying won't change it.
     const status = Number(/responded (\d{3})/.exec(last.error ?? "")?.[1] ?? 0);
@@ -498,7 +512,7 @@ export async function sendAgentTestEvent(nestId: string, handle: string, actorEm
   // nothing goes to an address that is not public.
   const refused = (await sealedNest(nestId))
     ? SEALED_REASON
-    : !isPublicAgentWebhookUrl(raw.url)
+    : !isAllowedAgentWebhookUrl(raw.url)
       ? NOT_PUBLIC_REASON
       : null;
   if (refused) {
@@ -526,4 +540,145 @@ export async function wakeForPostedMessage(params: {
   const commentId = justWritten(params.thread, params.authorEmail);
   if (!commentId) return new Map();
   return wakeMentionedAgents({ nestId: params.nestId, nodeId: params.nodeId, threadId: params.thread.id, commentId });
+}
+
+// ─── Decision wake (chat as orchestration) ──────────────────────────────
+
+/** An approve card an agent filed (agents/agent-proposals.ts) was decided. */
+export const AGENT_DECIDED_EVENT = "agent.proposal.decided";
+
+/** What a decision did: woke the proposing agent, found no agent card for
+ *  this review, or sent nothing (self-decided, sealed, no target, duplicate). */
+export type DecidedOutcome = "sent" | "none" | "skipped";
+
+/**
+ * After a review is approved or rejected (review-service approve / reject,
+ * REST and MCP alike): when the review is an agent's approve card, send that
+ * agent ONE signed POST
+ *
+ *   { event: "agent.proposal.decided", delivery_id, nest, channel, node_id,
+ *     thread_id, message_id (the card), mentioned, at,
+ *     proposal: { review_id, node_id, version, status, decided_by },
+ *     read: { tool, arguments } }
+ *
+ * through the same delivery path, signature, retries and delivery row as a
+ * mention. The card is found by its review id inside the plan's source
+ * thread (the draft's `metadata.source_thread` — no new table), and only a
+ * card that carries `proposed_by` (an agent filed it) wakes anyone: Hootie's
+ * cards and an ordinary review never do.
+ *
+ * Guards: an agent that decides its own card is not a person's decision and
+ * wakes nobody (the gate is for people); a sealed nest sends nothing; the
+ * target passes the same fence as a mention at use time; one delivery per
+ * (review, handle), so a decision dispatched twice sends once. Never throws.
+ */
+/** A card's mark names the proposer's key by this tag, so thread readers never see a key id. */
+export function proposalKeyTag(keyId: string): string {
+  return createHash("sha256").update(`agent-proposal-key:v1:${keyId}`).digest("hex").slice(0, 32);
+}
+
+/** The thread a plan was filed from (its metadata.source_thread), or null. */
+async function planThread(nestId: string, nodeId: string): Promise<string | null> {
+  const { engineCache } = await import("../nodes/engine.js");
+  const { storage } = await engineCache.get(nestId);
+  const doc = await storage.readDocument(nodeId).catch(() => null);
+  const st = (doc?.frontmatter?.metadata as { source_thread?: { thread_id?: unknown } } | undefined)?.source_thread;
+  return typeof st?.thread_id === "string" && st.thread_id ? st.thread_id : null;
+}
+
+export async function wakeOnProposalDecided(params: {
+  nestId: string;
+  nodeId: string;
+  reviewId: string;
+  status: "approved" | "rejected";
+  decidedBy: string;
+  /** The key the decision came on: null for a session, undefined when unknown. */
+  deciderKeyId?: string | null;
+}): Promise<DecidedOutcome> {
+  const { nestId, nodeId, reviewId, status, decidedBy, deciderKeyId } = params;
+  try {
+    if (!config.EXPERIMENTAL_AGENT_STREAM || !reviewId) return "none";
+    const db = getDb();
+    const review = (await db.get("SELECT id, node_id, version, requested_by FROM review_requests WHERE id = ? AND nest_id = ?", [reviewId, nestId])) as
+      | { id: string; node_id: string; version: number; requested_by: string }
+      | undefined;
+    if (!review || review.node_id !== nodeId) return "none";
+    // The card is in the thread the plan came from, so only that thread's
+    // messages are read: most approvals have no such thread and stop here.
+    const source = await planThread(nestId, nodeId);
+    if (!source) return "none";
+    const rows = (await db.all(
+      `SELECT c.id, c.thread_id, c.author, c.client_json, t.node_id AS thread_node
+         FROM annotation_comments c
+         JOIN annotation_threads t ON t.id = c.thread_id
+        WHERE t.id = ? AND t.nest_id = ? AND c.client_json LIKE ?`,
+      [source, nestId, `%"review_id":"${reviewId.replace(/[^0-9A-Za-z-]/g, "")}"%`],
+    )) as Array<{ id: string; thread_id: string; author: string; client_json: string | null; thread_node: string }>;
+    let card: { id: string; thread_id: string; author: string; thread_node: string; handle: string; key: string | null } | null = null;
+    for (const r of rows) {
+      const p = (deserializeClient(r.client_json) as Record<string, any> | undefined)?.proposal;
+      if (p && p.review_id === reviewId && typeof p.proposed_by === "string" && p.proposed_by) {
+        const key = typeof p.proposed_key === "string" ? p.proposed_key : null;
+        card = { id: r.id, thread_id: r.thread_id, author: r.author, thread_node: r.thread_node, handle: normHandle(p.proposed_by), key };
+        break;
+      }
+    }
+    if (!card || !card.handle) return "none";
+    // The gate is a person's: the agent deciding its own card wakes nobody. A
+    // hired key shares its hirer's login, so when both keys are known compare keys, not emails.
+    const by = String(decidedBy ?? "").toLowerCase();
+    const self =
+      card.key && deciderKeyId !== undefined
+        ? !!deciderKeyId && proposalKeyTag(deciderKeyId) === card.key
+        : by === String(card.author).toLowerCase() || by === String(review.requested_by).toLowerCase();
+    if (self) return "skipped";
+    const { sealedNest } = await import("../surfaces/sealed.js");
+    if (await sealedNest(nestId)) return "skipped";
+    const target = await agentWakeTarget(nestId, card.handle);
+    if (!target) return "skipped";
+
+    const key = createHash("sha256").update(`agent-decided:v1:${nestId}:${reviewId}:${card.handle}`).digest("hex").slice(0, 40);
+    const reserved = await db.run(
+      `INSERT INTO agent_wake_deliveries
+         (idempotency_key, nest_id, handle, node_id, thread_id, comment_id, status, created_at, attempts, event)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?)
+       ON CONFLICT (idempotency_key) DO NOTHING`,
+      [key, nestId, card.handle, card.thread_node, card.thread_id, card.id, new Date().toISOString(), AGENT_DECIDED_EVENT],
+    );
+    if (!reserved.changes) return "skipped";
+
+    const channel = (await isChannelNode(nestId, card.thread_node)) ? card.thread_node.split("/").pop()! : null;
+    const deliveryId = randomUUID();
+    const body = JSON.stringify({
+      event: AGENT_DECIDED_EVENT,
+      delivery_id: deliveryId,
+      nest: { id: nestId, name: await resolveNestName(nestId) },
+      channel,
+      node_id: card.thread_node,
+      thread_id: card.thread_id,
+      message_id: card.id,
+      mentioned: card.handle,
+      at: new Date().toISOString(),
+      proposal: { review_id: reviewId, node_id: nodeId, version: Number(review.version), status, decided_by: decidedBy },
+      read: channel
+        ? { tool: "context_channel_read", arguments: { channel, thread: card.thread_id } }
+        : { tool: "context_comments", arguments: { id: card.thread_node, thread: card.thread_id } },
+    });
+    void deliver({
+      key,
+      nestId,
+      nodeId: card.thread_node,
+      handle: card.handle,
+      target,
+      event: AGENT_DECIDED_EVENT,
+      deliveryId,
+      body,
+      sender: decidedBy,
+      retries: backoff,
+    }).catch(() => {});
+    return "sent";
+  } catch (err) {
+    console.error("[agent-wake] decision wake failed", nestId, nodeId, err instanceof Error ? err.message : err);
+    return "skipped";
+  }
 }

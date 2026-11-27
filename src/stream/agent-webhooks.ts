@@ -75,13 +75,42 @@ export function isPublicAgentWebhookUrl(url: string): boolean {
   }
 }
 
-/** A target URL that may be saved: public https only (AC-ST-05). */
+/**
+ * An internal runner the OPERATOR named (chat as orchestration): the host is
+ * exactly one of `AGENT_WEBHOOK_INTERNAL_HOSTS` (config.ts; bare names such
+ * as a compose service, never an IP literal or localhost), http or https, and
+ * no userinfo. This is how a central harness on the nest's own private
+ * network (ai-os-reference: `http://runner:8787/wake`, no published port) is
+ * woken. An admin can only pick a host the operator already allowed; with
+ * the variable unset this is always false and the public fence alone holds.
+ */
+export function isInternalAgentWebhookUrl(url: string): boolean {
+  const hosts = config.AGENT_WEBHOOK_INTERNAL_HOSTS;
+  if (hosts.length === 0) return false;
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    if (u.username || u.password) return false;
+    return hosts.includes(u.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+/** A target a wake-up may go to: public https, or an operator-allowed internal host. */
+export function isAllowedAgentWebhookUrl(url: string): boolean {
+  return isPublicAgentWebhookUrl(url) || isInternalAgentWebhookUrl(url);
+}
+
+/** A target URL that may be saved: public https only (AC-ST-05), or an
+ *  internal host the operator allowed (AGENT_WEBHOOK_INTERNAL_HOSTS). */
 export function parseAgentWebhookUrl(raw: unknown): string {
   const url = typeof raw === "string" ? raw.trim() : "";
-  if (!url || url.length > 2048 || !isPublicAgentWebhookUrl(url)) {
+  if (!url || url.length > 2048 || !isAllowedAgentWebhookUrl(url)) {
     throw new ValidationError(
       "url must be a public https:// URL — loopback, private, link-local and metadata addresses are refused. " +
-        "To test a runner on your own machine, expose it through a public tunnel (for example cloudflared or ngrok) and save the tunnel's https:// URL.",
+        "To test a runner on your own machine, expose it through a public tunnel (for example cloudflared or ngrok) and save the tunnel's https:// URL. " +
+        "A runner on this server's internal network needs its host in AGENT_WEBHOOK_INTERNAL_HOSTS (set by the operator).",
     );
   }
   return url;

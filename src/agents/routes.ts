@@ -9,6 +9,8 @@
  *   PATCH /agent-profiles/:handle { description } → { agent } (owner/admin)
  *   POST /threads/:threadId/handoff { to, note? }      → 201 { handoff, message, mentions }
  *   POST /handoffs/:messageId/accept | /done { note? } → { handoff, message }
+ *   POST /threads/:threadId/propose { title, content, folder? } → 201 { proposal }
+ *        an agent's own approve card (agent-proposals.ts); write tier
  *
  * Thin: each handler calls the service its MCP twin calls (mcp/nest-agent-tools.ts)
  * and returns that object. Hootie's answer and proposal cards are posted by
@@ -74,6 +76,15 @@ agentRoutes.post("/threads/:threadId/handoff", async (c) => {
   // bare key label is not (channels/message-meta.ts).
   const client = messageClient(attributeRequest(c, body.client), body.client, c.get("apiKeyLabel"));
   const result = await createHandoff({ ...who, client }, c.req.param("threadId"), { to: body.to, note: body.note });
+  return c.json(result, 201);
+});
+
+agentRoutes.post("/threads/:threadId/propose", async (c) => {
+  const body = await jsonObject(c);
+  const who = await caller(c);
+  const client = messageClient(attributeRequest(c, body.client), body.client, c.get("apiKeyLabel"));
+  const { proposeInThread } = await import("./agent-proposals.js");
+  const result = await proposeInThread({ ...who, client, apiKeyId: c.get("apiKeyId") ?? null }, c.req.param("threadId"), { title: body.title, content: body.content, folder: body.folder });
   return c.json(result, 201);
 });
 

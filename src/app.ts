@@ -191,7 +191,7 @@ import {
   CodedError,
   isVaultLockTimeout,
 } from "./shared/errors.js";
-import { config, isEmailish, isEmailListish, OPENAI_APPS_CHALLENGE_RE } from "./config.js";
+import { config, isEmailish, isEmailListish, isInternalRunnerHost, OPENAI_APPS_CHALLENGE_RE } from "./config.js";
 import {
   verifyEmailTransport,
   isEmailConfigured,
@@ -1064,6 +1064,7 @@ export function createApp(): Hono<AuthEnv> {
     onboarding_enabled: config.ONBOARDING_ENABLED,
     distill_enabled: config.DISTILL_ENABLED,
     surfaces_slack_self_serve: config.SURFACES_SLACK_SELF_SERVE,
+    agent_webhook_internal_hosts: config.AGENT_WEBHOOK_INTERNAL_HOSTS.join(", "),
     // The model in use: the admin's pick, else the efficient default (see hootieModel).
     hootie_model: hootieModel(resolveModelCredential()),
     // Custom identity (enterprise). The stored values are returned even when
@@ -1444,6 +1445,14 @@ export function createApp(): Hono<AuthEnv> {
     }
     if ("surfaces_slack_self_serve" in body) {
       pending.push({ name: "SURFACES_SLACK_SELF_SERVE", value: body.surfaces_slack_self_serve ? "true" : "false" });
+    }
+    // Internal agent runner hosts: refused out loud here, where the getter drops a bad entry silently.
+    if ("agent_webhook_internal_hosts" in body) {
+      const hosts = String(body.agent_webhook_internal_hosts ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean);
+      const bad = hosts.filter((h) => !isInternalRunnerHost(h));
+      if (bad.length)
+        addError("agent_webhook_internal_hosts", `Use bare host names such as runner, not IP addresses or localhost: ${bad.join(", ")}.`);
+      else pending.push({ name: "AGENT_WEBHOOK_INTERNAL_HOSTS", value: hosts.length ? [...new Set(hosts)].join(",") : null });
     }
     if ("hootie_enabled" in body) {
       pending.push({
@@ -3057,7 +3066,7 @@ export function createApp(): Hono<AuthEnv> {
       parts[1] === "ask" ||
       parts[1] === "agent-profiles" ||
       parts[1] === "handoffs" ||
-      (parts[1] === "threads" && parts.length === 4 && parts[3] === "handoff");
+      (parts[1] === "threads" && parts.length === 4 && (parts[3] === "handoff" || parts[3] === "propose"));
     if (isConversationRoute && !config.EXPERIMENTAL_AGENT_STREAM) {
       return c.json({ error: "Not found" }, 404);
     }
