@@ -17,7 +17,9 @@ import { createHash, randomBytes } from "crypto";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../../db/client.js";
 import { config } from "../../config.js";
-import { parseOrgDomains, emailDomain } from "../../shared/access.js";
+import { parseOrgDomains, emailDomain, resolveNestPermission } from "../../shared/access.js";
+import { addCollaborator } from "../../nests/sharing-service.js";
+import { surfacesPersonalOwner } from "../draft-visibility.js";
 
 import { AppError, ConflictError, NotFoundError, ValidationError } from "../../shared/errors.js";
 import type { SurfaceUserProfile } from "../contract.js";
@@ -323,7 +325,7 @@ export function completeInstallerLink(input: { installId: string; authedUserId: 
 
 // ─── one-time link tokens ──────────────────────────────────────────────────
 
-export async function issueLinkToken(input: { installId: string; surfaceUserId: string; now?: number }): Promise<string> {
+export async function issueLinkToken(input: { installId: string; surfaceUserId: string; nestId?: string | null; now?: number }): Promise<string> {
   await installOrThrow(input.installId);
   const now = input.now ?? Date.now();
   const recent = (await getDb().get(
@@ -335,9 +337,9 @@ export async function issueLinkToken(input: { installId: string; surfaceUserId: 
   }
   const token = randomBytes(32).toString("base64url");
   await getDb().run(
-    `INSERT INTO surface_link_tokens (token_hash, purpose, install_id, surface_user_id, expires_at, created_at)
-     VALUES (?, 'link', ?, ?, ?, ?)`,
-    [sha256(token), input.installId, input.surfaceUserId, nowIso((input.now ?? Date.now()) + LINK_TOKEN_TTL_MS), nowIso(input.now)],
+    `INSERT INTO surface_link_tokens (token_hash, purpose, install_id, surface_user_id, nest_id, expires_at, created_at)
+     VALUES (?, 'link', ?, ?, ?, ?, ?)`,
+    [sha256(token), input.installId, input.surfaceUserId, input.nestId ?? null, nowIso((input.now ?? Date.now()) + LINK_TOKEN_TTL_MS), nowIso(input.now)],
   );
   return token;
 }
@@ -349,14 +351,14 @@ export function linkUrl(token: string): string {
 
 async function tokenRow(token: string) {
   return (await getDb().get("SELECT * FROM surface_link_tokens WHERE token_hash = ? AND purpose = 'link'", [sha256(token)])) as
-    | { token_hash: string; install_id: string; surface_user_id: string; expires_at: string; used_at: string | null }
+    | { token_hash: string; install_id: string; surface_user_id: string; nest_id: string | null; expires_at: string; used_at: string | null }
     | undefined;
 }
 
-/** What the link page shows: both identities, so a forwarded link is obvious. */
+/** What the link page shows: both identities, so a forwarded link is obvious. Signed out → `userId` null. */
 export async function describeLinkToken(
   token: string,
-  userId: string,
+  userId: string | null,
   now = Date.now(),
 ): Promise<{ ok: true; surface_identity: string; community_identity: string } | { ok: false; reason: "invalid" | "expired" | "used" }> {
   const row = await tokenRow(token);
@@ -365,12 +367,12 @@ export async function describeLinkToken(
   if (Date.parse(row.expires_at) <= now) return { ok: false, reason: "expired" };
   const install = await getInstall(row.install_id);
   const p = await getProfile(row.install_id, row.surface_user_id);
-  const u = (await getDb().get("SELECT email FROM users WHERE id = ?", [userId])) as { email?: string } | undefined;
+  const u = userId ? ((await getDb().get("SELECT email FROM users WHERE id = ?", [userId])) as { email?: string } | undefined) : undefined;
   const surfaceName = p?.display_name ? `@${p.display_name}` : row.surface_user_id;
   return {
     ok: true,
     surface_identity: `${install?.surface === "teams" ? "Teams" : "Slack"} user ${surfaceName} (${p?.email ?? "email unknown"})`,
-    community_identity: `signed in as ${u?.email ?? "unknown"}`,
+    community_identity: userId ? `signed in as ${u?.email ?? "unknown"}` : "not signed in",
   };
 }
 
@@ -441,7 +443,19 @@ export async function redeemLinkToken(input: { token: string; userId: string; no
     surfaceEmail: p?.email ?? null,
   });
   await finish("linked");
+  if (row.nest_id) await shareLinkedNest(row.nest_id, input.userId);
   return { ok: true, linked: true, executed: false, message: CLICK_AGAIN, linkId: link.id };
+}
+
+/** Viewer on the nest the click came from, so the person can open it. Never a private (DM) nest; never fails the link. */
+async function shareLinkedNest(nestId: string, userId: string): Promise<void> {
+  try {
+    if (await surfacesPersonalOwner(nestId)) return;
+    if ((await resolveNestPermission(nestId, userId)) !== "none") return;
+    await addCollaborator({ nestId, userId, permission: "read" });
+  } catch (err) {
+    logCaught("identity", err, { nest: nestId, call: "share_linked_nest" }, "warn");
+  }
 }
 
 // ─── the actor behind a commit-class click ─────────────────────────────────
@@ -468,7 +482,7 @@ function assertVerb(action: string): CommitVerb {
  * link → auto-match (creating the auto_email link, with confirm) → otherwise
  * a one-time link.
  */
-export async function resolveActor(input: { installId: string; surfaceUserId: string; action: string; now?: number }): Promise<ActorResolution> {
+export async function resolveActor(input: { installId: string; surfaceUserId: string; action: string; nestId?: string | null; now?: number }): Promise<ActorResolution> {
   const verb = assertVerb(input.action);
   const install = await installOrThrow(input.installId);
   let link = await activeLink(install.id, input.surfaceUserId);
@@ -493,7 +507,7 @@ export async function resolveActor(input: { installId: string; surfaceUserId: st
     if (!link) {
       let token: string;
       try {
-        token = await issueLinkToken({ installId: install.id, surfaceUserId: input.surfaceUserId, now: input.now });
+        token = await issueLinkToken({ installId: install.id, surfaceUserId: input.surfaceUserId, nestId: input.nestId, now: input.now });
       } catch (err) {
         if (err instanceof AppError && err.statusCode === 429) return { status: "rate_limited", message: err.message };
         throw err;

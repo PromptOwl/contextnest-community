@@ -422,7 +422,28 @@ const wantsHtml = (c: C) => (c.req.header("Accept") || "").includes("text/html")
 const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
 function page(title: string, body: string) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title>
-<style>body{font-family:system-ui,sans-serif;max-width:520px;margin:48px auto;padding:0 16px;color:#111}button{padding:8px 16px}</style></head><body>${body}</body></html>`;
+<style>body{font-family:system-ui,sans-serif;max-width:520px;margin:48px auto;padding:0 16px;color:#111}button{padding:8px 16px}</style></head><body>${body}<p><a href="/">Back to ContextNest</a></p></body></html>`;
+}
+
+/** A signed-out browser on /link/:token: who the link is for, and a sign-in that comes back here. */
+export async function signedOutLinkPage(c: C, token: string): Promise<Response> {
+  if (!surfacesEnabled()) return c.json({ error: "Not found" }, 404);
+  c.header("Cache-Control", "no-store");
+  c.header("Referrer-Policy", "no-referrer");
+  const d = await describeLinkToken(token, null);
+  if (!d.ok) {
+    const msg = d.reason === "expired" ? "This link has expired. Click the button again for a new one." : d.reason === "used" ? "This link was already used." : "This link isn't valid.";
+    return c.html(page("Link", `<p>${esc(msg)}</p>`), 410);
+  }
+  const next = `/?next=${encodeURIComponent(`/link/${token}`)}`;
+  return c.html(
+    page(
+      "Link your account",
+      `<h1>Link your account</h1><p>${esc(d.surface_identity)}</p>
+<p>Sign in to ContextNest to link this account. You'll come back to this page.</p>
+<p><a href="${esc(next)}">Sign in to link</a></p>`,
+    ),
+  );
 }
 
 export const linkPageRoutes = new Hono<AuthEnv>();

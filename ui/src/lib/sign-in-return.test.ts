@@ -80,3 +80,12 @@ describe("AC-C3-20 the link stays in the address bar while signed out (?next=), 
     expect(signInAddress("/settings")).toBe("/");
   });
 });
+
+describe("a chat-identity link page (/link/<token>) survives sign-in", () => {
+  it("follows /link/<token> and nothing that escapes it", () => {
+    expect(nextFromSearch(`?next=${encodeURIComponent("/link/abc_DEF-123")}`)).toBe("/link/abc_DEF-123");
+    for (const bad of ["/link/", "/link/../admin", "/link/a/b", "/link/a?x=1", "//evil.example/link/a", "/link/%2e%2e"]) {
+      expect(safeNestReturn(bad)).toBeNull();
+    }
+  });
+});

@@ -17,9 +17,14 @@ const MAX_AGE_MS = 10 * 60_000;
 
 type Store = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
-/** `value` if it is a path into a nest on this origin, else null. */
+/** `/link/<token>` exactly: the token is base64url, so no `/`, `.` or `\` can slip in. */
+export const isLinkPage = (value: string): boolean => /^\/link\/[A-Za-z0-9_-]+$/.test(value);
+
+/** `value` if it is a path into a nest on this origin (or a link page), else null. */
 export function safeNestReturn(value: string | null | undefined): string | null {
   if (!value) return null;
+  // A chat-identity link page (/link/<token>): a server page, opened with a full load.
+  if (isLinkPage(value)) return value;
   // The fixed prefix rules out `//host` and `/\host`; no scheme can precede it.
   if (!/^\/nest\/[^/?#\\]+(?:[/?#][^\\]*)?$/.test(value)) return null;
   // No `.` or `..` segment, plain or encoded (`%2e`): it must stay under /nest/<id>.

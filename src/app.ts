@@ -97,7 +97,7 @@ import { metacognitionRoutes } from "./metacognition/routes.js";
 import { envRoutes, storedEnvValues } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
 import { onboardingRoutes } from "./onboarding/routes.js";
-import { surfacesRoutes, linkPageRoutes } from "./surfaces/routes.js";
+import { surfacesRoutes, linkPageRoutes, signedOutLinkPage } from "./surfaces/routes.js";
 import { slackPublicRoutes } from "./surfaces/adapters/slack/routes.js";
 import { aboutSurfacesRoutes, ABOUT_SURFACES_PATH } from "./surfaces/about-page.js";
 import { surfacesEnabled } from "./surfaces/flags.js";
@@ -2493,7 +2493,14 @@ export function createApp(): Hono<AuthEnv> {
   app.route("/surfaces/slack", slackPublicRoutes);
   app.use("/surfaces/*", flexAuthMiddleware);
   app.route("/surfaces", surfacesRoutes);
-  app.use("/link/*", flexAuthMiddleware);
+  // A signed-out (or expired-session) browser GET gets a sign-in page, not 401 JSON.
+  app.use("/link/*", async (c, next) => {
+    const res = await flexAuthMiddleware(c, next);
+    if (res?.status === 401 && c.req.method === "GET" && (c.req.header("Accept") || "").includes("text/html")) {
+      return signedOutLinkPage(c, c.req.path.split("/")[2] ?? "");
+    }
+    return res;
+  });
   app.route("/link", linkPageRoutes);
 
   app.use("/me/*", flexAuthMiddleware);

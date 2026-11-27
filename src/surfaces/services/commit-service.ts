@@ -171,7 +171,7 @@ export async function authorize(req: Omit<CommitRequest, "interactionId"> & { in
     await req.responder.note(await alreadyNote(install, all));
     return { ok: false };
   }
-  const actor = await resolveActor({ installId: install.id, surfaceUserId: req.surfaceUserId, action: req.verb });
+  const actor = await resolveActor({ installId: install.id, surfaceUserId: req.surfaceUserId, action: req.verb, nestId: p.nest_id });
   if (actor.status === "rate_limited") {
     await req.responder.note(actor.message);
     return { ok: false };
