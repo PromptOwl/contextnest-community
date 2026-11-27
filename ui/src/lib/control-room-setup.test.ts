@@ -376,6 +376,27 @@ describe("po-1432: the wizard names who blocks a pair and offers to add channel 
     // An older server without people keeps the note alone.
     expect(guardView(preview({ surface_ok: false, detail: { members_total: 2, members_not_readers: 1 } }), ctx).groups).toBeUndefined();
   });
+
+  it("a server admin in the channel is named, so a missing Add to nest is explained", () => {
+    const admin = { server_admins: [{ user_id: "u-ann", name: "Ann", email: "ann@x.ai" }] };
+    const heading = "Server admins. They can open PO - Engineering Ops by link, so they don't need adding:";
+    const ok = guardView(withPeople(preview({ surface_ok: true }), admin), ctx);
+    expect(ok.state).toBe("ok");
+    expect(ok.groups).toEqual([{ heading, people: ["Ann (ann@x.ai)"] }]);
+    const po = guardView(
+      withPeople(preview({ surface_ok: false, detail: { members_total: 3, members_not_readers: 1 } }), {
+        ...admin,
+        members_not_readers: [{ surface_user_id: "SC", name: "Carol", community_user_id: "u-carol", email: "carol@x.ai" }],
+      }),
+      ctx,
+    );
+    expect(po.groups).toEqual([
+      { heading: "Can be added to the nest:", people: ["Carol (carol@x.ai)"] },
+      { heading, people: ["Ann (ann@x.ai)"] },
+    ]);
+    // No admin in the channel: nothing extra.
+    expect(guardView(withPeople(preview({ surface_ok: true }), {}), ctx).groups).toBeUndefined();
+  });
 });
 
 describe("po-1432 review: shared-deployment cause and capped name lists", () => {

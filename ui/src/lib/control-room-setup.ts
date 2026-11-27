@@ -278,8 +278,12 @@ export function guardView(p: SurfacesBindingPreview, ctx: { channel: string; nes
       : `${d.members_not_readers} of the ${plural(d.members_total, "channel member")} can't read ${ctx.nest}. They see new suggestions in Slack, never existing notes.`,
     "Server admins can read every nest and aren't counted.",
   ];
+  // A server admin in the channel already reads the nest, so no "Add to nest" for them: name them.
+  const admins = (p.people?.server_admins ?? []).map((a) => (a.name && a.email ? `${a.name} (${a.email})` : (a.name ?? a.email ?? "Someone")));
+  const adminGroup = admins.length ? [{ heading: `Server admins. They can open ${ctx.nest} by link, so they don't need adding:`, people: admins }] : [];
   if (!p.guard.surface_ok) {
     const n = d.members_not_readers;
+    const groups = [...(memberGroups(p.people?.members_not_readers ?? []).groups ?? []), ...adminGroup];
     return {
       passed,
       state: "proposals_only",
@@ -288,10 +292,10 @@ export function guardView(p: SurfacesBindingPreview, ctx: { channel: string; nes
         n > 0
           ? `${n} of the ${plural(d.members_total, "member")} can't read ${ctx.nest}, so cards here never quote existing records.`
           : `Some people here can't read ${ctx.nest}, so cards here never quote existing records.`,
-      ...memberGroups(p.people?.members_not_readers ?? []),
+      ...(groups.length ? { groups } : {}),
     };
   }
-  return { state: "ok", label: "Cards can show existing records", note: null, passed };
+  return { state: "ok", label: "Cards can show existing records", note: null, passed, ...(adminGroup.length ? { groups: adminGroup } : {}) };
 }
 
 export type FixOption = "create_nest" | "other_nest" | "leave_off" | "ext_only";

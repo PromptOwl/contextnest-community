@@ -5706,6 +5706,8 @@ export interface SurfacesBindingPreview {
     }>;
     /** `slack_email`: the confirmed email Slack has, for a member with no account match (po-1445). `is_bot`: another app's bot. */
     members_not_readers: Array<{ surface_user_id: string; name: string | null; community_user_id: string | null; email: string | null; slack_email?: string | null; is_bot?: boolean }>;
+    /** Channel members who read the nest only as server admins (by link); never listed to add. */
+    server_admins?: Array<{ user_id: string; name: string | null; email: string | null }>;
     universe_cause: "public" | "link" | "shared_deployment" | null;
   };
 }
