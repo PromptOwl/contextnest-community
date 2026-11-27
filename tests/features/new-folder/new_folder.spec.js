@@ -218,7 +218,15 @@ test.describe('New folder', () => {
   }) => {
     const { api, nest, page } = await ownerNest(primary_user, commonFunction, 'folder-existing');
 
-    await page.createFolder('Alpha');
+    // po-1522: an existing name is refused in place — the dialog stays open
+    // with an "already exists" toast, so another name can be typed.
+    await page.openDialog();
+    await page.typeName('Alpha');
+    await page.createButton.click();
+    await expect(page.toasts.filter({ hasText: /already exists/ })).toBeVisible(WRITE);
+    await expect(page.dialog).toBeVisible();
+    await page.cancelButton.click();
+    await expect(page.dialog).toBeHidden();
 
     await expect(page.folderHeader(SEED_FOLDER)).toHaveCount(1);
     await expect.poll(() => page.folderTotal(SEED_FOLDER), WRITE).toBe(1);

@@ -1,5 +1,92 @@
 # @promptowl/contextnest-community
 
+## 4.2.0
+
+### Minor Changes
+
+- v4.2.0: one Slack app per server managed from Setup and Server settings, Slack listeners that recover from restarts and repair fixable suggestions, a richer Board New task dialog (folder, rich text, create and add another), My Work focused on what needs you, and editable comments with move and tag history.
+- 9d96212: Board cards show how many comments a task has, in amber while a thread is unresolved.
+- 9d96212: The Board groups by "Created by", and the List layout has a "Created by" column that sorts.
+- 2d726d0: The Board's New task dialog has "Create and add another": it creates the task, keeps the dialog open on the same column and folder, and clears the form with the cursor in the title.
+- 9d96212: You can edit and delete your own comments on a document or task. An edited comment shows "Edited".
+- 2d726d0: Every folder picker for moving (one document, several documents, the open document, a folder) is searchable by folder name or path.
+- 2d726d0: The Board's List layout has "Add task" on every section header. The task is created in that folder, tag, person, priority or field value, as on the Board.
+- fd2943d: Control room → Agents has an Update button for a Slack listener's name, picture, folders, model, max output tokens, temperature, time limit, steps and suggestions per run (also `judge` on `PATCH /surfaces/bindings/:id` and `context_surfaces_binding_update`). The listener's own model comes before the server's judge model.
+- 9d96212: A document's activity shows who moved it, from which folder to which, and who changed its tags, with the time. The task page and the Activity log both list them.
+- 37ab069: My Work is organized around what needs you. Approvals sit first and Tasks second, so neither is pushed below a long list. Tasks show open ones by default and filter by status (Open, Done, All), stage, priority, due date and text; the most pressing (urgent or overdue) come first and the list shows the top six with "Show all". Mentions and notifications follow; "Waiting on others" is folded until opened. A task counts as finished when it has a completion stamp or carries one of its nest's done tags, so a task closed by tag through an agent or a file sync no longer stays in the open list or the My Work count. `GET /me/work` gives each assigned task its `tags`, and takes `?assigned_done=1` to also list finished tasks (marked `done`, after the open ones); the badge, the urgent count and MCP `context_my_work` still count open work only.
+
+  The nest page has two fewer tabs. Overview is part of Documents (the description and facts line sit above the list, and an empty nest still shows its ways to start), and Stewards is part of Collaborators (the steward roster sits under access, with the same permissions as before). `?tab=overview` and `?tab=stewards` links still open the right place.
+
+  Saving structure rules no longer fails on a nest that has no settings file (`.context/config.yaml`), such as an imported nest. The first save creates a minimal one, and nothing else in the nest folder is touched. This is a stopgap until the engine creates the file itself.
+
+  The review pane (Review tab, My Work and the document editor all open the same one) now shows where a change came from: which agent wrote it and in which session, who submitted it and when, and who sealed the latest version. Tasks get a details card with owner, due date, priority, stage and tags, so the pane is no longer a tall empty box for a task with a short body. The Review queue has Pending approvals and Your review queue counts on top. Approvals lists stay current without a hard refresh: approving with edits and bulk decisions now refresh My Work and the queue, and the lists re-read on focus and every 30 seconds.
+
+  My Work has tabs with counts: All, Approvals, Tasks, Mentions, Notifications and Waiting on others, so every part of the inbox shows its number and opens on its own. In Tasks, "N open" and "N urgent" are filters: click either to narrow the list. The review pane has a Skip button that passes over a change without deciding it and opens the next one, wrapping to the top at the end of the queue. The change stays in your queue. Skip works the same from the nest's Review tab and from My Work.
+
+- 2d726d0: The Board's New task dialog has a searchable Folder field. It starts on the column's folder (the nest root on other boards), and the task is created in the folder you pick.
+- 2d726d0: The Board's New task dialog grows in both directions: drag the corner of the description to make it wider and taller.
+- 2d726d0: The description in the Board's New task dialog is the document editor: formatting toolbar, mentions, links, and pasted headings, lists, bold text and tables keep their formatting.
+- 529a6a0: Slack now connects through one Slack app per server. Its manifest, addresses and three keys are managed from Control room → Setup or Server settings → Surfaces, and both show the same values. The "Hosted Slack app" switch is gone: Slack is on whenever Surfaces is, and installs already connected from their own manifest keep working until disconnected.
+
+  Saving a Client ID or Client secret checks it with Slack and shows which one is wrong under that field instead of storing it. When Slack refuses the keys at approval, the error page says which keys and where to fix them. Disconnecting Slack clears half-finished connects, Setup always lets you pick the nest before connecting, and the Email domains box follows the nest you pick.
+
+- fd2943d: A Slack suggestion that breaks a fixable rule (wording copied from the chat, an owner or date not in the conversation, a title too long) is sent back to the model once instead of being dropped, so a good note isn't lost over how it was written. Nothing sensitive, from another document or against the people-folder rules is ever sent back, and the repaired answer passes the same checks. Adds a writing-style set for `npm run eval:surfaces`.
+
+### Patch Changes
+
+- fd2943d: A document, version or review made by an agent names the agent (a Slack listener by its channel) instead of its internal address.
+- 9d96212: An archived document no longer shows its versions, relations or comments by id to anyone who cannot restore it, over MCP and REST.
+- 9d96212: A task added on the Board shows at once and the New task dialog closes without waiting for the server. If the server refuses the task, the message keeps what was typed and opens it again.
+- 9d96212: The Board filter finds a card by its ticket number, in any case.
+- 9d96212: An empty folder board says how to start: "Add a column" and "Add your first task".
+- 2d726d0: The Board's "new folder…" field shows the name the folder will have before you create it, when it differs from what you typed (for example "Blocked Waiting On Review").
+- 9d96212: "How this board works" says how to group tasks by stage with options that exist: Tag, then the stage: group.
+- 9d96212: A shared board tab names its maker by display name, not by email address.
+- 2d726d0: The Members panel of a public channel now shows everyone who can read and post there: people who joined first, then "Also have access" with the rest of the nest, and a count of both. `GET /nests/:nestId/channels/:name/members` adds `audience` (empty for a private channel).
+- 9d96212: The first click on "Click here to start commenting…" puts the cursor in the comment box.
+- 9d96212: Formatted text pasted into a comment becomes Markdown again. Headings and lists were posted as raw HTML.
+- 2d726d0: Control room: the nest dropdown on Overview, Decision ledger and Agents keeps the width of its field, wraps long nest names, scrolls, and can be searched.
+- 2d726d0: Control room setup: the nest picker (channels, move, starter folders, where notes land) is searchable by nest name.
+- 9d96212: A document whose first heading repeats its title shows the title once when you view it. The document itself is not changed.
+- 9d96212: Creating a folder with a name that is taken says that the folder already exists, not that it was created.
+- 9d96212: Accepting a pending invite shows "Accepting…" until it ends, and a failure shows an error.
+- fd2943d: A Slack listener is called by its channel ("general nest agent 811b8b3b") in the Control room and Workflows → Agents, so several listeners on one nest can be told apart. A name set with Update comes first.
+- fd2943d: The listener Update dialog opens with the values in use, shows each default, and the Agents list refreshes after saving.
+- fd2943d: Control room → Agents lists a connected Slack listener before its first conversation, so its settings can be updated at once. Workflows → Agents links there and no longer cuts long names short.
+- fd2943d: A Slack listener uses your own model provider key when one is set, as Hootie does, and PromptOwl credits otherwise; its run says which. The listener's model is picked from the same list as Hootie's.
+- fd2943d: A Slack listener run that ends without a usable decision is now a failed run that says why (out of output tokens, no decision submitted, or which rule the decision broke), in Workflows, Agents activity and the Control room ledger, with its tokens and duration. Errors without a fixed explanation show the provider's own message, with credentials and conversation text taken out, and every failure is logged. Past runs that ended this way count as failed too, so earlier success numbers can go down.
+- 2d726d0: Moving a document or task to another folder no longer waits for the nest's index files to be rewritten: they update right after the response, like every other write.
+- 9d96212: My Work's approvals list and its counts refresh on window focus and every 30 seconds, so a change decided elsewhere leaves the list without a reload.
+- 2d726d0: The New Folder button uses the same text color as the other nest action buttons.
+- 09e3db3: Server settings: with the Hosted Slack app off, the Self-serve Slack switch shows off and says to turn on the Hosted Slack app first. Before, it stayed locked at "on" although self-serve could not be used. When self-serve is off, a person who tries to connect Slack now reads "Self-serve Slack is not turned on for this server. Contact your server admin…".
+- 9d96212: Leaving Server settings with unsaved changes asks "Leave without saving?" first.
+- 2d726d0: Server settings: Save changes, Discard and "Unsaved changes" stay visible while the page scrolls, on every tab.
+- 2d726d0: Server settings: the tabs wrap onto a second row, so none is cut off when the sidebar is open.
+- fd2943d: Control room Setup: "Check who can read" says why each channel passed, and the step text and the notice preview use the full width. The Activity hint names every event a channel needs.
+- 32d31a9: Surfaces instructions work whatever the Slack app is called. The channel notice mentions the app by its Slack id, slash command help shows the command the app registered, and setup and help pages no longer say "@Nest". The app's own notice can never opt the app out.
+- fd2943d: A 🧠 or "remember this" with nothing to keep is a normal "no proposal" instead of a failure, and the person who asked is told privately why no card came. The Control room says in words when a suggestion was blocked, which part of a decision was invalid, and when a model isn't available to the key.
+- 22ac5d1: Slack: a card that a server restart interrupts is posted later, and Edit or Reject says so when Slack can't open the dialog. The server log names Slack's error code.
+- fd2943d: Edit and approve works on a nest with stewardship off, from Slack and on the web. When the nest refuses a Slack approve, edit or reject, the reason is shown to the person who clicked and logged.
+- 22ac5d1: Slack: a brain-emoji request on an old message no longer hangs after a server restart, and the person who asked is told when the message can't be read or used.
+- fd2943d: The hosted Slack app guide lists the bot scopes and events to add, with copy buttons, and when to reinstall. A channel's Activity says what to check in Slack when nothing arrived, instead of pointing at the buffer key.
+- ec68186: Security: Slack and Teams triggers (inbound hooks) refuse every request until the nest has the signing secret, and Slack's URL check is answered only when it is signed. **Before you upgrade:** for each nest with a Slack or Teams trigger, add `SLACK_SIGNING_SECRET` or `TEAMS_WEBHOOK_SECRET` to the nest's Tool environment. A trigger without it answers 401 and starts no run.
+- 22ac5d1: Slack listener: a conversation that a server restart interrupts is judged again, or closed in the ledger with the reason, instead of being lost.
+- 32d31a9: Workflows → Agents shows a Slack channel's listener as "Managed by Slack", read-only, with its channel, folders and where to change it. Editing or deleting it from there, REST or MCP is refused (it would have stopped capture in that channel), and it is never picked as a channel watcher.
+- 6ac05cf: Archiving a nest pauses the Slack channels bound to it, and deleting a nest stops them and clears any half-finished Slack connect that pointed at it. Slack setup no longer sends a deleted nest to Slack and lets you pick the nest again.
+- fd2943d: Control room Setup warns that connecting Slack again gives your own app a new address, and says how to use the same app again.
+- 8b5522a: Slack setup: a "Proposals only" channel now names the members who can't read the nest, grouped as "Can be added to the nest", "No matching account on this server" and "Apps in the channel". Before, when nobody could be added, the wizard showed only a count and no "Add to nest…" button, with no reason. The binding preview also lists other apps' bots in `people.members_not_readers` (with `is_bot: true`), so the names match the guard's count.
+- cad6c66: Control room Setup: Download manifest and Save values work again after an unfinished install with the hosted Slack app. Setup ignores a pending install from the other mode, says why when there is no manifest, and repeated hosted attempts reuse one pending install.
+- 0476da6: Self-serve Slack setup lists its steps in install order: download the manifest, check the Redirect URL, save the three values, then approve in Slack.
+- fd2943d: On a server that hosts several organizations, Control room Setup shows the email domains a Slack connection may match, warns when there are none, and lets an admin set them. A member who can't be matched for that reason is told so.
+- 09e3db3: Surfaces and Slack: a failure that the code catches now writes one `[surfaces] <step> failed: code=<code> install=… binding=…` line to the server log, where before many were dropped. The code is Slack's error code or the error's class, never its message, so no message text, titles, tokens or secrets reach the log. Best-effort calls (a token revoke, a Home tab refresh, a note) log at warn level; real failures (a lost purge audit row, a failed draft, a fail-closed check) log at error level. Nothing changes in what callers see.
+- fd2943d: Server settings → Surfaces has a field for the quiet window, and the judge model is picked from the same list as Hootie's.
+- 9d96212: The Board grouped by Tag has no column for each ticket number.
+- 2d726d0: A task's description follows its fields directly: the unused editor option that hid the formatting toolbar but kept its blank space is removed.
+- 9d96212: The Due field on a task page is red with a warning icon when the date has passed and the task is not done, as on its Board card.
+- 9d96212: Team chat settings are on the nest Settings tab, not inside "Edit review settings".
+- 9d96212: Two teams cannot have the same name. A new team or a rename with a taken name says "A team with this name already exists."
+- 2d726d0: The top bar no longer overlaps or clips its items: labels fold to icons by the bar's own width (the window minus the sidebar), including Discard draft and Submit for review while editing.
+
 ## 4.1.0
 
 ### Minor Changes

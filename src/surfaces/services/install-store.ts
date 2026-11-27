@@ -19,6 +19,7 @@ export interface InstallRow {
   home_nest_id: string | null;
   installed_by_user_id: string | null;
   status: "pending" | "active" | "revoked" | "disconnected";
+  created_at?: string;
 }
 
 export async function createInstall(input: {

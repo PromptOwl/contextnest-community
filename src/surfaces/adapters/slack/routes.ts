@@ -73,6 +73,15 @@ function signed(c: C, secret: string | null, raw: string): boolean {
   return verifySlackSignature(secret, c.req.header("x-slack-request-timestamp"), c.req.header("x-slack-signature"), raw);
 }
 
+/** One Slack app per server: a re-OAuth of a connected workspace returns the live install's
+ *  own bot token, so revoking a refused token must skip one a live install still holds. */
+async function liveInstallHolds(team: string, token: string): Promise<boolean> {
+  if (!team) return false;
+  const live = (await getDb().all("SELECT id FROM surface_installs WHERE surface = 'slack' AND team_id = ? AND status = 'active'", [team])) as Array<{ id: string }>;
+  for (const l of live) if ((await getSecret(l.id, "bot_token").catch(() => null)) === token) return true;
+  return false;
+}
+
 /** Map a Slack event to the work it implies; runs after the ack. */
 export async function processSlackEvent(install: InstallRow, payload: Record<string, any>): Promise<void> {
   // S2b: App Home "My pending" is published when the person opens it — never as a nudge.
@@ -86,6 +95,9 @@ export async function processSlackEvent(install: InstallRow, payload: Record<str
   const out = normalizeSlack(payload);
   if (!Array.isArray(out)) {
     if (out.kind === "uninstalled" || out.kind === "tokens_revoked") {
+      // A late Slack retry can carry a teardown from before this install existed
+      // (same app, same team): it is about an older token, not this one.
+      if (Number(payload.event_time) < Math.floor(Date.parse(String(install.created_at)) / 1000)) return;
       await uninstall(install.id, out.kind);
       return;
     }
@@ -554,7 +566,8 @@ slackAdminRoutes.get("/oauth/callback", async (c) => {
   const team = res.team?.id ? String(res.team.id) : "";
   const enterprise = res.enterprise?.id ? String(res.enterprise.id) : null;
   const revoke = async () => {
-    if (token) await slackCall("auth.revoke", {}, { token }).catch((err) => logCaught("oauth", err, { install: install.id, call: "auth.revoke" }, "warn"));
+    if (!token || (await liveInstallHolds(team, token))) return;
+    await slackCall("auth.revoke", {}, { token }).catch((err) => logCaught("oauth", err, { install: install.id, call: "auth.revoke" }, "warn"));
   };
   // A refusal revokes only the token Slack just issued. A live install keeps
   // its own secrets and stays as it was (round 2, L5); only an install that
