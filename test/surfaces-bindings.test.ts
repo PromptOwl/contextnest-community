@@ -1073,6 +1073,23 @@ describe("po-1432: the preview names who blocks a pair and who can't read the ne
     expect(p.people.members_not_readers).toEqual([expect.objectContaining({ surface_user_id: "SBOT", name: "Zapier", community_user_id: null, is_bot: true })]);
   });
 
+  it("a linked server admin who isn't a collaborator is named as an admin, never offered to add", async () => {
+    const { loadGrantedSuperAdmins } = await import("../src/governance/access-service.js");
+    const { getDb } = S.db;
+    await getDb().run("INSERT INTO super_admins (email, granted_by) VALUES (?, 'test')", [carol.email.toLowerCase()]);
+    await loadGrantedSuperAdmins();
+    try {
+      const n = await newNest(alice);
+      setConv("C-ADMIN-A", ["SA", "SC"]);
+      const p = await preview("C-ADMIN-A", n);
+      expect(p.people.members_not_readers.map((m: any) => m.surface_user_id)).not.toContain("SC");
+      expect(p.people.server_admins).toEqual([{ user_id: carol.userId, name: "Carol", email: carol.email }]);
+    } finally {
+      await getDb().run("DELETE FROM super_admins WHERE email = ?", [carol.email.toLowerCase()]);
+      await loadGrantedSuperAdmins();
+    }
+  });
+
   it("po-1467: a reader whose email a channel member has, but whose link is refused, is not_linked with the reason; never not_in_channel", async () => {
     const { profile } = await import("./surfaces-fake-connector.js");
     // Same email in Community and Slack, but the Community email is not verified.

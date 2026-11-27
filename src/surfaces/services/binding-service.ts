@@ -396,7 +396,7 @@ async function previewPeople(nestId: string, ev: Evaluation) {
   const { readers, install } = ev;
   const nest = (await db.get("SELECT visibility FROM nests WHERE id = ?", [nestId])) as { visibility: string } | undefined;
   const universe_cause = !readers.universe ? null : nest?.visibility === "public" ? "public" : nest?.visibility === "org" ? "shared_deployment" : "link";
-  if (!ev.members.known) return { absent_readers: [], members_not_readers: [], universe_cause };
+  if (!ev.members.known) return { absent_readers: [], members_not_readers: [], server_admins: [], universe_cause };
 
   const people = ev.mapped.filter((m) => !m.is_bot && !m.is_guest && !m.is_external);
   const present = new Set(people.map((m) => m.community_user_id).filter(Boolean));
@@ -409,7 +409,9 @@ async function previewPeople(nestId: string, ev: Evaluation) {
     ...people.filter((m) => !m.community_user_id || (!readers.users.includes(m.community_user_id) && !readers.serverAdmins.includes(m.community_user_id))),
     ...bots,
   ].slice(0, PEOPLE_CAP);
-  const ids = [...absentIds, ...outsiders.map((m) => m.community_user_id)].filter((u): u is string => !!u && !u.includes(":"));
+  // Server admins count as readers (they can open the nest by link), so they never need adding: say so by name.
+  const adminIds = [...new Set(people.map((m) => m.community_user_id).filter((u): u is string => !!u && readers.serverAdmins.includes(u) && !readers.users.includes(u)))].slice(0, PEOPLE_CAP);
+  const ids = [...absentIds, ...adminIds, ...outsiders.map((m) => m.community_user_id)].filter((u): u is string => !!u && !u.includes(":"));
   const users = new Map(
     (ids.length
       ? ((await db.all(`SELECT id, name, email FROM users WHERE id IN (${ids.map(() => "?").join(",")})`, ids)) as Array<{ id: string; name: string | null; email: string }>)
@@ -460,7 +462,8 @@ async function previewPeople(nestId: string, ev: Evaluation) {
     );
     absent_readers.push({ user_id: id, name: u?.name ?? null, email: u?.email ?? null, reason: known ? ("not_in_channel" as const) : ("no_slack_link" as const) });
   }
-  return { absent_readers, members_not_readers, universe_cause };
+  const server_admins = adminIds.map((id) => ({ user_id: id, name: users.get(id)?.name ?? null, email: users.get(id)?.email ?? null }));
+  return { absent_readers, members_not_readers, server_admins, universe_cause };
 }
 
 /** Create (or re-create a removed) binding. Refused (409) unless capture_ok. */
