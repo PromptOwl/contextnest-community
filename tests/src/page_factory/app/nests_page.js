@@ -234,12 +234,14 @@ class NestsPage {
     });
   }
 
+  // The card's bookmark (`pin-nest`). The left rail's nest rows carry the same
+  // "Pin nest …" toggle since PO-1441, so the role/name alone matches twice.
   pinIcon(name) {
-    return this.page.getByRole('button', { name: `Pin nest ${name}`, exact: true });
+    return this.page.getByTestId('pin-nest').and(this.page.getByRole('button', { name: `Pin nest ${name}`, exact: true }));
   }
 
   unpinIcon(name) {
-    return this.page.getByRole('button', { name: `Unpin nest ${name}`, exact: true });
+    return this.page.getByTestId('pin-nest').and(this.page.getByRole('button', { name: `Unpin nest ${name}`, exact: true }));
   }
 
   /** Either state of the bookmark button, for asserting presence regardless. */

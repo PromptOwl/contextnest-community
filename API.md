@@ -399,6 +399,10 @@ Idempotent under concurrency, not just in sequence: two simultaneous pins of the
 
 Pins are per `(user, nest)` in the `nest_pins` table and cascade with the nest. Each row of `GET /nests` carries `pinned` for the calling user, and the dashboard floats pinned nests to the top of the grid under either sort.
 
+Where pins show: the All nests grid floats them to the top under either sort and offers a **Pinned** scope; the left rail lists pinned nests first (by name), then the rest in its usual order (the open nest first, then by name); the nest header carries the same toggle. Archived nests drop out of all three, as from every listing.
+
+**Agents (PO-1441).** `GET /index` (JSON and markdown) and the server-level MCP `nest_index` carry `pinned` per nest for the caller. The server-level MCP tool `nest_pin` — `{ "nest": "<id, name or slug>", "pinned": true | false }`, `pinned` defaulting to `true` — is the twin of this route: `structuredContent` is `{ "nest": { "id", "name" }, "pinned" }`. A key pins for the person who owns it. A nest the caller can't read, an archived nest, or (for a nest-scoped key) any nest but its own answers a `NOT_FOUND` tool error. Read-only keys, read-only OAuth grants and headless keys aren't offered it; the suspend and license gates apply as to every write.
+
 ### Document pins — `/nests/:nestId/pins` (experimental, `EXPERIMENTAL_DOC_PINS`)
 **Experimental — may change or disappear.** Every route here answers `404` while `EXPERIMENTAL_DOC_PINS` is off (a superadmin turns it on under Settings → Features, live; `/health` reports `experimental.doc_pins`). License-gated like the governance views, `GET` included (`503` unlicensed past the Free tier).
 

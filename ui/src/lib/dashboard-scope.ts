@@ -17,6 +17,7 @@ export type NestScope =
   | "shared"
   | "org"
   | "public"
+  | "pinned"
   | "synced"
   | "unsynced";
 
@@ -38,6 +39,8 @@ export interface ScopedNest {
   /** Reachable through visibility alone — no membership (the dashboard's
    *  listPublicNests extras). */
   discovered?: boolean;
+  /** The caller pinned this nest (GET /nests `pinned`). */
+  pinned?: boolean;
 }
 
 export function nestOwned(n: ScopedNest): boolean {
@@ -103,6 +106,9 @@ export function nestInScope(n: ScopedNest, scope: NestScope): boolean {
       return n.visibility === "org";
     case "public":
       return n.visibility === "public";
+    // Only the nests I pinned (PO-1441), whoever's they are.
+    case "pinned":
+      return !!n.pinned;
     default:
       return true;
   }
@@ -146,6 +152,7 @@ const NEST_SCOPES: NestScope[] = [
   "shared",
   "org",
   "public",
+  "pinned",
   "synced",
   "unsynced",
 ];

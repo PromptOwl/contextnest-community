@@ -45,6 +45,7 @@ export const TOOL_CLASSIFICATION: Record<string, ToolClassification> = {
   context_onboarding_update: add("Update onboarding", "Flips the caller's own welcome-screen flag, or adds the caller's nest; never removes anything."),
   context_distill: addOutside("Distill a source", "Fetches a public URL from the open internet and adds draft documents (and the ontology document) to a nest; never overwrites or publishes model output."),
   nest_create: add("Create nest", "Creates a new, empty nest; a taken name gets a suffix, never an overwrite."),
+  nest_pin: add("Pin nest", "Pins or unpins a nest for the caller alone (a personal bookmark that orders their list); changes nothing about the nest."),
 
   // ─── Reading a nest ─────────────────────────────────────────────────────
   context_init: read("Load nest instructions", "Returns CONTEXT.md and the always-include documents."),

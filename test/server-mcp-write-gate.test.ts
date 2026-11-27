@@ -86,6 +86,11 @@ describe("server-level /mcp write gate — unlicensed, past the Free tier", () =
     expect(out).toContain("more than 10 users");
   });
 
+  it("blocks nest_pin with the license message, like POST /nests/:id/pin (PO-1441)", async () => {
+    const out = await callServerTool(app, "nest_pin", { nest: "whatever" }, 50);
+    expect(out).toContain("no valid PromptOwl license");
+  });
+
   it("blocks context_create with the license message", async () => {
     const out = await callServerTool(
       app,
@@ -122,6 +127,11 @@ describe("server-level /mcp write gate — suspended", () => {
     const out = await callServerTool(app, "nest_create", { name: "X" });
     expect(out).toContain("suspended by PromptOwl");
     expect(out).toContain("tos");
+  });
+
+  it("blocks nest_pin with the suspension message (PO-1441)", async () => {
+    const out = await callServerTool(app, "nest_pin", { nest: "whatever" }, 51);
+    expect(out).toContain("suspended by PromptOwl");
   });
 
   it("blocks context_create with the suspension message", async () => {

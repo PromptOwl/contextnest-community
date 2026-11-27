@@ -145,3 +145,20 @@ describe("nestRelationText — sidebar tooltip and nest page banner", () => {
     expect(nestRelationText({ is_owner: true, permission: "owner" })).toBeNull();
   });
 });
+
+// PO-1441: a "Pinned" scope on All nests — the nests I pinned, whatever their access.
+describe("nestInScope — 'pinned' (PO-1441)", () => {
+  it("keeps exactly the nests I pinned, mine or not", () => {
+    const rows = [
+      { id: "a", is_owner: true, pinned: true },
+      { id: "b", is_owner: false, permission: "read", pinned: true, discovered: true },
+      { id: "c", is_owner: true, pinned: false },
+      { id: "d", is_owner: true },
+    ];
+    expect(rows.filter((n) => nestInScope(n, "pinned")).map((n) => n.id)).toEqual(["a", "b"]);
+  });
+
+  it("is remembered like every other scope", () => {
+    expect(restoredNestScope("pinned")).toBe("pinned");
+  });
+});
