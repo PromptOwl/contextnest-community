@@ -102,18 +102,21 @@ test.describe('Control room: setup', () => {
     ]) await expect(cr.willNever).toContainText(t);
     for (let i = 1; i <= 5; i++) await expect(cr.stepButton(i)).toContainText(/\w/);
 
-    // Install: manifest → credentials (write-only) → stubbed Slack OAuth.
+    // Install: the server's one Slack app (po-1447) — manifest and the
+    // addresses it must keep → its three keys (write-only) → stubbed Slack OAuth.
     const download = page.waitForEvent('download');
     await cr.button('Download manifest').click();
     expect((await download).suggestedFilename()).toBe('nest-slack-manifest.json');
-    await expect(page.getByTestId('setup-manifest-note')).toContainText("this server's current address");
-    for (const [id, v] of [['cred-client_id', 'cid.123'], ['cred-client_secret', 'shh-secret'], ['cred-signing_secret', 'sign-secret']]) {
+    await expect(page.getByTestId('slack-app-urls')).toContainText('https://example.test/surfaces/slack/events');
+    await expect(page.getByTestId('setup-keys-needed')).toBeVisible();
+    await expect(cr.button('Open Slack to approve')).toBeDisabled();
+    for (const [id, v] of [['slack-app-client_id', 'cid.123'], ['slack-app-client_secret', 'shh-secret'], ['slack-app-signing_secret', 'sign-secret']]) {
       await page.locator(`#${id}`).fill(v);
       await expect(page.locator(`#${id}`)).toHaveAttribute('type', 'password');
     }
-    await cr.button('Save values').click();
-    await expect(page.getByTestId('cred-state-signing_secret')).toHaveText('Saved');
-    await expect(page.locator('#cred-client_secret')).toHaveValue('');
+    await cr.button('Save keys').click();
+    await expect(page.getByTestId('slack-app-state-signing_secret')).toHaveText('Saved');
+    await expect(page.locator('#slack-app-client_secret')).toHaveValue('');
     await cr.button('Open Slack to approve').click();
     await page.waitForURL(/\/control-room\?section=setup/);
     // Back from Slack, the page works out where it is: step 1 done, on step 2.
