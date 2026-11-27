@@ -398,7 +398,11 @@ export function WelcomeScreen({ state, logoUrl, userName, onOpenNest, onManageKe
               </Button>
             </div>
             {applied && (
-              <p className="text-xs text-muted-foreground" role="status" data-testid="recipe-applied">
+              <p
+                className={`rounded-md border px-3 py-2 text-xs ${applied.result?.status === "failed" ? "border-destructive/40 text-destructive" : "text-muted-foreground"}`}
+                role="status"
+                data-testid="recipe-applied"
+              >
                 {appliedSummary(applied.result, applied.name)}
               </p>
             )}

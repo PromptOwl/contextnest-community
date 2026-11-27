@@ -80,8 +80,10 @@ describe("appliedSummary", () => {
     );
     expect(s).toBe("Operations is set up: 2 documents, 1 board. Channels were skipped because team chat is off.");
   });
-  it("a failed apply says the nest is empty", () => {
-    expect(appliedSummary({ id: "x", status: "failed", items: [], drafts: 0, suggested_agents: [], error: "boom" }, "X")).toMatch(/could not be applied: boom/);
+  it("a failed apply says items may be missing, not that the nest is empty", () => {
+    const msg = appliedSummary({ id: "x", status: "failed", items: [], drafts: 0, suggested_agents: [], error: "boom" }, "X");
+    expect(msg).toMatch(/could not be applied: boom/);
+    expect(msg).toMatch(/some recipe items may be missing/);
   });
   it("nothing to say without a result", () => {
     expect(appliedSummary(null, "X")).toBeNull();

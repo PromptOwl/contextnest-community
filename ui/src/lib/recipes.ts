@@ -96,7 +96,7 @@ export function recipeParam(id: string | null | undefined): string | undefined {
  */
 export function appliedSummary(r: RecipeApplied | null | undefined, recipeName: string): string | null {
   if (!r) return null;
-  if (r.status === "failed") return `${recipeName} could not be applied: ${r.error ?? "unknown error"}. The nest was created empty.`;
+  if (r.status === "failed") return `${recipeName} could not be applied: ${r.error ?? "unknown error"}. The nest was created; some recipe items may be missing.`;
   const made = r.items.filter((i) => i.action === "created");
   const count = (kind: string) => made.filter((i) => i.kind === kind).length;
   const parts = [
