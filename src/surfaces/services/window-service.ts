@@ -15,6 +15,7 @@ import { encryptText, decryptText } from "./buffer-crypto.js";
 import { getSettings } from "./settings-service.js";
 import { track } from "./work.js";
 import { recordPurge } from "./purge-audit.js";
+import { logCaught } from "../log.js";
 
 export interface WindowRow {
   id: string;
@@ -184,8 +185,9 @@ export async function decryptWindow(windowId: string): Promise<Array<BufferedRow
   for (const r of rows) {
     try {
       out.push({ ...r, text: decryptText(r.text_enc, r.nonce) });
-    } catch {
+    } catch (err) {
       // An unopenable row (a rotated key) is left out; the sweeper removes it.
+      logCaught("judge", err, { window: windowId, call: "decrypt" }, "warn");
     }
   }
   return out;
@@ -199,6 +201,9 @@ export async function decryptWindow(windowId: string): Promise<Array<BufferedRow
 export async function windowTick(nowMs: number = Date.now()): Promise<string[]> {
   const db = getDb();
   const s = await getSettings();
+  const { judgeWindow, recoverStuckWindows } = await import("./judge-service.js");
+  // Recovery must never stop the tick itself.
+  await recoverStuckWindows().catch((err) => logCaught("judge", err, { call: "recover_stuck_windows" }));
   const open = (await db.all("SELECT * FROM surface_windows WHERE status = 'open' AND forced = 0")) as WindowRow[];
   for (const w of open) {
     const reason = shouldClose(
@@ -209,7 +214,6 @@ export async function windowTick(nowMs: number = Date.now()): Promise<string[]> 
     if (reason) await claimClose(w.id, reason, nowMs);
   }
   const closing = (await db.all("SELECT id FROM surface_windows WHERE status = 'closing' ORDER BY closed_at")) as Array<{ id: string }>;
-  const { judgeWindow } = await import("./judge-service.js");
   const judged: string[] = [];
   for (const { id } of closing) {
     if (await judgeWindow(id, nowMs)) judged.push(id);

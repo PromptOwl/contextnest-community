@@ -19,6 +19,7 @@ import { getSettings } from "./services/settings-service.js";
 import { tryConsume, retryAfterSeconds, type RateLimitConfig } from "../shared/rate-limit.js";
 import { clientIp } from "../shared/request-ip.js";
 import { type SurfaceSettings } from "./core/settings.js";
+import { logCaught } from "./log.js";
 
 export const ABOUT_SURFACES_PATH = "/about/surfaces";
 
@@ -123,7 +124,7 @@ aboutSurfacesRoutes.get("/", async (c) => {
   // can't be read, say so (503, never cached) rather than state defaults that
   // may not be true here.
   const settings = await getSettings().catch((err) => {
-    console.warn("[surfaces] about page: settings unreadable", err instanceof Error ? err.message : String(err));
+    logCaught("settings", err, { call: "about_page" }, "warn");
     return null;
   });
   if (!settings) {

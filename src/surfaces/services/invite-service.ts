@@ -20,6 +20,7 @@ import { getInstall, installRef } from "./install-store.js";
 import { safeMembers } from "./members.js";
 import { recordNotice } from "./notices.js";
 import { askBooterConsent } from "./boot-consent.js";
+import { logCaught } from "../log.js";
 
 export type InviteResult =
   | { ok: true; status: "resumed" | "pending_consent"; message: string }
@@ -60,7 +61,10 @@ export async function inviteBack(input: { bindingId: string; inviterSurfaceUserI
       "UPDATE surface_bindings SET invited_by_surface_user_id = ?, invited_at = ?, updated_at = ? WHERE id = ? AND status = 'paused_by_member'",
       [input.inviterSurfaceUserId, iso(), iso(), b.id],
     );
-    const sent = await askBooterConsent(b.id, input.inviterSurfaceUserId).catch(() => false);
+    const sent = await askBooterConsent(b.id, input.inviterSurfaceUserId).catch((err) => {
+      logCaught("lifecycle", err, { binding: b.id, call: "booter_consent" }, "warn");
+      return false;
+    });
     // Re-review N4: never name the booter to the inviter.
     return {
       ok: true,
@@ -104,7 +108,7 @@ export async function inviteBack(input: { bindingId: string; inviterSurfaceUserI
     detail: { resumed: 1 },
     subject: "Nest was invited back to a conversation by a member",
     text: "Nest was invited back to a conversation by a member, after a member had removed it. See Surfaces for the conversation.",
-  }).catch(() => "");
+  }).catch((err) => logCaught("notice", err, { binding: b.id, call: "binding_invited_back" }));
   return { ok: true, status: "resumed", message: INVITE_MESSAGES.resumed };
 }
 

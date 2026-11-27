@@ -18,6 +18,7 @@
  * The REST routes (routes.ts) and the MCP tools (mcp/onboarding-tools.ts) call
  * these functions, so the two surfaces cannot drift.
  */
+import { applyRecipe, assertRecipe, type RecipeApplied, type RecipeRef } from "../nests/recipe-service.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { ANON_USER_ID } from "../shared/constants.js";
@@ -167,7 +168,7 @@ export async function slackState(userId: string, nestId: string | null): Promise
   const canConnect = configured && (selfServe || admin) && !!nestId;
   let reason: string | null = null;
   if (!configured) reason = "A server admin must configure the Slack app on this server first.";
-  else if (!selfServe && !admin) reason = "A server admin must turn on self-serve Slack, or connect the workspace for you.";
+  else if (!selfServe && !admin) reason = "Self-serve Slack is not turned on for this server. Contact your server admin to turn it on, or to connect Slack for you.";
   else if (!nestId) reason = "Create your nest first.";
   return {
     configured,
@@ -243,9 +244,16 @@ const createMyNestChains = new Map<string, Promise<unknown>>();
  * seat check included). Idempotent: a second call returns the nest the first
  * one made, so a double click cannot make two.
  */
-export function createMyNest(userId: string, name?: string): Promise<NestRef & { created: boolean }> {
+export function createMyNest(
+  userId: string,
+  name?: string,
+  recipe?: RecipeRef | null,
+  keyId: string | null = null,
+  /** MCP is an agent surface whatever it authenticated with (S7-R2 M1): the push-confirmation gate applies. */
+  agentSurface = false,
+): Promise<NestRef & { created: boolean; recipe?: RecipeApplied }> {
   const prev = (createMyNestChains.get(userId) ?? Promise.resolve()).catch(() => {});
-  const run = prev.then(() => createMyNestOnce(userId, name));
+  const run = prev.then(() => createMyNestOnce(userId, name, recipe ?? null, keyId, agentSurface));
   createMyNestChains.set(userId, run);
   void run
     .catch(() => {})
@@ -255,8 +263,11 @@ export function createMyNest(userId: string, name?: string): Promise<NestRef & {
   return run;
 }
 
-async function createMyNestOnce(userId: string, name?: string): Promise<NestRef & { created: boolean }> {
+async function createMyNestOnce(userId: string, name: string | undefined, recipe: RecipeRef | null, keyId: string | null, agentSurface: boolean): Promise<NestRef & { created: boolean; recipe?: RecipeApplied }> {
   if (userId === ANON_USER_ID) throw new ForbiddenError("Sign in to create a nest of your own.");
+  // A recipe is checked before anything exists (PO-1411); it is applied only
+  // to a nest this call makes, never to one an earlier call made.
+  if (recipe) await assertRecipe(recipe, userId);
   const r = await row(userId);
   if (r?.nest_id) {
     const existing = (await getDb().get("SELECT id, name FROM nests WHERE id = ? AND user_id = ? AND archived_at IS NULL", [
@@ -285,7 +296,8 @@ async function createMyNestOnce(userId: string, name?: string): Promise<NestRef 
     } else throw err;
   }
   await upsert(userId, { nest_id: nest.id });
-  return { id: nest.id, name: nest.name, created: true };
+  if (!recipe) return { id: nest.id, name: nest.name, created: true };
+  return { id: nest.id, name: nest.name, created: true, recipe: await applyRecipe(nest.id, recipe, userId, { keyId, agentSurface }) };
 }
 
 /** The caller must be able to read the nest; one message for every miss. */

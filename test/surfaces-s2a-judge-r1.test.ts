@@ -504,6 +504,31 @@ describe.each(["app_uninstalled", "tokens_revoked"])("AC-INS-09 (%s)", (event) =
   });
 });
 
+describe.each(["app_uninstalled", "tokens_revoked"])("a stale %s (a late Slack retry from before this install) is ignored", (event) => {
+  it(`${event} dated before the install leaves the install, its token and its bindings live`, async () => {
+    const team = event === "app_uninstalled" ? "TS1" : "TS2";
+    const bot = `UBOT_${team}`;
+    slack.users.set(`UA_${team}`, { id: `UA_${team}`, team_id: team, email: "alice@surf.test", name: "Alice" });
+    slack.users.set(`UB_${team}`, { id: `UB_${team}`, team_id: team, email: "bob@surf.test", name: "Bob" });
+    slack.users.set(bot, { id: bot, team_id: team, name: "nest", is_bot: true });
+    const inst = await installWorkspace(team, N, { botUserId: bot, authedUser: `UR_${team}` });
+    expect(inst.status).toBe(200);
+    await S.identity.linkExplicit({ installId: inst.id, surfaceUserId: `UA_${team}`, communityUserId: alice.userId });
+    await S.identity.linkExplicit({ installId: inst.id, surfaceUserId: `UB_${team}`, communityUserId: bob.userId });
+    const ch = `CS_${team}`;
+    setChannel(ch, [`UA_${team}`, `UB_${team}`, bot]);
+    const b = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: inst.id, conversation_id: ch, nest_id: N }, alice.apiKey);
+    expect(b.status, JSON.stringify(b.data)).toBe(201);
+    const stale = { ...envelope({ type: event, ...(event === "tokens_revoked" ? { tokens: { bot: [bot] } } : {}) }, team), event_time: Math.floor(Date.now() / 1000) - 600 };
+    const res = await postEvent(`/surfaces/slack/${inst.id}/events`, stale);
+    expect(res.status).toBe(200);
+    await S.work.waitForSurfacesWork();
+    expect((await one("SELECT status FROM surface_installs WHERE id = ?", [inst.id])).status).toBe("active");
+    expect(await one("SELECT 1 AS x FROM surface_secrets WHERE install_id = ? AND name = 'bot_token'", [inst.id])).toBeTruthy();
+    expect((await one("SELECT status FROM surface_bindings WHERE id = ?", [b.data.binding.id])).status).toBe("active");
+  });
+});
+
 // ═══ 2. AC-JDG-13: the remaining read paths ═════════════════════════════════
 
 describe("AC-JDG-13: sync/pull and other agents never see a pending Surfaces draft", () => {
@@ -881,7 +906,7 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     const a = await failWindow("C410", credit);
     expect(a.w.reason_code).toBe("model_billing");
     expect((await one("SELECT reason_code FROM runs WHERE id = ?", [a.w.run_id])).reason_code).toBe("model_billing");
-    expect(a.logged.filter((l) => l.includes(a.w.id)).every((l) => /reason=model_billing status=400$/.test(l))).toBe(true);
+    expect(a.logged.filter((l) => l.includes(a.w.id)).every((l) => /reason=model_billing status=400 /.test(l))).toBe(true);
     // A second window the same day: same code, no second alert.
     const b = await failWindow("C411", credit);
     expect(b.w.reason_code).toBe("model_billing");
@@ -920,6 +945,288 @@ describe("po-1407: a judge failure says why (window, run, ledger, trace, MCP, lo
     expect(w.verdict).toBe("error");
     expect((await all("SELECT id FROM runs WHERE nest_id = ? AND status = 'failed'", [F])).length).toBe(failedBefore);
     expect((await one("SELECT status FROM runs WHERE id = ?", [w.run_id])).status).toBe("succeeded");
+  });
+
+  /** Bind a channel and judge one window with the given model answer. */
+  async function judgeOnce(channel: string, answer: (req: any) => any, judge?: Record<string, unknown>) {
+    setChannel(channel, ["U_ALICE", "U_BOB", "UBOT"]);
+    const b = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: channel, nest_id: F }, alice.apiKey);
+    expect(b.status, JSON.stringify(b.data)).toBe(201);
+    const id = b.data.binding.id as string;
+    modelImpl = () => submit(noop());
+    await tick(30); // flush other open windows first
+    await S.listener.setListenerFolders(id, ["/", "inbox/"]);
+    if (judge) expect((await jsonRequest(app, "PATCH", `/surfaces/bindings/${id}`, { judge }, alice.apiKey)).status).toBe(200);
+    const logged: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => void logged.push(a.map(String).join(" ")));
+    const calls = modelCalls.length;
+    try {
+      modelImpl = answer;
+      await say(channel, "U_BOB", "we agreed the cutover moves to friday after the review meeting PLATYPUSCHAT");
+      await tick(21);
+    } finally {
+      spy.mockRestore();
+      modelImpl = () => submit(noop());
+    }
+    const w = await one("SELECT * FROM surface_windows WHERE binding_id = ? ORDER BY opened_at DESC LIMIT 1", [id]);
+    const run = await one("SELECT * FROM runs WHERE id = ?", [w.run_id]);
+    return { id, w, run, trace: JSON.parse(run.trace), logged: logged.filter((l) => l.includes(w.id)), calls: modelCalls.slice(calls) };
+  }
+
+  it("EX-1..EX-3, EX-7: a finished call with no usable verdict is a failed run that says why, with its tokens and times; the ledger says the same", async () => {
+    const usage = { input_tokens: 3000, output_tokens: 1500 };
+    const cut = await judgeOnce("C420", () => ({ content: [], stop_reason: "max_tokens", usage }));
+    expect(cut.w).toMatchObject({ verdict: "error_schema", reason_code: "output_limit" });
+    expect(cut.run).toMatchObject({ status: "failed", verdict: "error", reason_code: "output_limit" });
+    expect(cut.trace.error).toMatch(/ran out of output tokens.*stop: max_tokens/);
+    expect(cut.trace.usage).toMatchObject({ input_tokens: 3000, output_tokens: 1500 });
+    expect(Date.parse(cut.run.started_at)).toBeLessThanOrEqual(Date.parse(cut.run.finished_at));
+    expect(cut.logged).toHaveLength(1);
+    expect(cut.logged[0]).toMatch(/reason=output_limit .*max_output_tokens=1500 .*output_tokens=1500/);
+    const tr = await jsonRequest(app, "GET", `/ledger/win_${cut.w.id}`, undefined, root.apiKey);
+    expect(tr.data.entry.run).toMatchObject({ outcome: "failed", error: cut.trace.error });
+    expect(tr.data.entry.verdict.reason_code).toBe("output_limit");
+
+    const mute = await judgeOnce("C421", () => ({ content: [{ type: "text", text: "PLATYPUSCHAT is a no" }], stop_reason: "end_turn", usage }));
+    expect(mute.run).toMatchObject({ status: "failed", reason_code: "no_verdict" });
+    expect(mute.trace.error).toMatch(/without submitting a decision.*stop: end_turn/);
+
+    const bad = await judgeOnce("C422", (req) => propose(req, { title: `PLATYPUSCHAT ${"x".repeat(81)}` }));
+    expect(bad.run).toMatchObject({ status: "failed", reason_code: "invalid_output" });
+    expect(bad.trace.error).toBe("The model's decision was invalid. (the title was missing, too short or too long)");
+    expect(bad.logged[0]).toMatch(/rule="title"/);
+
+    // EX-5: neither the chat nor the model's words are recorded anywhere.
+    for (const r of [cut, mute, bad]) expect(JSON.stringify([r.run, r.w, r.logged])).not.toMatch(/PLATYPUS/);
+  });
+
+  it("EX-30: a 🧠 on something with nothing to keep is a normal no-proposal, asked once, and the person is told privately", async () => {
+    setChannel("C429", ["U_ALICE", "U_BOB", "UBOT"]);
+    const b = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: installId, conversation_id: "C429", nest_id: F }, alice.apiKey);
+    expect(b.status, JSON.stringify(b.data)).toBe(201);
+    modelImpl = () => submit(noop());
+    await tick(30);
+    await S.listener.setListenerFolders(b.data.binding.id, ["/", "inbox/"]);
+    const ask = async (text: string, answer: (req: any) => any) => {
+      const ts = await say("C429", "U_BOB", text);
+      const calls = modelCalls.length;
+      const told = slack.ephemerals.length;
+      modelImpl = answer;
+      await send({ type: "reaction_added", user: "U_ALICE", reaction: "brain", item_user: "U_BOB", item: { type: "message", channel: "C429", ts }, event_ts: nextTs() });
+      await tick(21);
+      modelImpl = () => submit(noop());
+      const w = await one("SELECT * FROM surface_windows WHERE binding_id = ? AND forced = 1 ORDER BY opened_at DESC LIMIT 1", [b.data.binding.id]);
+      // The ordinary window of the same message may be judged in this tick too: count the ask's own calls.
+      return { w, calls: modelCalls.slice(calls).filter((c: any) => JSON.stringify(c.messages).includes("(forced)")).length, notes: slack.ephemerals.slice(told).map((e) => e.text).join("\n") };
+    };
+    const hello = await ask("good morning everyone, hope you had a nice weekend", () => submit(noop("chatter")));
+    expect(hello.w).toMatchObject({ verdict: "no_op", reason_code: "chatter" });
+    expect(hello.calls).toBe(1);
+    expect(hello.notes).toMatch(/didn't find a decision, fact or process/);
+    // A suggestion a safety check stops: the person learns why.
+    const team = await ask("we decided the platform team owns the billing cutover", (req) => propose(req, { owner: "The platform team", target_folder: "inbox/" }));
+    expect(team.w).toMatchObject({ verdict: "filtered", reason_code: "owner" });
+    expect(team.notes).toMatch(/owner isn't in this conversation/);
+    // A broken answer: told something went wrong, with no detail.
+    const bad = await ask("we agreed the renewal moves to annual billing today", (req) => propose(req, { title: "x".repeat(81) }));
+    expect(bad.w.verdict).toBe("error_schema");
+    expect(bad.notes).toMatch(/Something went wrong while drafting/);
+    // Never in the channel: only its one notice was posted there.
+    expect(slack.posted.filter((p) => p.channel === "C429").length).toBe(1);
+  });
+
+  describe("EX-35: an answer that breaks a fixable rule is sent back once", () => {
+    const asks = (calls: any[]) => calls.filter((c) => JSON.stringify(c.messages).includes("previous answer could not be used"));
+    /** First answer, then (only when sent back) the second. */
+    const twice = (first: Record<string, unknown>, second: Record<string, unknown>) => (req: any) =>
+      propose(req, JSON.stringify(req.messages).includes("previous answer could not be used") ? second : first);
+    const good = { target_folder: "inbox/", owner: null, due_date: null };
+
+    it("an owner who isn't there: the note is kept without one", async () => {
+      const r = await judgeOnce("C440", twice({ ...good, owner: "The platform team" }, good));
+      expect(r.w.verdict).toBe("proposed");
+      expect(asks(r.calls)).toHaveLength(1);
+      expect(JSON.stringify(asks(r.calls)[0].messages)).toMatch(/owner to null/);
+      expect(r.trace).toMatchObject({ verdict: "propose", repair: "fixed" });
+    });
+    it("a title that is too long is shortened", async () => {
+      const r = await judgeOnce("C441", twice({ ...good, title: "x".repeat(81) }, { ...good, title: "Invoices go out monthly" }));
+      expect(r.w.verdict).toBe("proposed");
+      expect(r.run).toMatchObject({ status: "succeeded", verdict: "propose" });
+      expect(r.trace.repair).toBe("fixed");
+    });
+    it("still broken the second time: blocked as before, after exactly two calls", async () => {
+      const r = await judgeOnce("C442", twice({ ...good, owner: "The platform team" }, { ...good, owner: "Another team" }));
+      expect(r.w).toMatchObject({ verdict: "filtered", reason_code: "owner" });
+      expect(asks(r.calls)).toHaveLength(1);
+      expect(r.trace.repair).toBe("not_fixed");
+    });
+    it("a repair call that fails leaves the first answer's result", async () => {
+      const r = await judgeOnce("C443", (req) => {
+        if (JSON.stringify(req.messages).includes("previous answer could not be used")) throw Object.assign(new Error("slow"), { name: "APIConnectionTimeoutError" });
+        return propose(req, { ...good, owner: "The platform team" });
+      });
+      expect(r.w).toMatchObject({ status: "judged", verdict: "filtered", reason_code: "owner" });
+      expect(r.trace.repair).toBe("not_fixed");
+    });
+    it("something sensitive is never sent back", async () => {
+      const r = await judgeOnce("C444", (req) => propose(req, { ...good, owner: "The platform team", body: "Her salary is 90000 per year." }));
+      expect(r.w).toMatchObject({ verdict: "filtered", reason_code: "sensitive" });
+      expect(asks(r.calls)).toHaveLength(0);
+    });
+  });
+
+  it("EX-6: a valid no_op is still a succeeded run", async () => {
+    const ok = await judgeOnce("C423", () => submit(noop()));
+    expect(ok.run).toMatchObject({ status: "succeeded", verdict: "no_op" });
+    expect(ok.trace.error).toBeUndefined();
+    // Whose key paid, as a metacognition run records it.
+    expect(["own_key", "promptowl_credits"]).toContain(ok.trace.billing);
+  });
+
+  it("EX-4, EX-5: an error with no fixed explanation shows the provider's own words, without secrets or chat text", async () => {
+    const { w, logged } = await failWindow("C424", () => {
+      throw Object.assign(new Error("Unsupported parameter: max_tokens for gpt-5 key sk-abcdefghijklmnop1234 PLATYPUSCHAT"), { status: 400 });
+    });
+    const run = await one("SELECT * FROM runs WHERE id = ?", [w.run_id]);
+    expect(run.reason_code).toBe("model_rejected");
+    expect(JSON.parse(run.trace).error).toMatch(/refused the request\. \(Unsupported parameter: max_tokens for gpt-5/);
+    const lines = logged.filter((l) => l.includes(w.id));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/attempt=1 .*detail="Unsupported parameter/);
+    expect(lines[1]).toMatch(/attempt=2/);
+    expect(JSON.stringify([run, lines])).not.toMatch(/PLATYPUS|abcdefghijklmnop/);
+  });
+
+  it("EX-8, EX-12: saved settings reach the model call and the reservation, and the folders and the tie stay", async () => {
+    const judge = { model: "openai/gpt-5", max_output_tokens: 4000, temperature: 0.5, timeout_seconds: 200 };
+    const reserved: number[] = [];
+    const r = await judgeOnce("C425", (req) => {
+      reserved.push(req.max_tokens);
+      return submit(noop());
+    }, judge);
+    expect(r.calls[0]).toMatchObject({ model: "openai/gpt-5", max_tokens: 4000, temperature: 0.5 });
+    expect(r.trace.model).toBe("openai/gpt-5");
+    expect(S.spend.reservationMicros("openai/gpt-5", 4000)).toBeGreaterThan(S.spend.reservationMicros("openai/gpt-5"));
+    const l = await S.listener.listenerFor(r.id);
+    expect(l).toBeTruthy();
+    expect(S.listener.listenerFolders(l!).folders).toEqual(["/", "inbox/"]);
+    const view = await jsonRequest(app, "GET", `/surfaces/bindings/${r.id}`, undefined, alice.apiKey);
+    expect(view.data.binding.judge).toMatchObject(judge);
+    // A seed re-applied later keeps them.
+    await S.listener.setListenerFolders(r.id, ["inbox/"]);
+    expect((await jsonRequest(app, "GET", `/surfaces/bindings/${r.id}`, undefined, alice.apiKey)).data.binding.judge).toMatchObject(judge);
+  });
+
+  it("EX-9..EX-11: blank keeps today's defaults; out of range, unknown or not an admin is refused and changes nothing; MCP parity", async () => {
+    const r = await judgeOnce("C426", () => submit(noop()));
+    expect(r.calls[0]).toMatchObject({ max_tokens: 1500, temperature: 0 });
+    const url = `/surfaces/bindings/${r.id}`;
+    for (const judge of [{ max_output_tokens: 9000 }, { max_output_tokens: 600.5 }, { temperature: 2 }, { timeout_seconds: 5 }, { model: "bad name!" }, { folders: ["x/"] }, { folders: [] }, { name: "<b>" }, { max_turns: 1 }, { max_items: 4 }, { enabled: true }, { feeds: [] }, "x"]) {
+      expect((await jsonRequest(app, "PATCH", url, { judge }, alice.apiKey)).status, JSON.stringify(judge)).toBe(422);
+    }
+    expect((await jsonRequest(app, "PATCH", url, { judge: { temperature: 1 }, explicit_public_bind: false }, alice.apiKey)).status).toBe(422);
+    expect((await jsonRequest(app, "PATCH", url, { judge: { temperature: 1 } }, bob.apiKey)).status).toBe(403);
+    const unset = { name: null, avatar: null, folders: null, max_turns: null, max_items: null, model: null, max_output_tokens: null, temperature: null, timeout_seconds: null };
+    expect((await jsonRequest(app, "GET", url, undefined, alice.apiKey)).data.binding.judge).toEqual(unset);
+    // The values in use, for the dialog: what the judge call above really used.
+    const inUse = (await jsonRequest(app, "GET", url, undefined, alice.apiKey)).data.binding.judge_defaults;
+    expect(inUse).toMatchObject({ max_output_tokens: r.calls[0].max_tokens, temperature: r.calls[0].temperature, max_turns: 4, max_items: 3, timeout_seconds: 120 });
+    // The configured name; the call itself may carry the gateway's provider prefix.
+    expect(inUse.model).toBe(r.calls[0].model.split("/").pop());
+    expect(inUse.name).toMatch(/^c426 nest agent /);
+    const mcp = await app.request(`/nests/${F}/mcp`, {
+      method: "POST",
+      headers: { ...MCP_HEADERS, Authorization: `Bearer ${alice.apiKey}` },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "context_surfaces_binding_update", arguments: { binding_id: r.id, judge: { max_output_tokens: 2000 } } } }),
+    });
+    expect(mcp.status).toBe(200);
+    expect((await jsonRequest(app, "GET", url, undefined, alice.apiKey)).data.binding.judge).toEqual({ ...unset, max_output_tokens: 2000 });
+    expect((await jsonRequest(app, "PATCH", url, { judge: { max_output_tokens: null } }, alice.apiKey)).data.binding.judge).toEqual(unset);
+  });
+
+  it("EX-13, EX-14: name, folders, steps and suggestions per run take effect, and the listener stays tied", async () => {
+    const r = await judgeOnce("C427", (req) => {
+      const one = propose(req, { title: "Cutover moves to Friday", target_folder: "inbox/", confidence: 0.8 });
+      const item = one.content[0].input.items[0];
+      one.content[0].input.items = [item, { ...item, title: "Billing uses annual plans", summary: "Plans are billed yearly.", body: "Plans are billed yearly.", confidence: 0.95 }];
+      return one;
+    }, { name: "General ears", avatar: "🦉", folders: ["inbox/"], max_turns: 2, max_items: 1 });
+    const l = (await S.listener.listenerFor(r.id))!;
+    expect(l).toBeTruthy();
+    expect(l.persona.name).toBe("General ears");
+    expect(S.listener.listenerFolders(l).folders).toEqual(["inbox/"]);
+    expect(r.calls[0].system).toContain('target_folder must be one of: "inbox/"');
+    expect(JSON.parse(r.w.blocked)).toEqual({ over_limit: 1 });
+    expect(r.w.item_count).toBe(1);
+    // EX-22: the draft names the listener as creator, editor and requester, never its internal address.
+    const made = await one("SELECT i.node_id FROM surface_proposal_items i JOIN surface_proposals p ON p.id = i.proposal_id WHERE p.window_id = ?", [r.w.id]);
+    const doc = await jsonRequest(app, "GET", `/nests/${F}/nodes/${made.node_id}`, undefined, alice.apiKey);
+    expect(doc.status).toBe(200);
+    const shown = doc.data.node ?? doc.data;
+    expect(shown.author_name).toBe("General ears");
+    expect(shown.last_edit.edited_by_system).toBe("General ears");
+    const queue = await jsonRequest(app, "GET", `/nests/${F}/review-queue`, undefined, alice.apiKey);
+    expect(queue.status).toBe(200);
+    expect((queue.data.requests ?? []).find((x: any) => x.nodeId === made.node_id)?.requestedByName).toBe("General ears");
+    // EX-28: an owner edits and approves on a nest with stewardship off; once resolved, a late edit is still refused.
+    const { isStewardshipEnabled, setStewardshipEnabled } = await import("../src/nests/service.js");
+    await setStewardshipEnabled(F, false);
+    // An owner with no reviewer role approves when self-approve is on (Slack checks this before the dialog opens).
+    await db().run("UPDATE nests SET allow_self_approve = 1 WHERE id = ?", [F]);
+    expect(await isStewardshipEnabled(F)).toBe(false);
+    const { updateNode } = await import("../src/nodes/service.js");
+    const reviews = await import("../src/governance/review-service.js");
+    const edited = { title: "Cutover moves to Friday", content: "The cutover is on Friday, as edited." };
+    await updateNode(F, made.node_id, edited, alice.email, { reviewerEdit: true });
+    const ok = await reviews.approve({ nestId: F, nodeId: made.node_id, approvedBy: alice.email, withEdits: true });
+    expect(ok.status).toBe("approved");
+    const live = await jsonRequest(app, "GET", `/nests/${F}/nodes/${made.node_id}`, undefined, alice.apiKey);
+    expect(JSON.stringify(live.data)).toContain("as edited");
+    const late = await updateNode(F, made.node_id, { content: "late" }, alice.email, { reviewerEdit: true }).catch((e: unknown) => e);
+    expect((late as Error).message).toMatch(/review was resolved before your edit/);
+    // EX-29: the person sees the refusal's own words; an internal error stays general.
+    const { refusalText } = await import("../src/surfaces/services/commit-service.js");
+    expect(refusalText(late)).toMatch(/review was resolved/);
+    const { ReviewRefusal } = await import("../src/shared/errors.js");
+    const { approve } = await import("../src/governance/review-service.js");
+    const gone = await approve({ nestId: F, nodeId: made.node_id, approvedBy: alice.email }).catch((e: unknown) => e);
+    expect(gone).toBeInstanceOf(ReviewRefusal);
+    expect(refusalText(gone)).toBe("No pending review for this node");
+    // Plain errors are internal, whatever their shape: a file error carries a path.
+    const { readFileSync } = await import("node:fs");
+    let file: unknown;
+    try {
+      readFileSync("/no/such/nest/secret.md");
+    } catch (e) {
+      file = e;
+    }
+    for (const e of [file, new Error("SQLITE_BUSY: database is locked")]) expect(refusalText(e)).toMatch(/the nest refused the change/);
+    for (const e of [new TypeError("x of undefined"), new Error("Couldn't publish this document: /data/nests/secret"), "boom"]) expect(refusalText(e)).toMatch(/the nest refused the change/);
+    const tr = await jsonRequest(app, "GET", `/ledger/win_${r.w.id}`, undefined, root.apiKey);
+    expect(tr.data.entry.agent.name).toBe("General ears");
+    const roll = await jsonRequest(app, "GET", `/nests/${F}/rollups?${new URLSearchParams({ ...range(), by: "agent", grain: "week" })}`, undefined, root.apiKey);
+    expect(roll.status).toBe(200);
+    expect(roll.data.rows.map((x: any) => x.label)).toContain("General ears");
+
+    // EX-15: with no name of its own, a listener is called by its channel, on every screen.
+    expect((await jsonRequest(app, "PATCH", `/surfaces/bindings/${r.id}`, { judge: { name: null } }, alice.apiKey)).status).toBe(200);
+    const called = `c427 nest agent ${l.node_id.split("-").pop()}`;
+    expect((await jsonRequest(app, "GET", `/ledger/win_${r.w.id}`, undefined, root.apiKey)).data.entry.agent.name).toBe(called);
+    const again = await jsonRequest(app, "GET", `/nests/${F}/rollups?${new URLSearchParams({ ...range(), by: "agent", grain: "week" })}`, undefined, root.apiKey);
+    expect(again.data.rows.map((x: any) => x.label)).toContain(called);
+    const list = await jsonRequest(app, "GET", `/nests/${F}/metacognition`, undefined, alice.apiKey);
+    expect(list.data.agents.find((a: any) => a.node_id === l.node_id).persona.name).toBe(called);
+
+    // Two steps: a third turn is never asked for.
+    const loop = await judgeOnce("C428", () => ({ content: [{ type: "tool_use", id: `t${Math.random()}`, name: "list_nodes", input: { folder: "inbox" } }], stop_reason: "tool_use", usage: { input_tokens: 10, output_tokens: 10 } }), { max_turns: 2 });
+    expect(loop.calls).toHaveLength(2);
+    expect(loop.run).toMatchObject({ status: "failed", reason_code: "no_verdict" });
+    expect(loop.trace.error).toMatch(/stop: turn_limit/);
+
+    // A folder the starter drops later is not brought back by the choice.
+    await S.listener.setListenerFolders(r.id, ["/"]);
+    expect(S.listener.listenerFolders((await S.listener.listenerFor(r.id))!).folders).toEqual([]);
   });
 
   it("a rate limit (429) and a timeout end as model_rate_limited and model_timeout", async () => {

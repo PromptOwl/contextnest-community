@@ -34,7 +34,8 @@ import { track } from "../../services/work.js";
 import { buildManifest, BOT_SCOPES, slackUrls, publicUrlProblem, originMismatch, PUBLIC_URL_SETTING } from "./manifest.js";
 import { verifySlackSignature } from "./verify.js";
 import { normalizeSlack } from "./connector.js";
-import { slackCall } from "./api.js";
+import { slackCall, slackErrorCode, refusedClientPair } from "./api.js";
+import { logCaught } from "../../log.js";
 import { listInstallChannels, channelListFailure } from "./channels.js";
 import { handleCommand, handleInteraction } from "./interactions.js";
 
@@ -72,6 +73,15 @@ function signed(c: C, secret: string | null, raw: string): boolean {
   return verifySlackSignature(secret, c.req.header("x-slack-request-timestamp"), c.req.header("x-slack-signature"), raw);
 }
 
+/** One Slack app per server: a re-OAuth of a connected workspace returns the live install's
+ *  own bot token, so revoking a refused token must skip one a live install still holds. */
+async function liveInstallHolds(team: string, token: string): Promise<boolean> {
+  if (!team) return false;
+  const live = (await getDb().all("SELECT id FROM surface_installs WHERE surface = 'slack' AND team_id = ? AND status = 'active'", [team])) as Array<{ id: string }>;
+  for (const l of live) if ((await getSecret(l.id, "bot_token").catch(() => null)) === token) return true;
+  return false;
+}
+
 /** Map a Slack event to the work it implies; runs after the ack. */
 export async function processSlackEvent(install: InstallRow, payload: Record<string, any>): Promise<void> {
   // S2b: App Home "My pending" is published when the person opens it — never as a nudge.
@@ -85,6 +95,9 @@ export async function processSlackEvent(install: InstallRow, payload: Record<str
   const out = normalizeSlack(payload);
   if (!Array.isArray(out)) {
     if (out.kind === "uninstalled" || out.kind === "tokens_revoked") {
+      // A late Slack retry can carry a teardown from before this install existed
+      // (same app, same team): it is about an older token, not this one.
+      if (Number(payload.event_time) < Math.floor(Date.parse(String(install.created_at)) / 1000)) return;
       await uninstall(install.id, out.kind);
       return;
     }
@@ -274,15 +287,23 @@ slackAdminRoutes.put("/installs/:id/credentials", async (c) => {
   const i = await getInstall(c.req.param("id"));
   if (!i || i.surface !== "slack" || i.mode === "hosted") return c.json({ error: "Not found" }, 404);
   const b = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-  const stored: string[] = [];
-  for (const k of ["client_id", "client_secret", "signing_secret"] as const) {
+  const keys = ["client_id", "client_secret", "signing_secret"] as const;
+  const next: Partial<Record<(typeof keys)[number], string>> = {};
+  for (const k of keys) {
     const v = b[k];
     if (v === undefined) continue;
     if (typeof v !== "string" || !v.trim() || v.length > 300) return c.json({ error: `${k} must be a non-empty string` }, 422);
-    await setSecret(i.id, k, v.trim(), c.get("userId"));
-    stored.push(k);
+    next[k] = v.trim();
   }
-  return c.json({ stored, credentials: await secretPresence(i.id) });
+  // Check the pair with Slack before storing, so a wrong key is caught here, not after the Slack approval.
+  if (next.client_id || next.client_secret) {
+    const id = next.client_id ?? (await getSecret(i.id, "client_id"));
+    const secret = next.client_secret ?? (await getSecret(i.id, "client_secret"));
+    const refused = id && secret ? await refusedClientPair(id, secret) : null;
+    if (refused) return c.json({ error: refused.error, field: refused.field }, 422);
+  }
+  for (const k of keys) if (next[k]) await setSecret(i.id, k, next[k]!, c.get("userId"));
+  return c.json({ stored: Object.keys(next), credentials: await secretPresence(i.id) });
 });
 
 /**
@@ -300,6 +321,7 @@ slackAdminRoutes.get("/installs/:id/channels", async (c) => {
   try {
     return c.json(await listInstallChannels(i));
   } catch (err) {
+    logCaught("channels", err, { install: i.id }, "warn");
     const f = channelListFailure(err);
     if (f.retryAfterSec) c.header("Retry-After", String(f.retryAfterSec));
     return c.json({ error: f.error }, f.status);
@@ -360,6 +382,18 @@ async function pendingHostedInstall(nestId: string, userId: string): Promise<Ins
   );
 }
 
+/** The server's one Slack app: the manifest to create it from and the addresses it must keep. */
+slackAdminRoutes.get("/app", async (c) => {
+  const denied = await assertAdmin(c);
+  if (denied) return denied;
+  const creds = hostedCreds();
+  return c.json({
+    manifest: buildManifest({ baseUrl: config.PUBLIC_BASE_URL, installId: "hosted" }),
+    urls: slackUrls(config.PUBLIC_BASE_URL, "hosted"),
+    credentials: { client_id: !!creds.clientId, client_secret: !!creds.clientSecret, signing_secret: !!creds.signing },
+  });
+});
+
 slackAdminRoutes.get("/hosted/oauth/start", async (c) => {
   if (!hostedEnabled()) return c.json({ error: "Not found" }, 404);
   const denied = await assertAdmin(c);
@@ -390,7 +424,7 @@ slackAdminRoutes.get("/hosted/oauth/self-serve", async (c) => {
   const userId = c.get("userId");
   if (!credentialMayContribute(c)) return c.json({ error: "Connecting Slack needs your own full credential (a browser session)." }, 403);
   const admin = await isOrgAdmin(userId);
-  if (!config.SURFACES_SLACK_SELF_SERVE && !admin) return c.json({ error: "A server admin must turn on self-serve Slack first." }, 403);
+  if (!config.SURFACES_SLACK_SELF_SERVE && !admin) return c.json({ error: "Self-serve Slack is not turned on for this server. Contact your server admin to turn it on." }, 403);
   const nestId = c.req.query("home_nest_id") ?? "";
   const nest = nestId ? ((await getDb().get("SELECT user_id FROM nests WHERE id = ? AND archived_at IS NULL", [nestId])) as { user_id: string } | undefined) : undefined;
   // Your own nest only (a server admin may target any nest, as on the admin path).
@@ -455,6 +489,26 @@ function slackErrorMessage(code: string): string {
   return `Slack returned an error: ${code.slice(0, 100)}. Nothing was connected.${redirect ? ` Check that your Slack app lists exactly ${redirect} under OAuth & Permissions → Redirect URLs, then try again from Setup.` : " Try again from Setup."}`;
 }
 
+/** oauth.v2.access failed: say what to fix and where, by Slack's error code. */
+function exchangeFailed(c: C, code: string, redirect: string) {
+  const where = "Control room → Setup → Slack app (or Server settings → Surfaces)";
+  const link = SETUP_LINK;
+  const tail = "Nothing was connected and no token was kept.";
+  if (code === "invalid_client_id" || code === "bad_client_secret" || code === "invalid_client") {
+    return done(c, 502, `Slack refused the app's Client ID or Client secret. ${tail}`, {}, {
+      steps: [`Copy the Client ID and Client secret from your Slack app's Basic Information page.`, `Save them in ${where}.`, "Open Setup and click Open Slack to approve again."],
+      link,
+    });
+  }
+  if (code === "bad_redirect_uri") {
+    return done(c, 502, `Slack refused the redirect address. ${tail}`, {}, {
+      steps: [`Add ${redirect} under OAuth & Permissions → Redirect URLs in your Slack app.`, "Open Setup and click Open Slack to approve again."],
+      link: SETUP_LINK,
+    });
+  }
+  return done(c, 502, `Slack didn't accept the sign-in (${code}). ${tail} Start again from Setup.`, {}, { link: SETUP_LINK });
+}
+
 /**
  * OAuth v2 callback: state must exist, be unexpired, unused, minted by this
  * session — then it is consumed (compare-and-set) BEFORE the code is
@@ -501,14 +555,19 @@ slackAdminRoutes.get("/oauth/callback", async (c) => {
       code,
       redirect_uri: slackUrls(config.PUBLIC_BASE_URL, hosted ? "hosted" : install.id).redirect,
     });
-  } catch {
-    return done(c, 502, "Slack didn't accept the sign-in. No token was kept.");
+  } catch (err) {
+    logCaught("oauth", err, { install: install.id });
+    // A hosted attempt is cheap to restart: close it so a stale one is never reused.
+    // A manifest install keeps its saved values, so the admin fixes only the wrong one.
+    if (hosted) await getDb().run("UPDATE surface_installs SET status = 'disconnected', updated_at = ? WHERE id = ? AND status = 'pending'", [iso(Date.now()), install.id]);
+    return exchangeFailed(c, slackErrorCode(err), slackUrls(config.PUBLIC_BASE_URL, hosted ? "hosted" : install.id).redirect);
   }
   const token = typeof res.access_token === "string" ? res.access_token : "";
   const team = res.team?.id ? String(res.team.id) : "";
   const enterprise = res.enterprise?.id ? String(res.enterprise.id) : null;
   const revoke = async () => {
-    if (token) await slackCall("auth.revoke", {}, { token }).catch(() => {});
+    if (!token || (await liveInstallHolds(team, token))) return;
+    await slackCall("auth.revoke", {}, { token }).catch((err) => logCaught("oauth", err, { install: install.id, call: "auth.revoke" }, "warn"));
   };
   // A refusal revokes only the token Slack just issued. A live install keeps
   // its own secrets and stays as it was (round 2, L5); only an install that
@@ -517,7 +576,7 @@ slackAdminRoutes.get("/oauth/callback", async (c) => {
     await revoke();
     if (install.status === "pending") {
       const r = await getDb().run("UPDATE surface_installs SET status = 'disconnected', updated_at = ? WHERE id = ? AND status = 'pending'", [iso(Date.now()), install.id]);
-      if (r.changes) await deleteSecrets(install.id).catch(() => 0);
+      if (r.changes) await deleteSecrets(install.id).catch((err) => logCaught("oauth", err, { install: install.id, call: "delete_secrets" }));
     }
     return done(c, status, `${why} ${REFUSED_NO_TOKEN}`);
   };
@@ -541,12 +600,14 @@ slackAdminRoutes.get("/oauth/callback", async (c) => {
       [tenantKey, team, enterprise, res.bot_user_id ? String(res.bot_user_id) : null, iso(Date.now()), install.id],
     );
     if (r.changes === 0) return refuse(409, "This install changed while connecting.");
-  } catch {
+  } catch (err) {
+    // Usually the tenant_key unique index (a race with another install); the line says if it was not.
+    logCaught("oauth", err, { install: install.id, call: "activate" }, "warn");
     return refuse(409, "This Slack workspace is already connected to Nest.");
   }
   await setSecret(install.id, "bot_token", token, row.user_id);
   if (res.authed_user?.id) {
-    await completeInstallerLink({ installId: install.id, authedUserId: String(res.authed_user.id), communityUserId: row.user_id }).catch(() => {});
+    await completeInstallerLink({ installId: install.id, authedUserId: String(res.authed_user.id), communityUserId: row.user_id }).catch((err) => logCaught("identity", err, { install: install.id, call: "installer_link" }));
   }
   const back = safeReturnPath(row.return_to);
   if (back && !(c.req.header("Accept") || "").includes("application/json")) {

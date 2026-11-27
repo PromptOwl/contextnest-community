@@ -3,10 +3,11 @@
  * failure. Slack shows its own error page for a redirect_uri it doesn't know
  * and never comes back, so the server must refuse before sending anyone there.
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { randomBytes } from "crypto";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest, resetAuthRateLimit } from "./helpers.js";
-import { publicUrlProblem, PUBLIC_URL_SETTING } from "../src/surfaces/adapters/slack/manifest.js";
+import { BOT_EVENTS, BOT_SCOPES, publicUrlProblem, PUBLIC_URL_SETTING } from "../src/surfaces/adapters/slack/manifest.js";
+import { SLACK_BOT_EVENTS, SLACK_BOT_SCOPES } from "../ui/src/lib/control-room-setup.js";
 
 const BASE = "https://nest.ready.test";
 let env: { cleanup: () => Promise<void> };
@@ -42,7 +43,11 @@ beforeAll(async () => {
   await resetAuthRateLimit();
   const nest = (await jsonRequest(app, "POST", "/nests", { name: "Ready Nest" }, root.apiKey)).data.nest.id;
   installId = (await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: nest }, root.apiKey)).data.install_id;
-  await jsonRequest(app, "PUT", `/surfaces/slack/installs/${installId}/credentials`, { client_id: "cid", client_secret: "cs", signing_secret: "sig" }, root.apiKey);
+  // Saving checks the keys with Slack: answer as Slack does for a good pair, without the network.
+  vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ ok: false, error: "invalid_code" }), { headers: { "content-type": "application/json" } }));
+  const saved = await jsonRequest(app, "PUT", `/surfaces/slack/installs/${installId}/credentials`, { client_id: "cid", client_secret: "cs", signing_secret: "sig" }, root.apiKey);
+  vi.unstubAllGlobals();
+  expect(saved.status).toBe(200);
   cookie = await login(root.email);
 });
 
@@ -203,5 +208,12 @@ describe("hosted OAuth start by a server admin", () => {
     } finally {
       for (const k of Object.keys(HOSTED)) delete process.env[k];
     }
+  });
+});
+
+describe("the hosted Slack guide (Server settings → Surfaces)", () => {
+  it("lists exactly the scopes and events the manifest asks for", () => {
+    expect(SLACK_BOT_SCOPES).toEqual(BOT_SCOPES);
+    expect(SLACK_BOT_EVENTS).toEqual(BOT_EVENTS);
   });
 });

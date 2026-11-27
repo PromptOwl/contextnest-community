@@ -3,6 +3,7 @@
  * disk + DB stay in lockstep across both surfaces. Handlers stay thin
  * (auth, parse, response shape); this module owns create/update/list.
  */
+import { personaNames } from "../metacognition/managed.js";
 import { adminFolderRefusal, adminFolderPathRefusal } from "../surfaces/admin-folders.js";
 import { surfaceEditsHiddenFor, isHidden as isSurfaceHidden, HIDE_ALL as SURFACE_HIDE_ALL } from "../surfaces/draft-visibility.js";
 import { approvedReadableBody } from "./readable-body.js";
@@ -130,6 +131,7 @@ import {
   type TaskFields,
   type TaskFieldsPatch,
 } from "./task-fields.js";
+import { moveDetail, recordNodeChange, tagChangeDetail } from "./node-changes.js";
 import { openBlockerCounts } from "./relations.js";
 import {
   addComputedFields,
@@ -547,6 +549,8 @@ export interface NodeResponse extends TaskFields {
   /** Creator email — frontmatter author when present, else the author of the
    *  node's first version. Null for old imported docs with neither. */
   author?: string | null;
+  /** The creator's name when it is an agent (its address means nothing to a reader). */
+  author_name?: string;
   /** Everyone else with a hand in the doc: distinct node_versions authors
    *  UNION document-scope grant holders, minus the author, sorted. */
   collaborators?: string[];
@@ -1358,6 +1362,7 @@ export async function listNodesForCaller(
         frontmatterAuthor: d.frontmatter.author ?? null,
       })),
     );
+  const agentNames = await personaNames([...(authorship?.values() ?? [])].map((a) => a.author));
   // Who last edited each row — the human and the agent — for the Documents
   // rows and context_list (po-1213). One query for the list. Same gate as the
   // roster, plus headless keys: an access key reads content, not people.
@@ -1380,6 +1385,7 @@ export async function listNodesForCaller(
       const people = authorship?.get(doc.id);
       if (people) {
         r.author = people.author;
+        if (people.author && agentNames.has(people.author)) r.author_name = agentNames.get(people.author);
         r.collaborators = people.collaborators;
       }
       const last = lastEdits?.get(doc.id);
@@ -3423,7 +3429,9 @@ export async function updateNode(
       // the edit lands as a new draft version and the open review repoints to
       // it (see repointPendingReview below), so the steward reviews the final
       // edited version without the author having to withdraw and resubmit.
-      const pendingReview = hasStewards
+      // A reviewer's edit always revises an open review, and a Slack suggestion
+      // opens one on a nest with stewardship off too.
+      const pendingReview = hasStewards || opts.reviewerEdit
         ? await getPendingReview(nestId, nodeId)
         : null;
       // A reviewer's approve-with-edits revises the submission the same way.
@@ -3575,6 +3583,19 @@ export async function updateNode(
         responseVersion = publishedVersion;
       }
 
+      const retagged = patch.tags ? tagChangeDetail(priorTags, currentTags) : null;
+      if (retagged) {
+        // The write already landed: a missing history line must not fail it.
+        await recordNodeChange(getDb(), {
+          nestId,
+          nodeId,
+          kind: "tags_changed",
+          actor: userEmail,
+          detail: retagged,
+          client: patch.client,
+        }).catch((err) => console.error("[node-changes] tag change not recorded", nestId, nodeId, err));
+      }
+
       const nextAssignee = taskFieldsOf(node.frontmatter.metadata).assignee ?? null;
       // Only a published edit notifies: a drafted assignment may be rejected.
       // Approving that draft later doesn't notify either (known gap).
@@ -3687,6 +3708,8 @@ export const NODE_KEYED_TABLES = [
   ["metacognition_agents", "node_id"],
   // Agent/person interactions logged on a task (migration 064).
   ["task_activity", "node_id"],
+  // Who moved it and who changed its tags (migration 102).
+  ["node_changes", "node_id"],
   // Document pins (CU-wdqcq02crw, migration 071) — editorial and personal. A
   // delete takes them with it (no pin on a document that is gone, or on the
   // next one to take its id); a move carries them along.
@@ -3902,6 +3925,13 @@ async function moveNodeInner(
     await db.transaction(async (tx) => {
       await rewriteNodeKeyedRows(tx, nestId, nodeId, newId);
       await rewriteNodeKeyedRows(tx, nestId, oldDerived, newDerived);
+      await recordNodeChange(tx, {
+        nestId,
+        nodeId: newId,
+        kind: "moved",
+        actor: userEmail,
+        detail: moveDetail(nodeId, newId),
+      });
       await tx.run(
         "UPDATE runs SET agent_node = ? WHERE nest_id = ? AND agent_node = ?",
         [newId, nestId, nodeId],
@@ -4097,6 +4127,17 @@ async function assertNotArchived(nestId: string, nodeId: string): Promise<void> 
 /** Archiving is a steward's call: nest owners, admins and reviewers of this node. */
 export async function canArchiveNode(nestId: string, nodeId: string, userEmail: string): Promise<boolean> {
   return canApproveWith(await resolveUserRoles(nestId, userEmail, { nodeId }));
+}
+
+/** Archived, and not this caller's to restore: reads by id answer as a miss. */
+export async function isArchivedForCaller(nestId: string, nodeId: string, userEmail: string): Promise<boolean> {
+  let node: ContextNode;
+  try {
+    node = await (await engineCache.get(nestId)).storage.readDocument(nodeId);
+  } catch {
+    return false; // no document: each read answers that its own way
+  }
+  return isArchived(node) && !(await canArchiveNode(nestId, nodeId, userEmail));
 }
 
 /**

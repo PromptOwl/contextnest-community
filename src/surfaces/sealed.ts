@@ -15,6 +15,7 @@
  * which only ever narrows a server admin's access for that call.
  */
 import { getDb } from "../db/client.js";
+import { logCaught } from "./log.js";
 
 export interface SealedNest {
   ownerId: string;
@@ -36,7 +37,9 @@ export async function boundNest(nestId: string): Promise<boolean> {
     return !!(await getDb().get("SELECT 1 AS x FROM surface_bindings WHERE nest_id = ? AND status <> 'removed' LIMIT 1", [nestId]));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return !/no such table:\s*surface_bindings\b|relation "surface_bindings" does not exist/i.test(msg);
+    if (/no such table:\s*surface_bindings\b|relation "surface_bindings" does not exist/i.test(msg)) return false;
+    logCaught("guard", err, { nest: nestId, call: "bound_nest" }); // failing closed
+    return true;
   }
 }
 
@@ -53,7 +56,7 @@ export async function sealedNest(nestId: string): Promise<SealedNest | null> {
     return { ownerId: r.owner_id, ownerEmail: r.owner_email ?? UNKNOWN.ownerEmail };
   } catch (err) {
     if (missingSealedTable(err instanceof Error ? err.message : String(err))) return null;
-    console.error("[surfaces] sealed-nest lookup failed; failing closed (1)");
+    logCaught("guard", err, { nest: nestId, call: "sealed_nest" }); // failing closed
     return UNKNOWN;
   }
 }
@@ -85,7 +88,9 @@ export async function ownsSealedNest(userId: string): Promise<boolean> {
   try {
     return !!(await getDb().get("SELECT 1 AS x FROM surface_personal_nests WHERE community_user_id = ? AND sealed = 1 LIMIT 1", [userId]));
   } catch (err) {
-    return !missingSealedTable(err instanceof Error ? err.message : String(err));
+    if (missingSealedTable(err instanceof Error ? err.message : String(err))) return false;
+    logCaught("guard", err, { user: userId, call: "owns_sealed_nest" }); // failing closed
+    return true;
   }
 }
 
@@ -116,8 +121,8 @@ export async function auditSealedRefusal(nestId: string, userId: string): Promis
        ON CONFLICT (nest_id, user_id, day) DO UPDATE SET refused = surface_sealed_access_log.refused + 1`,
       [nestId, userId, day, new Date().toISOString()],
     );
-  } catch {
-    /* the audit never breaks the refusal */
+  } catch (err) {
+    logCaught("guard", err, { nest: nestId, call: "sealed_refusal_audit" }, "warn"); // the audit never breaks the refusal
   }
 }
 
@@ -126,6 +131,8 @@ export async function anySealedNest(): Promise<boolean> {
   try {
     return !!(await getDb().get("SELECT 1 AS x FROM surface_personal_nests WHERE sealed = 1 LIMIT 1", []));
   } catch (err) {
-    return !missingSealedTable(err instanceof Error ? err.message : String(err));
+    if (missingSealedTable(err instanceof Error ? err.message : String(err))) return false;
+    logCaught("guard", err, { call: "any_sealed_nest" }); // failing closed
+    return true;
   }
 }

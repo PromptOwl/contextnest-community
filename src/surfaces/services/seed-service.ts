@@ -48,11 +48,16 @@ import { getApprovedVersion, getCurrentVersion } from "../../governance/version-
 import { reconstructApproved } from "../../governance/approved-body.js";
 import { getInstructions, writeInstructions } from "../../nests/instructions-service.js";
 import { submitForReview } from "../../governance/review-service.js";
+import { cleanConfig } from "../../nests/board-service.js";
+import { nestTaskRules } from "../../nests/service.js";
+import { NEW_NEST_STAGE_ORDER, newNestTaskRules, parseTaskRules, serializeTaskRules } from "../../nodes/task-rules.js";
 import {
   CONTEXT_TARGET,
   ROLE,
+  STAGE_NAMESPACE,
   SeedInvalidError,
   assertSeedSize,
+  boardConfigFor,
   decideItem,
   definitionHash,
   normBody,
@@ -60,6 +65,9 @@ import {
   seedHash,
   seedOrigin,
   type ItemAction,
+  type SeedAgent,
+  type SeedBoard,
+  type SeedChannel,
   type SeedManifest,
   type SeedNodeContent,
 } from "./seed-format.js";
@@ -72,6 +80,7 @@ import { safeMembers } from "./members.js";
 import { getProfile } from "./identity-service.js";
 import { recordNotice } from "./notices.js";
 import { sealedNest } from "../sealed.js";
+import { logCaught } from "../log.js";
 
 export const CONTEXT_LABEL = "CONTEXT.md";
 const CLAIM_MS = 5 * 60_000;
@@ -108,9 +117,12 @@ export interface SeedRef {
 }
 
 export interface ApplyItem {
-  kind: "folder" | "node" | "context" | "definition";
+  /** board / channel / task_rules: a recipe's boards, team chat channels and the nest's task stages (PO-1411). */
+  kind: "folder" | "node" | "context" | "definition" | "board" | "channel" | "task_rules";
   target: string;
   action: ItemAction;
+  /** Why an item was skipped (a channel where team chat is off). */
+  note?: string;
   /** A document that landed as a draft for review (a governed nest), not published. */
   draft?: true;
   /** dry run only: what would be written. */
@@ -134,7 +146,13 @@ export interface ApplyResult {
     bindings_configured: number;
   };
   org_mirror: { people: number; areas: number; skipped: string | null } | null;
+  /** Agents the seed suggests hiring (never hired by apply): they show as agent recommendations. */
+  suggested_agents: SeedAgent[];
 }
+
+/** The task-rules item's target: the one stage set a seed may give the nest. */
+export const TASK_STAGES_TARGET = "stages";
+export const CHAT_OFF_NOTE = "Team chat is off for this nest, so its channels were not created. Turn team chat on and apply the seed again.";
 
 const iso = () => new Date().toISOString();
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
@@ -224,7 +242,8 @@ async function approvedNode(libraryNestId: string, nodeId: string): Promise<Seed
     const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(raw);
     const title = fm ? (/^title:\s*(.+)$/m.exec(fm[1])?.[1] ?? "").trim().replace(/^["']|["']$/g, "") : "";
     return { title, body: normBody(bodyOnly(nodeId, raw)) };
-  } catch {
+  } catch (err) {
+    logCaught("seed", err, { nest: libraryNestId, call: "approved_node" }, "warn");
     return null;
   }
 }
@@ -330,6 +349,35 @@ export async function listSeedsFor(userId: string): Promise<SeedRef[]> {
     try {
       const s = loadBundled(id);
       if (s) out.push(refOf(s));
+    } catch (err) {
+      logCaught("seed", err, { seed: id, call: "bundled_invalid" }); // a bundled seed should always load: not offered
+    }
+  }
+  for (const lib of (await getSettings()).seed_library_nests) {
+    if (!(await libraryReadable(lib, userId))) continue;
+    const idx = await libraryIndex(lib, userId);
+    for (const id of [...idx.ids.keys()].sort()) {
+      try {
+        const s = await loadLibrary(lib, id, userId);
+        if (s) out.push(refOf(s));
+      } catch (err) {
+        logCaught("seed", err, { nest: lib, seed: id, call: "library_invalid" }, "warn"); // not offered
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Every seed this caller may apply that is a recipe (PO-1411): bundled, then
+ * governed libraries they can read. Invalid seeds are left out, as in listSeedsFor.
+ */
+export async function listRecipeSeedsFor(userId: string): Promise<LoadedSeed[]> {
+  const out: LoadedSeed[] = [];
+  for (const id of bundledSeedIds()) {
+    try {
+      const s = loadBundled(id);
+      if (s?.manifest.recipe) out.push(s);
     } catch {
       /* an invalid bundled seed is not offered */
     }
@@ -340,10 +388,28 @@ export async function listSeedsFor(userId: string): Promise<SeedRef[]> {
     for (const id of [...idx.ids.keys()].sort()) {
       try {
         const s = await loadLibrary(lib, id, userId);
-        if (s) out.push(refOf(s));
+        if (s?.manifest.recipe) out.push(s);
       } catch {
         /* invalid: not offered */
       }
+    }
+  }
+  return out;
+}
+
+/** The agents every seed applied to this nest suggests (for the C10 recommendations), read with the caller's access. */
+export async function suggestedAgentsFor(nestId: string, userId: string): Promise<SeedAgent[]> {
+  const rows = (await getDb().all("SELECT seed_id, library_nest_id FROM surface_seed_applications WHERE nest_id = ? ORDER BY applied_at, seed_id", [nestId])) as Array<{
+    seed_id: string;
+    library_nest_id: string | null;
+  }>;
+  const out: SeedAgent[] = [];
+  for (const r of rows) {
+    try {
+      const s = await loadSeed({ seedId: r.seed_id, libraryNestId: r.library_nest_id, userId });
+      for (const a of s.manifest.agents) if (!out.some((o) => o.handle === a.handle)) out.push(a);
+    } catch {
+      /* a seed the caller can no longer read suggests nothing */
     }
   }
   return out;
@@ -421,8 +487,8 @@ async function configureNestListeners(nestId: string): Promise<number> {
   for (const r of rows) {
     try {
       if (await configureListenerFromSeeds(r.id)) n++;
-    } catch {
-      /* one bad listener doesn't stop the others */
+    } catch (err) {
+      logCaught("seed", err, { nest: nestId, binding: r.id, call: "configure_listener" }); // one bad listener doesn't stop the others
     }
   }
   return n;
@@ -449,7 +515,7 @@ async function renew(nestId: string, token: string): Promise<boolean> {
 async function release(nestId: string, token: string): Promise<void> {
   await getDb()
     .run("DELETE FROM surface_seed_claims WHERE nest_id = ? AND token = ?", [nestId, token])
-    .catch(() => undefined);
+    .catch((err) => logCaught("seed", err, { nest: nestId, call: "release_claim" }, "warn"));
 }
 
 interface ItemRecord {
@@ -540,6 +606,13 @@ interface Plan {
   seq?: number;
   title?: string;
   body?: string;
+  /** board: the row as checked. */
+  board?: BoardRow | null;
+  /** task_rules: the stored rules as checked, and the stages to set. */
+  rulesRaw?: string | null;
+  stages?: string[];
+  /** channel: team chat is off, so it is reported and not written. */
+  skipped?: true;
 }
 
 async function plan(nestId: string, seed: LoadedSeed, upgrade: boolean): Promise<Plan[]> {
@@ -596,7 +669,88 @@ async function plan(nestId: string, seed: LoadedSeed, upgrade: boolean): Promise
     const decision = decideItem({ present: body !== null, recordedHash: rec?.seed_hash ?? null, currentHash: body === null ? null : seedHash(body), seedHash: want, ...common(rec) });
     out.push({ kind: "node", target: id, decision, rec, want, head, title: c.title, body: c.body });
   }
+  for (const b of m.boards) out.push(await planBoard(nestId, b, common));
+  const stages = m.boards.find((b) => b.task_stages);
+  if (stages) out.push(await planTaskStages(nestId, stages, common));
+  if (m.channels.length) {
+    const chatOn = await chatEnabled(nestId);
+    for (const ch of m.channels) out.push(await planChannel(nestId, ch, chatOn, common));
+  }
   return out;
+}
+
+type Common = (rec: ItemRecord | null) => { recordedVersion: number | null; seedVersion: number; upgrade: boolean };
+
+/** A board's hash: its name and its stored config, exactly as the boards table holds them. */
+const boardHash = (name: string, configJson: string) => sha(`${name}\n${configJson}`);
+const boardWant = (b: SeedBoard) => boardHash(b.name, JSON.stringify(cleanConfig(boardConfigFor(b))));
+
+async function planBoard(nestId: string, b: SeedBoard, common: Common): Promise<Plan> {
+  const rec = await recorded(nestId, "board", b.name);
+  const want = boardWant(b);
+  const row = rec?.item_key
+    ? (((await getDb().get("SELECT id, name, config_json FROM boards WHERE id = ? AND nest_id = ?", [rec.item_key, nestId])) as BoardRow | undefined) ?? null)
+    : null;
+  // Never written by this seed: a shared board of that name is a person's own.
+  const sameName = !rec
+    ? await getDb().get("SELECT id FROM boards WHERE nest_id = ? AND private = 0 AND LOWER(name) = LOWER(?)", [nestId, b.name])
+    : undefined;
+  const decision = decideItem({
+    present: !!row || !!sameName,
+    recordedHash: rec ? rec.seed_hash : null,
+    currentHash: row ? boardHash(row.name, row.config_json) : sameName ? "" : null,
+    seedHash: want,
+    ...common(rec),
+  });
+  return { kind: "board", target: b.name, decision, rec, want, board: row, title: b.name, body: b.stages.join(" → ") };
+}
+
+/** The part of the task rules a seed sets: the stage columns' order and where a new task lands. */
+const stagesOf = (r: { stage_order: string[]; default_stage_tag: string | null }) => JSON.stringify({ stage_order: r.stage_order, default_stage_tag: r.default_stage_tag });
+const stagesWant = (b: SeedBoard) => sha(stagesOf({ stage_order: b.stages, default_stage_tag: `${STAGE_NAMESPACE}:${b.stages[0]}` }));
+
+async function planTaskStages(nestId: string, b: SeedBoard, common: Common): Promise<Plan> {
+  const rec = await recorded(nestId, "task_rules", TASK_STAGES_TARGET);
+  const raw = (await getDb().get("SELECT name, task_rules FROM nests WHERE id = ?", [nestId])) as { name: string; task_rules: string | null } | undefined;
+  const rules = await nestTaskRules(nestId);
+  const want = stagesWant(b);
+  // A nest whose stages are still a new nest's defaults has none of its own yet.
+  const fresh = newNestTaskRules(raw?.name ?? "");
+  const untouched =
+    !raw?.task_rules ||
+    (JSON.stringify(rules.stage_order) === JSON.stringify(NEW_NEST_STAGE_ORDER) && rules.default_stage_tag === fresh.default_stage_tag);
+  const decision = decideItem({
+    present: rec ? true : !untouched,
+    recordedHash: rec?.seed_hash ?? null,
+    currentHash: sha(stagesOf(rules)),
+    seedHash: want,
+    ...common(rec),
+  });
+  return { kind: "task_rules", target: TASK_STAGES_TARGET, decision, rec, want, rulesRaw: raw?.task_rules ?? null, stages: b.stages, title: b.name, body: b.stages.join(" → ") };
+}
+
+async function chatEnabled(nestId: string): Promise<boolean> {
+  // Loaded on use: the chat modules sit above the seed engine.
+  const { nestChatEnabled } = await import("../../chat/settings.js");
+  return nestChatEnabled(nestId);
+}
+
+async function planChannel(nestId: string, ch: SeedChannel, chatOn: boolean, common: Common): Promise<Plan> {
+  const rec = await recorded(nestId, "channel", ch.name);
+  const want = sha(ch.name);
+  if (!chatOn) return { kind: "channel", target: ch.name, decision: "unchanged", rec, want, skipped: true, title: `#${ch.name}`, body: ch.purpose };
+  const { channelIdFor } = await import("../../channels/channel-service.js");
+  const { readChannelDoc } = await import("../../channels/channel-node.js");
+  const present = !!(await readChannelDoc(nestId, channelIdFor(ch.name)));
+  // A channel carries no seed text the seed could update: its name is the item.
+  const decision = decideItem({ present, recordedHash: rec?.seed_hash ?? null, currentHash: present ? (rec?.seed_hash ?? "") : null, seedHash: want, ...common(rec) });
+  return { kind: "channel", target: ch.name, decision, rec, want, title: `#${ch.name}`, body: ch.purpose };
+}
+
+interface BoardRow {
+  id: string;
+  name: string;
+  config_json: string;
 }
 
 const plannedAction = (d: Plan["decision"]): ItemAction => (d === "updated" ? "update" : d);
@@ -613,7 +767,8 @@ async function planOnly(input: ApplyInput, seed: LoadedSeed): Promise<ApplyResul
     items: plans.map((p) => ({
       kind: p.kind,
       target: p.target,
-      action: plannedAction(p.decision),
+      action: p.skipped ? ("skipped" as const) : plannedAction(p.decision),
+      ...(p.skipped ? { note: CHAT_OFF_NOTE } : {}),
       ...(p.title !== undefined ? { title: p.title } : {}),
       ...(p.body !== undefined ? { excerpt: excerpt(p.body) } : {}),
     })),
@@ -626,6 +781,7 @@ async function planOnly(input: ApplyInput, seed: LoadedSeed): Promise<ApplyResul
       bindings_configured: 0,
     },
     org_mirror: null,
+    suggested_agents: m.agents,
   };
 }
 
@@ -643,11 +799,15 @@ async function applyClaimed(input: ApplyInput, seed: LoadedSeed, email: string, 
   const contentOf = new Map(m.nodes.map((n) => [n.target === CONTEXT_TARGET ? CONTEXT_LABEL : `nodes/${n.target}`, seed.contents.get(n.id)!]));
 
   for (const p of plans) {
+    if (p.skipped) {
+      items.push({ kind: p.kind, target: p.target, action: "skipped", note: CHAT_OFF_NOTE });
+      continue;
+    }
     let action: ItemAction = p.decision;
     try {
       if (p.decision === "create" || p.decision === "updated") {
         await seedTestHooks.beforeWrite?.(p.kind, p.target);
-        action = await writeItem(nestId, m, origin, email, p, contentOf, client);
+        action = await writeItem(nestId, m, origin, email, p, contentOf, client, input.actorUserId);
       } else if (p.decision === "unchanged" && p.rec && upgrade) {
         await record(nestId, p.kind, p.target, m.id, origin, p.rec.seed_hash, p.rec.item_key);
       } else if (p.decision === "unchanged" && !p.rec && p.kind === "folder") {
@@ -706,6 +866,7 @@ async function applyClaimed(input: ApplyInput, seed: LoadedSeed, email: string, 
       bindings_configured: configured,
     },
     org_mirror: orgMirror,
+    suggested_agents: m.agents,
   };
 }
 
@@ -722,7 +883,11 @@ async function writeItem(
   p: Plan,
   contentOf: Map<string, SeedNodeContent>,
   client: (hash: string) => Record<string, string>,
+  actorUserId: string,
 ): Promise<ItemAction> {
+  if (p.kind === "board") return writeBoard(nestId, m, origin, p, actorUserId);
+  if (p.kind === "task_rules") return writeTaskStages(nestId, m, origin, p);
+  if (p.kind === "channel") return writeChannel(nestId, m, origin, email, p, actorUserId);
   if (p.kind === "folder") {
     await createEmptyFolder(nestId, p.target.replace(/\/$/, ""));
     await record(nestId, "folder", p.target, m.id, origin, p.want, null);
@@ -781,6 +946,66 @@ async function writeItem(
   }
   await record(nestId, "node", p.target, m.id, origin, seedHash((await currentBody(nestId, p.target)) ?? c.body), null);
   return p.decision === "create" ? "created" : "updated";
+}
+
+async function writeBoard(nestId: string, m: SeedManifest, origin: string, p: Plan, actorUserId: string): Promise<ItemAction> {
+  const b = m.boards.find((x) => x.name === p.target)!;
+  const configJson = JSON.stringify(cleanConfig(boardConfigFor(b)));
+  if (p.decision === "create") {
+    const { createBoard } = await import("../../nests/board-service.js");
+    const board = await createBoard(nestId, actorUserId, { name: b.name, config: boardConfigFor(b) });
+    // createBoard numbers a taken name ("X 2"): a person made one meanwhile — theirs stays, ours goes.
+    if (board.name !== b.name) {
+      await getDb().run("DELETE FROM boards WHERE id = ? AND nest_id = ?", [board.id, nestId]);
+      return "kept_human_edit";
+    }
+    await record(nestId, "board", b.name, m.id, origin, boardHash(board.name, JSON.stringify(board.config)), board.id);
+    return "created";
+  }
+  // Compare-and-set against the row plan() checked: a change in between is a person's.
+  const row = p.board!;
+  const r = await getDb().run("UPDATE boards SET name = ?, config_json = ?, updated_at = ? WHERE id = ? AND nest_id = ? AND name = ? AND config_json = ?", [
+    b.name,
+    configJson,
+    iso().replace("T", " ").slice(0, 19),
+    row.id,
+    nestId,
+    row.name,
+    row.config_json,
+  ]);
+  if (r.changes === 0) return "kept_human_edit";
+  await record(nestId, "board", b.name, m.id, origin, boardHash(b.name, configJson), row.id);
+  return "updated";
+}
+
+async function writeTaskStages(nestId: string, m: SeedManifest, origin: string, p: Plan): Promise<ItemAction> {
+  const stages = p.stages!;
+  const raw = (await getDb().get("SELECT name FROM nests WHERE id = ?", [nestId])) as { name: string } | undefined;
+  const base = p.rulesRaw ? parseTaskRules(p.rulesRaw) : newNestTaskRules(raw?.name ?? "");
+  const next = {
+    ...base,
+    exclusive_namespaces: [...new Set([...base.exclusive_namespaces, STAGE_NAMESPACE])],
+    default_stage_tag: `${STAGE_NAMESPACE}:${stages[0]}`,
+    stage_order: [...stages],
+  };
+  const r = await getDb().run("UPDATE nests SET task_rules = ? WHERE id = ? AND COALESCE(task_rules, '') = ?", [serializeTaskRules(next), nestId, p.rulesRaw ?? ""]);
+  if (r.changes === 0) return "kept_human_edit";
+  await record(nestId, "task_rules", TASK_STAGES_TARGET, m.id, origin, sha(stagesOf(next)), null);
+  return p.decision === "create" ? "created" : "updated";
+}
+
+async function writeChannel(nestId: string, m: SeedManifest, origin: string, email: string, p: Plan, actorUserId: string): Promise<ItemAction> {
+  const ch = m.channels.find((x) => x.name === p.target)!;
+  if (p.decision !== "create") return "unchanged"; // a channel has nothing to upgrade
+  const { createChannel } = await import("../../channels/channel-service.js");
+  try {
+    await createChannel({ nestId, userId: actorUserId, userEmail: email, client: { agent: "surfaces-seed" } }, { name: ch.name, purpose: ch.purpose });
+  } catch (err) {
+    if (err instanceof ConflictError) return "kept_human_edit"; // made by a person meanwhile
+    throw err;
+  }
+  await record(nestId, "channel", ch.name, m.id, origin, p.want, null);
+  return "created";
 }
 
 // ─── org mirror (AC-SEED-07) ────────────────────────────────────────────────
@@ -862,7 +1087,10 @@ async function proposeOrgMirror(nestId: string, m: SeedManifest, email: string, 
         [install.id, mem.surface_user_id],
       )) as { community_user_id: string } | undefined;
       if (!link || people.has(link.community_user_id)) continue;
-      const profile = await getProfile(install.id, mem.surface_user_id).catch(() => null);
+      const profile = await getProfile(install.id, mem.surface_user_id).catch((err) => {
+        logCaught("seed", err, { install: install.id, call: "profile" }, "warn");
+        return null;
+      });
       const user = (await getDb().get("SELECT name FROM users WHERE id = ?", [link.community_user_id])) as { name?: string | null } | undefined;
       const display = cleanName(profile?.display_name) ?? cleanName(user?.name);
       if (display) people.set(link.community_user_id, { name: display, installId: install.id, group });
@@ -920,7 +1148,13 @@ export async function listSeedsForNest(nestId: string, actorUserId: string): Pro
 /** For the binding preview (AC-SEED-09): does the nest have a seed, and what could the caller apply? */
 export async function seedPreview(nestId: string, actorUserId: string): Promise<{ no_seed: boolean; seeds: SeedRef[] }> {
   const has = await getDb().get("SELECT 1 AS x FROM surface_seed_applications WHERE nest_id = ?", [nestId]);
-  return { no_seed: !has, seeds: has ? [] : await listSeedsFor(actorUserId).catch(() => []) };
+  const seeds = has
+    ? []
+    : await listSeedsFor(actorUserId).catch((err) => {
+        logCaught("seed", err, { nest: nestId, call: "list_seeds" }, "warn");
+        return [];
+      });
+  return { no_seed: !has, seeds };
 }
 
 export const DEFAULT_SEED_FAILED_TEXT =
@@ -956,7 +1190,7 @@ export async function applyDefaultSeed(nestId: string, ownerUserId: string): Pro
     // is doing the work — in progress, not a failure (no row, no notice).
     if (err instanceof ConflictError) return null;
     console.error(`[surfaces] default seed not applied (${err instanceof AppError ? err.statusCode : "error"})`);
-    await defaultSeedFailed(nestId, ownerUserId).catch(() => undefined);
+    await defaultSeedFailed(nestId, ownerUserId).catch((e) => logCaught("seed", e, { nest: nestId, call: "default_seed_failed" }));
     return null;
   }
 }

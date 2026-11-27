@@ -5,6 +5,7 @@
  */
 import { v4 as uuid } from "uuid";
 import { getDb } from "../../db/client.js";
+import { logCaught } from "../log.js";
 
 export type PurgeTrigger = "ttl" | "judged" | "pause" | "optout" | "delete" | "edit" | "uninstall";
 type Runner = { run: (sql: string, p?: any[]) => Promise<{ changes: number }> };
@@ -19,7 +20,8 @@ export async function recordPurge(trigger: PurgeTrigger, rows: number, scope: { 
       `INSERT INTO surface_purge_runs (id, purge_trigger, binding_id, install_id, started_at, finished_at, rows_deleted, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [uuid(), trigger, scope.bindingId ?? null, scope.installId ?? null, now, now, rows, now],
     );
-  } catch {
-    /* the audit row never blocks a purge */
+  } catch (err) {
+    // The audit row never blocks a purge, but a lost row is a gap in the record.
+    logCaught("purge", err, { trigger, binding: scope.bindingId, install: scope.installId, call: "audit_row" });
   }
 }

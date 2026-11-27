@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { columnKeysOf } from "../src/nests/board-items";
 import {
   folderOf,
   folderColumnLabel,
@@ -9,6 +10,9 @@ import {
   groupByColumn,
   migrateLayout,
   planMove,
+  newCardPlacement,
+  creatingCard,
+  isCreatingCard,
   optimisticMove,
   resolveConfig,
   STATUS_ORDER,
@@ -726,5 +730,55 @@ describe("optimisticMove", () => {
     expect(out.fields).toEqual({ stage: "b" });
     expect(out.assignee).toBe("bob@acme.dev");
     expect(n.fields).toEqual({ stage: "a", size: "s" }); // input untouched
+  });
+});
+
+describe("po-1520: the card shown while a task is created", () => {
+  it("sits where the request puts it and is recognised as not created yet", () => {
+    const card = creatingCard({ title: "Fix login", type: "task", folder: "gtm/deals", tags: ["#stage:backlog"], assignee: "ada@acme.dev" });
+    expect(card).toMatchObject({ title: "Fix login", type: "task", tags: ["#stage:backlog"], assignee: "ada@acme.dev" });
+    expect(folderOf(card.id)).toBe("gtm/deals");
+    expect(isCreatingCard(card.id)).toBe(true);
+    expect(isCreatingCard("nodes/gtm/deals/fix-login")).toBe(false);
+  });
+  it("two at once keep separate ids", () => {
+    expect(creatingCard({ title: "A" }).id).not.toBe(creatingCard({ title: "A" }).id);
+  });
+});
+
+describe("po-1227: ticket numbers are not tag columns", () => {
+  const n = node({ id: "nodes/a", tags: ["#ticket:qa-1", "#backlog"] });
+  const only = node({ id: "nodes/b", tags: ["#ticket:qa-2"] });
+  it("groups by the other tags; a card with only a number is uncategorized", () => {
+    const config: BoardConfig = { dimension: "tag" };
+    expect(buildColumns([n, only], config).map((c) => c.key)).toEqual(["backlog", UNCATEGORIZED]);
+  });
+  it("drops ticket columns a saved board still lists, and patterns do not add them", () => {
+    const config: BoardConfig = { dimension: "tag", explicitColumns: true, columnOrder: ["ticket:qa-1", "backlog", "*"] };
+    expect(buildColumns([n, only], config).map((c) => c.key)).toEqual(["backlog"]);
+  });
+  it("the server's board items agree", () => {
+    const keys = (x: BoardNode) => columnKeysOf(x as any, { dimension: "tag" } as any);
+    expect([keys(n), keys(only)]).toEqual([["backlog"], [UNCATEGORIZED]]);
+  });
+  it("a retag keeps the ticket number", () => {
+    expect(planMove(only, "backlog", { dimension: "tag" }, UNCATEGORIZED)).toEqual({ kind: "retag", tags: ["#ticket:qa-2", "#backlog"] });
+  });
+});
+
+describe("po-1220: Created by columns", () => {
+  const config: BoardConfig = { dimension: "creator" };
+  const a = node({ id: "nodes/a", author: "Ada@acme.dev" });
+  const b = node({ id: "nodes/b" });
+  it("groups by the creator, on the board and in the server's board items", () => {
+    expect(buildColumns([a, b], config).map((c) => [c.key, c.label])).toEqual([
+      ["ada@acme.dev", "ada@acme.dev"],
+      [UNCATEGORIZED, "Unknown"],
+    ]);
+    expect(columnKeysOf(a as any, config as any)).toEqual(["ada@acme.dev"]);
+  });
+  it("a card cannot move to another creator, and a task cannot be added to one", () => {
+    expect(planMove(a, "bob@acme.dev", config, "ada@acme.dev").kind).toBe("unsupported");
+    expect(newCardPlacement("ada@acme.dev", config)).toBeNull();
   });
 });

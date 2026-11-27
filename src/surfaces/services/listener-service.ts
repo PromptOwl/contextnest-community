@@ -16,9 +16,11 @@ import { upsertAgent, getAgent, deleteAgent, type MetacognitionAgent } from "../
 import type { MetacognitionConfig } from "../../metacognition/config.js";
 import { ROOT_FOLDER } from "../core/judge-schema.js";
 import { isTiedListenerConfig } from "../core/listener-tie.js";
-import { createBinding, getBindingRow, bindingView, type BindInput } from "./binding-service.js";
+import { DEFAULT_LISTENER_NAME, parseJudgeTuning, readJudgeTuning, starterFolders, type JudgeTuning } from "./judge-tuning.js";
+import { ConflictError, NotFoundError } from "../../shared/errors.js";
+import { assertNestAdmin, createBinding, getBindingRow, bindingView, type BindInput } from "./binding-service.js";
 
-export const LISTENER_NAME = "Nest listener";
+export const LISTENER_NAME = DEFAULT_LISTENER_NAME;
 /**
  * Default folders a listener proposes into: NONE (spec §13 / AC-SEED-09).
  * Surfaces never names a folder; what a nest's listener may propose into is
@@ -43,6 +45,8 @@ export interface SurfacesListenerMarker {
   admin_folders?: string[];
   /** §13: the seed's thesis document, read by the judge as its north star. */
   thesis_node_id?: string | null;
+  /** The listener's own settings (its model, name and picture are config.model and config.persona). */
+  judge?: Omit<JudgeTuning, "model" | "name" | "avatar">;
 }
 
 /** The seed-derived listener settings beyond the folders. */
@@ -89,7 +93,10 @@ export function listenerFolders(agent: MetacognitionAgent): {
 } {
   const m = (agent.config as Partial<ListenerConfig>).surfaces_listener;
   const ok = (f: unknown): f is string => typeof f === "string" && (f === ROOT_FOLDER || /^[a-z0-9][a-z0-9_-]{0,60}\/$/i.test(f));
-  const folders = Array.isArray(m?.folders) && m!.folders.every(ok) ? [...m!.folders] : [...DEFAULT_LISTENER_FOLDERS];
+  // The admin's choice only narrows the starter's folders; one the starter no longer has is dropped.
+  const chosen = readJudgeTuning(agent.config).folders;
+  const all = Array.isArray(m?.folders) && m!.folders.every(ok) ? [...m!.folders] : [...DEFAULT_LISTENER_FOLDERS];
+  const folders = chosen ? all.filter((f) => chosen.includes(f)) : all;
   const people = Array.isArray(m?.people_folders) ? m!.people_folders.filter((f) => ok(f) && folders.includes(f)) : [];
   const adminFolders = Array.isArray(m?.admin_folders) ? m!.admin_folders.filter((f) => typeof f === "string" && FOLDER_PATH_RE.test(f)) : [];
   const thesis = typeof m?.thesis_node_id === "string" && /^nodes\/[a-z0-9][a-z0-9/_-]{0,300}$/.test(m.thesis_node_id) && !m.thesis_node_id.includes("..") ? m.thesis_node_id : null;
@@ -155,6 +162,33 @@ export async function removeListener(bindingId: string): Promise<void> {
     bindingId,
     row.listener_agent_node_id,
   ]);
+}
+
+/** Change a listener's model settings (nest owner/admin). Its folders and its tie to the binding are kept. */
+export async function setListenerJudge(bindingId: string, actorUserId: string, body: unknown) {
+  const row = await getBindingRow(bindingId);
+  if (!row) throw new NotFoundError("Binding not found");
+  await assertNestAdmin(row.nest_id, actorUserId);
+  const agent = await listenerFor(bindingId);
+  if (!agent) throw new ConflictError("This channel has no working listener. Remove the channel and turn it on again.");
+  const cfg = agent.config as ListenerConfig;
+  const next = parseJudgeTuning(body, readJudgeTuning(cfg), starterFolders(cfg));
+  const { model, name, avatar, ...judge } = next;
+  const persona = { name: name ?? LISTENER_NAME, avatar };
+  const saved = await getDb().transaction(async (tx) => {
+    const r = await tx.run("UPDATE metacognition_agents SET config_json = ?, updated_at = ? WHERE nest_id = ? AND node_id = ? AND enabled = 0 AND config_json = ?", [
+      JSON.stringify({ ...cfg, model, persona, surfaces_listener: { ...cfg.surfaces_listener, judge } }),
+      new Date().toISOString(),
+      row.nest_id,
+      agent.node_id,
+      JSON.stringify(cfg),
+    ]);
+    if (r.changes) await tx.run("UPDATE users SET name = ? WHERE id = ? AND is_service = 1", [persona.name, agent.persona.user_id]);
+    return r.changes > 0;
+  });
+  if (!saved) throw new ConflictError("The listener changed while saving. Try again.");
+  console.info(`[surfaces] listener settings of binding ${bindingId} changed by user ${actorUserId}: ${JSON.stringify(next)}`);
+  return { binding: await bindingView(row) };
 }
 
 const FOLDER_RE = /^[a-z0-9][a-z0-9_-]{0,60}\/$/i;

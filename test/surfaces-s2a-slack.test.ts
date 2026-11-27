@@ -104,6 +104,7 @@ const slack = {
   convs: new Map<string, { info: Record<string, unknown>; members: string[] }>(),
   history: new Map<string, Array<{ ts: string; user: string; text: string; thread_ts?: string }>>(),
   rateLimit: new Map<string, number>(),
+  fail: new Map<string, string>(),
   oauth: null as null | Record<string, unknown>,
   posted: [] as Array<Record<string, string>>,
   ephemerals: [] as Array<Record<string, string>>,
@@ -147,6 +148,8 @@ async function fakeFetch(url: any, init?: any): Promise<Response> {
     slack.rateLimit.delete(method);
     return json({ ok: false, error: "ratelimited" }, 429, { "retry-after": String(limited) });
   }
+  const failing = slack.fail.get(method);
+  if (failing) return json({ ok: false, error: failing });
   switch (method) {
     case "oauth.v2.access":
       return json(slack.oauth ?? { ok: false, error: "invalid_code" });
@@ -318,7 +321,7 @@ async function mcp(path: string, method: string, params: Record<string, unknown>
 }
 
 /** Full manifest-install flow for a workspace: create → credentials → OAuth. */
-async function installWorkspace(team: string, homeNest: string, opts: { botUserId?: string; authedUser?: string; enterprise?: boolean } = {}) {
+async function installWorkspace(team: string, homeNest: string, opts: { botUserId?: string; authedUser?: string; enterprise?: boolean; failExchange?: string; token?: string } = {}) {
   const created = await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: homeNest }, root.apiKey);
   expect(created.status).toBe(201);
   const id = created.data.install_id as string;
@@ -330,7 +333,7 @@ async function installWorkspace(team: string, homeNest: string, opts: { botUserI
   const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
   slack.oauth = {
     ok: true,
-    access_token: `xoxb-${team}-token`,
+    access_token: opts.token ?? `xoxb-${team}-token`,
     token_type: "bot",
     bot_user_id: opts.botUserId ?? "UBOT",
     app_id: "A1",
@@ -339,6 +342,8 @@ async function installWorkspace(team: string, homeNest: string, opts: { botUserI
     is_enterprise_install: !!opts.enterprise,
     authed_user: { id: opts.authedUser ?? "U_ROOT" },
   };
+  // Set after the credentials save, which checks the keys with the same Slack call.
+  if (opts.failExchange) slack.fail.set("oauth.v2.access", opts.failExchange);
   const cb = await app.request(`/surfaces/slack/oauth/callback?code=c-${team}&state=${encodeURIComponent(state)}`, { headers: { Cookie: cookie, Accept: "application/json" } });
   return { id, status: cb.status, body: await cb.json().catch(() => ({})), cookie, state };
 }
@@ -512,13 +517,21 @@ describe("install", () => {
   });
 
   it("AC-INS-04: a workspace already owned by another install is refused, its token revoked, nothing stored", async () => {
-    const r = await installWorkspace("T1", N);
+    const r = await installWorkspace("T1", N, { token: "xoxb-T1-other-app" });
     expect(r.status).toBe(409);
     expect(JSON.stringify(r.body)).toMatch(/no token was kept/i);
     expect(JSON.stringify(r.body)).toMatch(/nothing was read/i);
-    expect(slack.revoked).toContain("Bearer xoxb-T1-token");
+    expect(slack.revoked).toContain("Bearer xoxb-T1-other-app");
     expect(await one("SELECT 1 AS x FROM surface_secrets WHERE install_id = ? AND name = 'bot_token'", [r.id])).toBeUndefined();
     expect((await one("SELECT status FROM surface_installs WHERE id = ?", [r.id])).status).not.toBe("active");
+  });
+
+  it("a refused re-OAuth that returns the live install's own token (one app per server) never revokes it", async () => {
+    const r = await installWorkspace("T1", N);
+    expect(r.status).toBe(409);
+    expect(slack.revoked).not.toContain("Bearer xoxb-T1-token");
+    expect((await one("SELECT status FROM surface_installs WHERE id = ?", [installId])).status).toBe("active");
+    expect(await one("SELECT 1 AS x FROM surface_secrets WHERE install_id = ? AND name = 'bot_token'", [installId])).toBeTruthy();
   });
 
   it("AC-INS-05: an Enterprise Grid org-wide install is refused", async () => {
@@ -526,6 +539,65 @@ describe("install", () => {
     expect(r.status).toBe(422);
     expect(await one("SELECT 1 AS x FROM surface_secrets WHERE install_id = ? AND name = 'bot_token'", [r.id])).toBeUndefined();
     expect(slack.revoked).toContain("Bearer xoxb-T5-token");
+  });
+
+  it("po-1447: a failed OAuth code exchange writes one [surfaces] oauth line with the install and Slack's code, no secret", async () => {
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...a: any[]) => void errors.push(a.map(String).join(" ")));
+    try {
+      const r = await installWorkspace("T7", N, { failExchange: "invalid_code" });
+      expect(r.status).toBe(502);
+      const lines = errors.filter((l) => l.startsWith("[surfaces] oauth"));
+      expect(lines).toEqual([`[surfaces] oauth failed: code=invalid_code install=${r.id}`]);
+      expect(errors.join("\n")).not.toContain("csecret-xyz");
+    } finally {
+      slack.fail.delete("oauth.v2.access");
+      spy.mockRestore();
+    }
+  });
+
+  it("a refused client secret says which keys to fix and where; a manifest install keeps its values to fix", async () => {
+    try {
+      const r = await installWorkspace("T8", N, { failExchange: "bad_client_secret" });
+      expect(r.status).toBe(502);
+      expect(r.body.message).toMatch(/Client ID or Client secret/);
+      expect(r.body.steps.join(" ")).toContain("Control room → Setup");
+      expect((await S.db.getDb().get("SELECT status FROM surface_installs WHERE id = ?", [r.id])) as any).toMatchObject({ status: "pending" });
+    } finally {
+      slack.fail.delete("oauth.v2.access");
+    }
+  });
+
+  it("saving a Client ID or secret Slack refuses → 422 naming the field, nothing stored; a good pair saves", async () => {
+    const id = (await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: N }, root.apiKey)).data.install_id as string;
+    const put = (body: Record<string, string>) => jsonRequest(app, "PUT", `/surfaces/slack/installs/${id}/credentials`, body, root.apiKey);
+    try {
+      slack.fail.set("oauth.v2.access", "bad_client_secret");
+      const bad = await put({ client_id: "cid.1", client_secret: "wrong", signing_secret: SIGNING });
+      expect(bad.status).toBe(422);
+      expect(bad.data).toMatchObject({ field: "client_secret" });
+      const view = await jsonRequest(app, "GET", `/surfaces/slack/installs/${id}`, undefined, root.apiKey);
+      expect(view.data.install.credentials).toMatchObject({ client_id: false, client_secret: false, signing_secret: false });
+      slack.fail.set("oauth.v2.access", "invalid_client_id");
+      expect((await put({ client_id: "nope", client_secret: "csecret-xyz" })).data).toMatchObject({ field: "client_id" });
+    } finally {
+      slack.fail.delete("oauth.v2.access");
+    }
+    // Slack answers invalid_code for a good pair: it saves.
+    expect((await put({ client_id: "cid.1", client_secret: "csecret-xyz", signing_secret: SIGNING })).status).toBe(200);
+  });
+
+  it("disconnect also closes the same nest's half-finished connects, and leaves other nests' alone", async () => {
+    const a = (await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: N }, root.apiKey)).data.install_id as string;
+    const b = (await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: N }, root.apiKey)).data.install_id as string;
+    // Another nest's half-finished connect (someone else mid-connect, e.g. self-serve) is left alone.
+    const otherNest = (await jsonRequest(app, "POST", "/nests", { name: "Elsewhere" }, root.apiKey)).data.nest.id as string;
+    const c = (await jsonRequest(app, "POST", "/surfaces/slack/installs", { home_nest_id: otherNest }, root.apiKey)).data.install_id as string;
+    const { disconnectInstall } = await import("../src/surfaces/services/lifecycle-service.js");
+    await disconnectInstall(a);
+    const rows = (await S.db.getDb().all("SELECT id, status FROM surface_installs WHERE id IN (?, ?)", [a, b])) as any[];
+    expect(rows.map((x) => x.status)).toEqual(["disconnected", "disconnected"]);
+    expect(((await S.db.getDb().get("SELECT status FROM surface_installs WHERE id = ?", [c])) as any).status).toBe("pending");
   });
 
   it("AC-INS-06: a bad signature or a timestamp older than 300 s → 401, nothing processed", async () => {
@@ -546,11 +618,26 @@ describe("install", () => {
     expect((await postEvent(`/surfaces/slack/${installId}/events`, { type: "url_verification", challenge: "x" }, { secret: "nope" })).status).toBe(401);
   });
 
-  it("AC-INS-08: /hosted/* is 404 while FEATURE_SURFACES_SLACK_HOSTED is off", async () => {
-    delete process.env.FEATURE_SURFACES_SLACK_HOSTED;
-    expect((await postEvent("/surfaces/slack/hosted/events", envelope({ type: "message" }))).status).toBe(404);
-    expect((await postEvent("/surfaces/slack/hosted/interactions", {})).status).toBe(404);
-    expect((await app.request("/surfaces/slack/hosted/oauth/start", { headers: { Authorization: `Bearer ${root.apiKey}` } })).status).toBe(404);
+  it("AC-INS-08 (one Slack app): its routes are live whenever Surfaces is; a request not signed with its secret is refused", async () => {
+    delete process.env.SURFACES_SLACK_HOSTED_SIGNING_SECRET;
+    expect((await postEvent("/surfaces/slack/hosted/events", envelope({ type: "message" }))).status).toBe(401);
+    expect((await postEvent("/surfaces/slack/hosted/interactions", {})).status).toBe(401);
+    expect((await app.request("/surfaces/slack/hosted/oauth/start", { headers: { Authorization: `Bearer ${root.apiKey}` } })).status).toBe(422);
+  });
+
+  it("GET /surfaces/slack/app: the server app's manifest and addresses, which keys are saved; admins only", async () => {
+    process.env.SURFACES_SLACK_HOSTED_CLIENT_ID = "app-cid";
+    try {
+      const r = await jsonRequest(app, "GET", "/surfaces/slack/app", undefined, root.apiKey);
+      expect(r.status).toBe(200);
+      expect(r.data.urls).toMatchObject({ events: `${BASE}/surfaces/slack/hosted/events`, redirect: `${BASE}/surfaces/slack/oauth/callback` });
+      expect(r.data.manifest.settings.event_subscriptions.request_url).toBe(`${BASE}/surfaces/slack/hosted/events`);
+      expect(r.data.credentials).toMatchObject({ client_id: true });
+      expect(JSON.stringify(r.data)).not.toContain("app-cid");
+      expect((await jsonRequest(app, "GET", "/surfaces/slack/app", undefined, alice.apiKey)).status).toBe(403);
+    } finally {
+      delete process.env.SURFACES_SLACK_HOSTED_CLIENT_ID;
+    }
   });
 
   it("CF-3: with FEATURE_SURFACES off every Slack entry point is 404 and nothing is stored", async () => {
@@ -1181,6 +1268,171 @@ describe("explicit asks", () => {
     }
     times.sort((a, b) => a - b);
     expect(times[Math.ceil(0.95 * times.length) - 1]).toBeLessThan(60_000);
+  });
+});
+
+// ═══ Recovery after a restart or a Slack error ═══════════════════════════════
+
+describe("recovery", () => {
+  const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+  const win = (id: string) => one("SELECT * FROM surface_windows WHERE id = ?", [id]);
+  const proposalsOf = (id: string) => all("SELECT * FROM surface_proposals WHERE window_id = ?", [id]);
+  /** As a restart leaves it: claimed, and nobody working on it. */
+  const strand = (id: string, min: number, token = "tok") =>
+    db().run("UPDATE surface_windows SET status = 'judging', verdict = NULL, reason_code = NULL, claim_token = ?, updated_at = ? WHERE id = ?", [token, ago(min), id]);
+  const asked = (id: string) =>
+    db().run("UPDATE surface_windows SET forced = 1, forced_by_surface_user_id = 'U_ALICE', forced_target_id = '1.1' WHERE id = ?", [id]);
+  const FAILED = /Something went wrong while drafting/;
+  // Unlike the shared titles, these never count as duplicates of each other.
+  const proposeOwn = (req: any) => propose(req, { title: Array.from({ length: 3 }, () => `w${randomUUID().slice(0, 6)}`).join(" ") });
+  const open = async (text: string) => {
+    const root = nextTs();
+    await say("C1", "U_BOB", `${text}, a message long enough to be judged here`, { thread_ts: root });
+    return (await one("SELECT id FROM surface_windows WHERE binding_id = ? AND thread_key = ?", [bindingC1, root])).id as string;
+  };
+  /** 🧠 on a message that isn't buffered; its fetch job. */
+  const askOld = async (user: string, text: string) => {
+    const ts = nextTs();
+    slack.history.set("C1", [...(slack.history.get("C1") ?? []), { ts, user, text }]);
+    await send({ type: "reaction_added", user: "U_ALICE", reaction: "brain", item: { type: "message", channel: "C1", ts }, event_ts: nextTs() });
+    return one("SELECT * FROM surface_fetch_queue WHERE install_id = ? ORDER BY created_at DESC LIMIT 1", [installId]);
+  };
+  const job = (id: string) => one("SELECT * FROM surface_fetch_queue WHERE id = ?", [id]);
+  const runQueue = async (plusMs = 0) => {
+    await S.fetchq.runFetchQueue(Date.now() + plusMs);
+    await S.work.waitForSurfacesWork();
+  };
+  /** Ephemerals the function caused, the "Drafting from" status note left out. */
+  const notesOf = async (fn: () => Promise<unknown>) => {
+    const from = slack.ephemerals.length;
+    await fn();
+    return slack.ephemerals.slice(from).map((e) => e.text).filter((t) => !/Drafting from/.test(t));
+  };
+
+  beforeAll(async () => {
+    modelImpl = () => submit(noop());
+    await tick(21);
+    await db().run("DELETE FROM surface_ask_counts WHERE surface_user_id = 'U_ALICE'");
+  });
+
+  it("EX-1: a window judging for more than 15 minutes is judged once more; one judging for 5 minutes is left alone", async () => {
+    const stuck = await open("we agreed to ship the recovery");
+    const live = await open("we agreed to keep the live one");
+    await strand(stuck, 16);
+    await strand(live, 5);
+    modelImpl = proposeOwn;
+    await tick(0);
+    expect((await win(stuck)).verdict).toBe("proposed");
+    expect(await proposalsOf(stuck)).toHaveLength(1);
+    expect((await win(live)).status).toBe("judging");
+    expect(await proposalsOf(live)).toHaveLength(0);
+    await db().run("UPDATE surface_windows SET status = 'closing' WHERE id = ?", [live]);
+    modelImpl = () => submit(noop());
+    await tick(0);
+  });
+
+  it("EX-2: a stuck window whose proposal exists is closed as proposed, with no model call and no second proposal", async () => {
+    modelImpl = proposeOwn;
+    const id = await open("we agreed on the thing that is already proposed");
+    await tick(21);
+    expect(await proposalsOf(id)).toHaveLength(1);
+    await strand(id, 16);
+    const calls = modelCalls.length;
+    await tick(0);
+    expect(await win(id)).toMatchObject({ status: "judged", verdict: "proposed", reason_code: "proposed", item_count: 1 });
+    expect(modelCalls.length).toBe(calls);
+    expect(await proposalsOf(id)).toHaveLength(1);
+  });
+
+  it("EX-3: stuck a second time, or with its messages gone: failed with server_stopped, and the person who asked is told once", async () => {
+    const again = await open("the second time it is stuck");
+    await asked(again);
+    await strand(again, 16, "r:tok");
+    const gone = await open("its messages are gone");
+    await asked(gone);
+    await strand(gone, 16);
+    await db().run("DELETE FROM surface_buffer WHERE window_id = ?", [gone]);
+    const calls = modelCalls.length;
+    const notes = await notesOf(async () => {
+      await tick(0);
+      await tick(0);
+    });
+    for (const id of [again, gone]) expect(await win(id)).toMatchObject({ status: "judged", verdict: "error", reason_code: "server_stopped" });
+    expect(await all("SELECT * FROM surface_buffer WHERE window_id = ?", [again])).toHaveLength(0);
+    expect(notes).toHaveLength(2);
+    for (const n of notes) expect(n).toMatch(FAILED);
+    expect(modelCalls.length).toBe(calls);
+  });
+
+  it("EX-4: a worker that finishes after its window was recovered changes nothing", async () => {
+    const id = await open("we agreed while the worker was slow");
+    let first = true;
+    modelImpl = async (req) => {
+      if (first) {
+        first = false;
+        await db().run("UPDATE surface_windows SET updated_at = ? WHERE id = ?", [ago(16), id]);
+        expect(await S.judge.recoverStuckWindows()).toBe(1);
+      }
+      return proposeOwn(req);
+    };
+    await tick(21);
+    expect((await win(id)).status).toBe("closing");
+    expect(await proposalsOf(id)).toHaveLength(0);
+    await tick(0);
+    expect((await win(id)).verdict).toBe("proposed");
+    expect(await proposalsOf(id)).toHaveLength(1);
+    modelImpl = () => submit(noop());
+  });
+
+  it("EX-5: a fetch running for more than 5 minutes is tried again and blocks no other; one running for 1 minute is left alone", async () => {
+    modelImpl = () => submit(noop());
+    slack.rateLimit.set("conversations.history", 30);
+    const a = await askOld("U_BOB", "an old decision that was being fetched when the server stopped");
+    await db().run("UPDATE surface_fetch_queue SET status = 'running', attempts = 0, updated_at = ? WHERE id = ?", [ago(1), a.id]);
+    const b = await askOld("U_BOB", "another old decision that waits behind it");
+    await runQueue();
+    expect((await job(a.id)).status).toBe("running");
+    expect((await job(b.id)).status).toBe("queued");
+    await db().run("UPDATE surface_fetch_queue SET updated_at = ? WHERE id = ?", [ago(6), a.id]);
+    await runQueue();
+    for (const j of [a, b]) {
+      expect((await job(j.id)).status).toBe("done");
+      expect((await win(j.window_id)).status).toBe("judged");
+    }
+    expect((await job(a.id)).attempts).toBe(2);
+  });
+
+  it("EX-6, EX-9: a fetch that fails 3 times tells the person once, and the log has Slack's code and no message text", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    slack.fail.set("conversations.history", "missing_scope");
+    try {
+      let j: any;
+      const notes = await notesOf(async () => {
+        j = await askOld("U_BOB", "sentinel-old-message");
+        await runQueue(31_000);
+        await runQueue(62_000);
+        await runQueue(93_000);
+      });
+      expect((await job(j.id)).status).toBe("failed");
+      expect(await win(j.window_id)).toMatchObject({ status: "discarded", verdict: "fetch_failed" });
+      expect(notes).toEqual(["I couldn't read that message from Slack, so nothing was saved. Try again in a few minutes."]);
+      const log = warn.mock.calls.flat().join("\n");
+      expect(log).toMatch(/fetch failed: method=conversations\.history code=missing_scope/);
+      expect(log).not.toContain("sentinel-old-message");
+    } finally {
+      slack.fail.delete("conversations.history");
+      warn.mockRestore();
+    }
+  });
+
+  it("EX-6: nothing usable in what Slack returned: one note, and it gives no reason", async () => {
+    let j: any;
+    const notes = await notesOf(async () => {
+      j = await askOld("U_GUEST", "a guest wrote this one a while ago");
+      await runQueue();
+    });
+    expect(await win(j.window_id)).toMatchObject({ status: "discarded", verdict: "nothing_fetched" });
+    expect(notes).toEqual(["I couldn't use that message, so nothing was saved."]);
   });
 });
 

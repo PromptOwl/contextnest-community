@@ -38,6 +38,8 @@ export interface AnnotationComment {
   createdAt: string;
   /** The agent run that posted it, when one did (migration 060). */
   runId?: string;
+  /** When its author last edited it. */
+  editedAt?: string;
   /** A channel message that was deleted (migration 097): the body is "". */
   deleted?: true;
 }

@@ -40,6 +40,7 @@ export interface ReviewRequest {
   title?: string;
   version: number;
   requestedBy: string;
+  requestedByName?: string;
   requestedAt: string;
   requestNote?: string;
   priority: ReviewRequestPriority;
@@ -366,10 +367,10 @@ export function ReviewQueue({
                       <div className="flex items-center gap-1">
                         <Avatar className="h-4 w-4">
                           <AvatarFallback className="text-[8px]">
-                            {request.requestedBy[0]?.toUpperCase() || "?"}
+                            {(request.requestedByName ?? request.requestedBy)[0]?.toUpperCase() || "?"}
                           </AvatarFallback>
                         </Avatar>
-                        <span>{request.requestedBy}</span>
+                        <span>{request.requestedByName ?? request.requestedBy}</span>
                         {request.requestedByOrgContributor && (
                           <Badge
                             variant="outline"

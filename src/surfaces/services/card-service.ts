@@ -18,6 +18,8 @@ import { config } from "../../config.js";
 import type { BindingRef, CardRef, ProposalView } from "../contract.js";
 import type { CardItem, CardModel, CardOutcome } from "../core/card-model.js";
 import { getConnector } from "../registry.js";
+import { slackErrorCode } from "../adapters/slack/api.js";
+import { logCaught } from "../log.js";
 import { getBindingRow, type BindingRow } from "./binding-service.js";
 import { getInstall, installRef, type InstallRow } from "./install-store.js";
 import { activeLink } from "./identity-service.js";
@@ -131,7 +133,7 @@ export async function buildCardModel(p: ProposalRow, binding: BindingRow, items:
   const recordTitles = new Map<string, string>();
   for (const it of items) {
     if (it.op === "edit" && it.target_node_id) {
-      const t = (await getDb().get("SELECT title FROM node_index WHERE nest_id = ? AND node_id = ?", [p.nest_id, it.target_node_id]).catch(() => undefined)) as
+      const t = (await getDb().get("SELECT title FROM node_index WHERE nest_id = ? AND node_id = ?", [p.nest_id, it.target_node_id]).catch((err) => void logCaught("card", err, { proposal: p.id, call: "record_title" }, "warn"))) as
         | { title?: string }
         | undefined;
       recordTitles.set(it.id, t?.title ?? it.target_node_id.replace(/^nodes\//, ""));
@@ -185,7 +187,10 @@ export async function reviewerCanEdit(nestId: string, userId: string | null, ite
   const { canUserEdit } = await import("../../governance/stewardship-service.js");
   for (const it of items) {
     if (!it.node_id) return false;
-    const v = await canUserEdit(nestId, it.node_id, u.email).catch(() => ({ allowed: false }));
+    const v = await canUserEdit(nestId, it.node_id, u.email).catch((err) => {
+      logCaught("card", err, { nest: nestId, call: "can_edit" }, "warn");
+      return { allowed: false };
+    });
     if (!v.allowed) return false;
   }
   return true;
@@ -259,7 +264,8 @@ export async function postCard(proposalId: string): Promise<boolean> {
   let ref: CardRef;
   try {
     ref = await connector.postProposal(bindingRef(binding), viewOf(model, await threadRefFor(p, binding)));
-  } catch {
+  } catch (err) {
+    console.warn(`[surfaces] card not posted: code=${slackErrorCode(err)} proposal=${p.id} binding=${binding.id}`);
     await getDb().run("UPDATE surface_proposals SET card_ref = NULL WHERE id = ? AND card_ref = 'posting'", [p.id]);
     return false;
   }
@@ -344,6 +350,7 @@ function errCode(err: unknown): string | null {
 
 /** A card update failed: retry later with backoff, or give up properly. */
 async function cardUpdateFailed(proposalId: string, err: unknown): Promise<void> {
+  logCaught("card", err, { proposal: proposalId, call: "update" }, "warn");
   const row = (await getDb().get("SELECT redaction_attempts FROM surface_proposals WHERE id = ?", [proposalId])) as { redaction_attempts: number } | undefined;
   const attempts = Number(row?.redaction_attempts ?? 0) + 1;
   const code = errCode(err);
@@ -376,8 +383,8 @@ async function giveUp(proposalId: string, attempts: number): Promise<void> {
         p.id,
       ]);
       return;
-    } catch {
-      /* fall through */
+    } catch (err) {
+      logCaught("card", err, { proposal: p.id, binding: binding.id, call: "delete" });
     }
   }
   const first = await getDb().run(
@@ -386,7 +393,12 @@ async function giveUp(proposalId: string, attempts: number): Promise<void> {
   );
   if (first.changes === 0) return;
   let permalink: string | null = null;
-  if (ref && connector?.permalink) permalink = await connector.permalink(installRef(install), ref.conversation, ref.message_ref).catch(() => null);
+  if (ref && connector?.permalink) {
+    permalink = await connector.permalink(installRef(install), ref.conversation, ref.message_ref).catch((err) => {
+      logCaught("card", err, { proposal: p.id, call: "permalink" }, "warn");
+      return null;
+    });
+  }
   const { recordNotice } = await import("./notices.js");
   await recordNotice({
     kind: "card_redaction_failed",
@@ -396,7 +408,7 @@ async function giveUp(proposalId: string, attempts: number): Promise<void> {
     detail: { proposal_id: p.id, attempts, permalink },
     subject: "Nest couldn't redact a card",
     text: `A Nest card could not be updated or deleted after ${attempts} attempt(s), so it may still show text that some people in that conversation can't read. Remove it by hand${permalink ? `: ${permalink}` : ""}.`,
-  }).catch(() => "");
+  }).catch((err) => logCaught("notice", err, { proposal: p.id, binding: binding.id, call: "card_redaction_failed" }));
 }
 
 /**

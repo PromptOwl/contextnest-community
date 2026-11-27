@@ -135,7 +135,12 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 //   twin of POST /nests/:id/threads/:threadId/propose. An agent's approve card over the Community-only comment-thread
 //   store and review queue (the C7 proposal path), behind EXPERIMENTAL_AGENT_STREAM; the engine has no operation to
 //   import a descriptor from. Same maintainer decision 2026-10-24 (Community-only MCP tools ship inline).
-const BASELINE = 133;
+//   133->134 context_recipes (PO-1411, src/mcp/onboarding-tools.ts) — twin of GET /recipes: the catalog of seeds
+//   (Surfaces seed manifests with a `recipe` block) a new nest can start from. Seeds, seed libraries and their
+//   application are Community-only tables (surface_seed_applications, surface_seed_items) the engine does not model,
+//   so no engine op exists. Same maintainer decision 2026-10-24 as the onboarding tools. nest_create and
+//   context_onboarding_update gain a `recipe` argument in place (no new literal).
+const BASELINE = 134;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

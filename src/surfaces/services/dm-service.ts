@@ -33,6 +33,8 @@ import { getSettings, updateSettings } from "./settings-service.js";
 import { recordNotice } from "./notices.js";
 import { withdrawBindingCards } from "./expiry-service.js";
 import { SettingsError, type SurfaceSettings } from "../core/settings.js";
+import { AppError } from "../../shared/errors.js";
+import { logCaught } from "../log.js";
 
 export const DM_NOTICE_EVERY_MS = 7 * 24 * 3600_000;
 export const DM_OFF_NOTE =
@@ -48,8 +50,8 @@ async function direct(install: InstallRow, user: string, text: string, channel: 
   if (!c?.sendDirect) return;
   try {
     await c.sendDirect(installRef(install), user, text, channel);
-  } catch {
-    /* best effort */
+  } catch (err) {
+    logCaught("dm", err, { install: install.id, call: "send" }, "warn");
   }
 }
 
@@ -95,13 +97,17 @@ export async function prepareDm(install: InstallRow, conversation: string, autho
     return null;
   }
   if (await personalDmOff(install.id, author)) return null;
-  const userId = await resolveIdentity(install.id, author).catch(() => null);
+  const userId = await resolveIdentity(install.id, author).catch((err) => {
+    logCaught("dm", err, { install: install.id, call: "identity" }, "warn");
+    return null;
+  });
   if (!userId) {
     try {
       const token = await issueLinkToken({ installId: install.id, surfaceUserId: author });
       await direct(install, author, dmLinkNote(linkUrl(token)), conversation);
-    } catch {
-      /* rate limited: say nothing more */
+    } catch (err) {
+      // Rate limited (429) is expected: say nothing more. Anything else leaves a line.
+      if (!(err instanceof AppError && err.statusCode === 429)) logCaught("dm", err, { install: install.id, call: "link_token" });
     }
     return null;
   }
@@ -117,6 +123,7 @@ export async function prepareDm(install: InstallRow, conversation: string, autho
     binding = (await getBindingRow(out.binding.id)) ?? undefined;
   } catch (err) {
     if (err instanceof GuardRefusedError) await direct(install, author, DM_REFUSED, conversation);
+    else logCaught("dm", err, { install: install.id, nest: nestId, call: "bind" });
     return null;
   }
   if (!binding || binding.conversation_kind !== "dm" || !binding.capture_ok || !binding.surface_ok) return null;
@@ -245,7 +252,10 @@ export async function dmCaptureAllowed(b: Pick<BindingRow, "conversation_kind" |
  * off for everyone, in which case they stay paused for that reason).
  */
 export async function setPersonalDm(install: InstallRow, surfaceUserId: string, on: boolean): Promise<void> {
-  const userId = await resolveIdentity(install.id, surfaceUserId).catch(() => null);
+  const userId = await resolveIdentity(install.id, surfaceUserId).catch((err) => {
+    logCaught("dm", err, { install: install.id, call: "identity" }, "warn");
+    return null;
+  });
   if (on) {
     const globalOn = (await getSettings()).dm_capture;
     await getDb().transaction(async (tx) => {

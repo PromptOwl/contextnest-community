@@ -10,14 +10,16 @@
  */
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../../lib/api";
 import { reads, useNestSettings } from "../../lib/queries";
 import { usePriorityLevels } from "../../lib/priorities";
 import { currentStage, stageLabel, stageNamespace, stageOptions, withStage } from "../../lib/task-details";
 import { Input } from "@/components/ui/input";
-import { TicketChip } from "./CardParts";
+import { DUE_TONES, TicketChip } from "./CardParts";
 import { ticketOf } from "../../lib/ticket";
+import { dueState, isPickedDue, isTaskDone, localToday } from "../../lib/board-tasks";
 import { priorityTone, stageTone } from "../../lib/tones";
 
 const SELECT_BASE = "h-8 rounded-md border px-2 text-sm disabled:opacity-60";
@@ -83,6 +85,12 @@ export function TaskDetails({
 
   const showStage = options.length > 0 || stage !== undefined;
   const ticket = ticketOf(tags);
+  // Overdue as the Board card shows it: not once the task is done.
+  const doneTags = ((settings.data as any)?.done_tags ?? ["done"]) as string[];
+  const completed =
+    isTaskDone(nodeId, tags, doneTags) ||
+    !!(meta.data?.nodes ?? []).find((n: any) => n.id === nodeId)?.completed_at;
+  const overdue = !completed && isPickedDue(dueVal) && dueState(dueVal, localToday()) === "overdue";
   return (
     <section className="flex flex-wrap items-center gap-x-5 gap-y-2" data-testid="task-details" aria-label="Task details">
       {ticket && (
@@ -141,8 +149,9 @@ export function TaskDetails({
         <span className="text-xs font-medium text-muted-foreground">Due</span>
         <Input
           type="date"
-          aria-label="Due date"
-          className="h-8 w-auto"
+          aria-label={overdue ? "Due date, overdue" : "Due date"}
+          title={overdue ? "Overdue" : undefined}
+          className={`h-8 w-auto ${overdue ? DUE_TONES.overdue : ""}`}
           disabled={!canEdit}
           value={dueVal}
           onChange={(e) => {
@@ -152,6 +161,9 @@ export function TaskDetails({
             void save({ due: v || null }, () => setDueVal(prev), "due date");
           }}
         />
+        {overdue && (
+          <AlertTriangle className="h-4 w-4 text-red-700 dark:text-red-300" aria-hidden data-testid="task-overdue" />
+        )}
       </label>
     </section>
   );

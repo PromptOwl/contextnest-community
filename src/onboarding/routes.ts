@@ -29,6 +29,7 @@ import {
   reopenOnboarding,
 } from "./service.js";
 import { getDistillJob, startDistill, TooManyRequestsError } from "./distill.js";
+import { parseRecipeRef } from "../nests/recipe-service.js";
 
 type C = Context<AuthEnv>;
 
@@ -93,9 +94,12 @@ onboardingRoutes.post("/reopen", async (c) => {
 onboardingRoutes.post("/nest", async (c) => {
   try {
     if (!credentialMayContribute(c)) return c.json({ error: "Creating your nest needs your own full credential (a browser session or a read-write key)." }, 403);
-    const b = (await c.req.json().catch(() => ({}))) as { name?: unknown };
-    const nest = await createMyNest(c.get("userId"), typeof b.name === "string" ? b.name : undefined);
-    return c.json({ nest, state: await getOnboardingState(c.get("userId"), requestBaseUrl(c.req.url)) }, nest.created ? 201 : 200);
+    const b = (await c.req.json().catch(() => ({}))) as { name?: unknown; recipe?: unknown };
+    const recipe = parseRecipeRef(b.recipe);
+    const nest = await createMyNest(c.get("userId"), typeof b.name === "string" ? b.name : undefined, recipe, c.get("apiKeyId") ?? null);
+    // A recipe applies only to a nest this call makes: say so when it was not.
+    const ignored = recipe && !nest.created ? { recipe_ignored: "You already have a nest, so the recipe was not applied. Apply it with POST /surfaces/seeds/apply." } : {};
+    return c.json({ nest, ...ignored, state: await getOnboardingState(c.get("userId"), requestBaseUrl(c.req.url)) }, nest.created ? 201 : 200);
   } catch (err) {
     return fail(c, err);
   }

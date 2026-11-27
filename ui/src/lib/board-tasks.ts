@@ -6,6 +6,8 @@
  * icons, Trello's overdue-red due chip, Jira/ClickUp's avatar quick-filter.
  */
 import { saveOutcome } from "./save-outcome";
+import { displayNameFor } from "./person-name";
+import { ticketOf } from "./ticket";
 import { folderOf, type BoardNode } from "./board-dimensions";
 
 export const PRIORITIES = ["urgent", "high", "medium", "low"] as const;
@@ -42,6 +44,13 @@ export function dueState(due: string, today: string): DueState {
 export function inDoneFolder(id: string, doneTags: readonly string[]): boolean {
   const leaf = folderOf(id).split("/").pop()?.toLowerCase();
   return !!leaf && doneTags.some((t) => t.replace(/^#/, "").split(":").pop()?.toLowerCase() === leaf);
+}
+
+/** Is this task done, by the board's rule: a done tag, or a done folder? */
+export function isTaskDone(id: string | undefined, tags: readonly string[], doneTags: readonly string[]): boolean {
+  const bare = (t: string) => t.trim().replace(/^#/, "").toLowerCase();
+  const done = new Set(doneTags.map(bare));
+  return tags.some((t) => done.has(bare(t))) || (!!id && inDoneFolder(id, doneTags));
 }
 
 /** Today as YYYY-MM-DD in the viewer's local zone. */
@@ -113,11 +122,26 @@ export function matchesBlockedFilter(
   return !hideBlocked || openBlockers(node) === 0;
 }
 
-/** The filter box, as typed: part of a title, any case. A leading "#" means a
+/** A shared board tab's tooltip. Names its maker by display name; a maker with
+ *  no name on this nest is left out, never shown by address. */
+export function sharedBoardTitle(
+  madeBy: string | null | undefined,
+  people: Array<{ email: string; name?: string | null }> = [],
+): string {
+  const name = madeBy ? displayNameFor(madeBy, people) : "";
+  return `Shared with everyone on this nest${name && !name.includes("@") ? ` · made by ${name}` : ""}`;
+}
+
+/** The filter box, as typed: part of a title or ticket number, any case. A leading "#" means a
  *  tag still being typed (Enter adds it as a tag chip), so it filters nothing. */
-export function matchesTitleFilter(node: Pick<BoardNode, "title">, text: string): boolean {
+export function matchesTitleFilter(node: Pick<BoardNode, "title" | "tags">, text: string): boolean {
   const q = text.trim().toLowerCase();
-  return !q || q.startsWith("#") || node.title.toLowerCase().includes(q);
+  return (
+    !q ||
+    q.startsWith("#") ||
+    node.title.toLowerCase().includes(q) ||
+    !!ticketOf(node.tags)?.toLowerCase().includes(q)
+  );
 }
 
 /** Parent id → its sub-items, for the card's sub-item chip. */

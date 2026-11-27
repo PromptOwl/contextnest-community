@@ -11,12 +11,19 @@ import { getDb } from "../../db/client.js";
 import { SurfaceRateLimited, type FetchedMessage } from "../contract.js";
 import { gate } from "../core/gate.js";
 import { getConnector } from "../registry.js";
+import { slackErrorCode } from "../adapters/slack/api.js";
+import { getBindingRow } from "./binding-service.js";
 import { getInstall, installRef, type InstallRow } from "./install-store.js";
 import { fillForcedWindow, getWindow, judgeInBackground } from "./window-service.js";
 import { track } from "./work.js";
 
 export const MAX_FETCH_ATTEMPTS = 3;
 export const HOSTED_MIN_INTERVAL_MS = 60_000;
+/** A fetch takes seconds: an older `running` job lost its worker to a restart. */
+export const STUCK_FETCH_MS = 5 * 60_000;
+const FETCH_FAILED_NOTE = "I couldn't read that message from Slack, so nothing was saved. Try again in a few minutes.";
+// Says no reason: it must not reveal a guest or who opted out.
+const NOTHING_FETCHED_NOTE = "I couldn't use that message, so nothing was saved.";
 const iso = (ms: number) => new Date(ms).toISOString();
 
 export async function enqueueFetch(input: { installId: string; method: string; params: Record<string, string>; windowId: string; requestedBy: string }): Promise<string> {
@@ -44,6 +51,9 @@ interface Job {
 /** Run every due job (at most one per install+method concurrently). Returns jobs completed. */
 export async function runFetchQueue(nowMs: number = Date.now()): Promise<number> {
   const db = getDb();
+  // Left running by a restart: one attempt gone. Until then it blocks its method.
+  const stuck = (await db.all("SELECT * FROM surface_fetch_queue WHERE status = 'running' AND updated_at <= ?", [iso(Date.now() - STUCK_FETCH_MS)])) as Job[];
+  for (const job of stuck) await retryOrFail(job, nowMs, 0).catch((err) => console.error(`[surfaces] stuck fetch not recovered: ${err instanceof Error ? err.name : "error"}`));
   const due = (await db.all("SELECT * FROM surface_fetch_queue WHERE status = 'queued' AND not_before <= ? ORDER BY created_at", [iso(nowMs)])) as Job[];
   let done = 0;
   for (const job of due) {
@@ -61,17 +71,19 @@ export async function runFetchQueue(nowMs: number = Date.now()): Promise<number>
       ])) as { at: string | null };
       if (last?.at && nowMs - Date.parse(last.at) < HOSTED_MIN_INTERVAL_MS) continue;
     }
-    const claim = await db.run("UPDATE surface_fetch_queue SET status = 'running', updated_at = ? WHERE id = ? AND status = 'queued'", [iso(nowMs), job.id]);
+    const claim = await db.run("UPDATE surface_fetch_queue SET status = 'running', updated_at = ? WHERE id = ? AND status = 'queued'", [iso(Date.now()), job.id]);
     if (claim.changes === 0) continue;
     try {
       const connector = getConnector(install.surface);
       if (!connector?.fetchMessages) throw new Error("no fetch");
       const params = JSON.parse(job.params) as Record<string, string>;
       const msgs = await connector.fetchMessages(installRef(install), job.method, params);
+      // Delivered first: a restart in between fetches again, and deliver fills a window once.
+      if (job.window_id) await deliver(install, job.window_id, msgs, params);
       await db.run("UPDATE surface_fetch_queue SET status = 'done', attempts = attempts + 1, updated_at = ? WHERE id = ?", [iso(nowMs), job.id]);
       done++;
-      if (job.window_id) await deliver(install, job.window_id, msgs, params);
     } catch (err) {
+      console.warn(`[surfaces] fetch failed: method=${job.method} code=${slackErrorCode(err)} install=${job.install_id}`);
       if (err instanceof SurfaceRateLimited) {
         await db.run("UPDATE surface_fetch_queue SET status = 'queued', not_before = ?, attempts = attempts + 1, updated_at = ? WHERE id = ?", [
           iso(nowMs + err.retryAfterSec * 1000),
@@ -80,21 +92,33 @@ export async function runFetchQueue(nowMs: number = Date.now()): Promise<number>
         ]);
         continue;
       }
-      const failed = job.attempts + 1 >= MAX_FETCH_ATTEMPTS;
-      await db.run("UPDATE surface_fetch_queue SET status = ?, not_before = ?, attempts = attempts + 1, updated_at = ? WHERE id = ?", [
-        failed ? "failed" : "queued",
-        iso(nowMs + 30_000),
-        iso(nowMs),
-        job.id,
-      ]);
-      if (failed && job.window_id) {
-        await db.run("UPDATE surface_windows SET status = 'discarded', close_reason = 'discarded', verdict = 'fetch_failed' WHERE id = ? AND status = 'awaiting_fetch'", [
-          job.window_id,
-        ]);
-      }
+      await retryOrFail(job, nowMs, 30_000);
     }
   }
   return done;
+}
+
+/** One attempt gone: queued again, or failed for good and its window dropped. */
+async function retryOrFail(job: Job, nowMs: number, delayMs: number): Promise<void> {
+  const failed = job.attempts + 1 >= MAX_FETCH_ATTEMPTS;
+  const r = await getDb().run("UPDATE surface_fetch_queue SET status = ?, not_before = ?, attempts = attempts + 1, updated_at = ? WHERE id = ? AND status = 'running'", [
+    failed ? "failed" : "queued",
+    iso(nowMs + delayMs),
+    iso(nowMs),
+    job.id,
+  ]);
+  if (r.changes && failed && job.window_id) await dropWindow(job.window_id, "fetch_failed", FETCH_FAILED_NOTE);
+}
+
+/** Drop the waiting window and tell the person who asked, once. */
+async function dropWindow(windowId: string, verdict: "fetch_failed" | "nothing_fetched", text: string): Promise<void> {
+  const r = await getDb().run("UPDATE surface_windows SET status = 'discarded', close_reason = 'discarded', verdict = ? WHERE id = ? AND status = 'awaiting_fetch'", [verdict, windowId]);
+  if (r.changes === 0) return;
+  const w = await getWindow(windowId);
+  const binding = w ? await getBindingRow(w.binding_id) : null;
+  if (!w || !binding) return;
+  const { noteRequester } = await import("./judge-service.js");
+  await noteRequester(binding, w, text);
 }
 
 async function deliver(install: InstallRow, windowId: string, msgs: FetchedMessage[], params: Record<string, string>): Promise<void> {
@@ -122,7 +146,7 @@ async function deliver(install: InstallRow, windowId: string, msgs: FetchedMessa
     if (r.keep) kept.push({ id: m.id, author: m.author!, ts: m.ts, text: r.text, meaningful: r.meaningful });
   }
   if (!kept.length) {
-    await getDb().run("UPDATE surface_windows SET status = 'discarded', close_reason = 'discarded', verdict = 'nothing_fetched' WHERE id = ? AND status = 'awaiting_fetch'", [windowId]);
+    await dropWindow(windowId, "nothing_fetched", NOTHING_FETCHED_NOTE);
     return;
   }
   if (await fillForcedWindow(windowId, binding, kept)) await judgeInBackground(windowId);

@@ -519,6 +519,30 @@ describe("guard re-checks (§4.17)", () => {
     expect(h[1].reason).toMatch(/^Paused by Nest/);
   });
 
+  it("archiving a nest pauses its listening channels as an admin pause; deleting removes them and its pending installs", async () => {
+    const nests = await import("../src/nests/service.js");
+    const a = await newNest(alice);
+    setConv("C-arch", ["SA"]);
+    const aId = (await bind({ conversation_id: "C-arch", nest_id: a })).data.binding.id;
+    paused.length = 0;
+    await nests.archiveNest(a);
+    expect(await row(aId)).toMatchObject({ status: "paused_guard", pause_reason: "admin" });
+    expect(paused).toEqual([{ bindingId: aId, reason: "admin" }]);
+
+    const d = await newNest(alice);
+    setConv("C-del", ["SA"]);
+    const dId = (await bind({ conversation_id: "C-del", nest_id: d })).data.binding.id;
+    const pending = await S.installs.createInstall({ surface: "slack", mode: "hosted", tenantKey: `pending:${randomUUID()}`, homeNestId: d, installedByUserId: alice.userId });
+    paused.length = 0;
+    await nests.deleteNest(d);
+    // Stopped first (hooks purge + withdraw), then the nest's FK cascade drops the row.
+    expect(paused).toEqual([{ bindingId: dId, reason: "removed" }]);
+    expect(await row(dId)).toBeUndefined();
+    expect(await S.installs.getInstall(pending.id)).toBeNull();
+    // The active install homed elsewhere is untouched.
+    expect((await S.installs.getInstall(installId))?.status).toBe("active");
+  });
+
   it("po-1437: moving a channel to another nest = remove, then bind the same channel to the new nest", async () => {
     const n1 = await newNest(alice);
     const n2 = await newNest(alice);
@@ -1037,6 +1061,18 @@ describe("po-1432: the preview names who blocks a pair and who can't read the ne
     expect(members.SC).toMatchObject({ community_user_id: carol.userId, slack_email: null });
   });
 
+  it("QA: another app's bot that turns surface_ok off is named, so the count matches the names", async () => {
+    const { profile } = await import("./surfaces-fake-connector.js");
+    fake.profiles.set("SBOT", profile("SBOT", { display_name: "Zapier" }));
+    const n = await newNest(alice);
+    setConv("C-1432-BOT", ["SA", "SBOT"]);
+    fake.conversations.get("C-1432-BOT")!.members[1].is_bot = true;
+    const p = await preview("C-1432-BOT", n);
+    expect(p.guard.surface_ok).toBe(false);
+    expect(p.guard.detail.members_not_readers).toBe(1);
+    expect(p.people.members_not_readers).toEqual([expect.objectContaining({ surface_user_id: "SBOT", name: "Zapier", community_user_id: null, is_bot: true })]);
+  });
+
   it("po-1467: a reader whose email a channel member has, but whose link is refused, is not_linked with the reason; never not_in_channel", async () => {
     const { profile } = await import("./surfaces-fake-connector.js");
     // Same email in Community and Slack, but the Community email is not verified.
@@ -1051,6 +1087,34 @@ describe("po-1432: the preview names who blocks a pair and who can't read the ne
     const p = await preview("C-1467-A", n);
     const absent = Object.fromEntries(p.people.absent_readers.map((a: any) => [a.email, a]));
     expect(absent[hank.email]).toMatchObject({ user_id: hank.userId, reason: "not_linked", match_reason: "unverified" });
+  });
+
+  it("shared server: a same-email reader is refused as org_domain until the connection's home nest lists the domain", async () => {
+    const { profile } = await import("./surfaces-fake-connector.js");
+    const ivy = { userId: randomUUID(), email: "ivy@surf.test" };
+    await S.db
+      .getDb()
+      .run("INSERT INTO users (id, email, name, password_hash, email_verified_at) VALUES (?, ?, 'Ivy', 'x', ?)", [ivy.userId, ivy.email, new Date().toISOString()]);
+    fake.profiles.set("SIVY", profile("SIVY", { display_name: "Ivy", email: ivy.email }));
+    const n = await newNest(alice);
+    expect((await jsonRequest(app, "POST", `/nests/${n}/collaborators`, { email: ivy.email, permission: "read" }, alice.apiKey)).status).toBeLessThan(300);
+    setConv("C-SHARED", ["SA", "SIVY"]);
+    const home = (await S.db.getDb().get("SELECT home_nest_id FROM surface_installs WHERE id = ?", [installId])) as { home_nest_id: string | null };
+    const before = process.env.SHARED_DEPLOYMENT;
+    process.env.SHARED_DEPLOYMENT = "true";
+    await S.db.getDb().run("UPDATE surface_installs SET home_nest_id = ? WHERE id = ?", [n, installId]);
+    try {
+      const find = async () => (await preview("C-SHARED", n)).people.absent_readers.find((a: any) => a.email === ivy.email);
+      expect(await find()).toMatchObject({ reason: "not_linked", match_reason: "org_domain" });
+      // The setting an admin saves in Setup; the nest stays private.
+      const saved = await jsonRequest(app, "PATCH", `/nests/${n}/settings`, { org_domains: ["surf.test"] }, alice.apiKey);
+      expect(saved.status, JSON.stringify(saved.data)).toBe(200);
+      expect(await find()).toBeUndefined();
+    } finally {
+      if (before === undefined) delete process.env.SHARED_DEPLOYMENT;
+      else process.env.SHARED_DEPLOYMENT = before;
+      await S.db.getDb().run("UPDATE surface_installs SET home_nest_id = ? WHERE id = ?", [home.home_nest_id, installId]);
+    }
   });
 
   it("AC 6: a world-readable nest names its cause", async () => {

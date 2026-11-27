@@ -12,6 +12,7 @@
  * /auth/keys and shown to the user once via the Connect modal.
  */
 
+import type { Recipe, RecipeApplied } from "./recipes";
 import { clearDraft } from "./draft";
 import type { LastEdit } from "./version-author";
 import { streamQueryString, type StreamQuery } from "./doc-stream";
@@ -395,6 +396,8 @@ export interface AdminSettings {
   /** Write-only: the buffer key to set, or null to clear. */
   surfaces_buffer_key?: string | null;
   surfaces_judge_model?: string;
+  /** Minutes a conversation must be quiet before it is judged; empty = built-in default. */
+  surfaces_quiet_minutes?: number | string | null;
   /** Default monthly Surfaces spend cap per nest, in dollars; null = built-in default. */
   surfaces_default_cap_usd?: number | string | null;
   surfaces_org_name?: string;
@@ -403,8 +406,7 @@ export interface AdminSettings {
   distill_enabled?: boolean;
   /** Any person may connect their own Slack workspace to a nest they own. */
   surfaces_slack_self_serve?: boolean;
-  /** Hosted one-click Slack app (FEATURE_SURFACES_SLACK_HOSTED) and its credentials. */
-  surfaces_slack_hosted_enabled?: boolean;
+  /** The server's one Slack app: its credentials. */
   surfaces_slack_hosted_client_id?: string;
   surfaces_slack_hosted_client_secret_set?: boolean;
   surfaces_slack_hosted_signing_secret_set?: boolean;
@@ -695,9 +697,9 @@ export async function getAdminLicense() {
 }
 
 /** Models this server's credential can reach (admin), and the one Hootie uses now. */
-export async function getAdminModels() {
+export async function getAdminModels(nestId?: string | null) {
   return request<{ models: string[]; current: string; source: "own" | "promptowl" | null; own_models?: string[]; providers?: Record<string, string>; error?: string }>(
-    "/admin/models",
+    `/admin/models${nestId ? `?nest_id=${encodeURIComponent(nestId)}` : ""}`,
   );
 }
 
@@ -1380,12 +1382,16 @@ export async function listNests(opts?: { archived?: boolean }) {
   );
 }
 
-export async function createNest(name: string, description?: string) {
-  return request<{ nest: any }>("/nests", {
+/** Create a nest, optionally from a recipe (an id from GET /recipes; PO-1411). */
+export async function createNest(name: string, description?: string, recipe?: string) {
+  return request<{ nest: any; recipe?: RecipeApplied }>("/nests", {
     method: "POST",
-    body: JSON.stringify({ name, description }),
+    body: JSON.stringify({ name, description, ...(recipe ? { recipe } : {}) }),
   });
 }
+
+/** The recipe catalog a new nest can start from, Blank last. */
+export const listRecipes = () => request<{ recipes: Recipe[] }>("/recipes");
 
 export async function deleteNest(nestId: string) {
   return request("/nests/" + nestId, { method: "DELETE" });
@@ -2066,7 +2072,8 @@ export async function getNestCensus(nestId: string) {
 /** Per-node comment (annotation thread) counts for sorting the document list. */
 export async function getCommentCounts(nestId: string) {
   return request<{
-    counts: Record<string, { count: number; lastAt: string | null }>;
+    /** Threads, unresolved threads and messages per document. */
+    counts: Record<string, { count: number; open: number; comments: number; lastAt: string | null }>;
   }>(`/nests/${nestId}/comment-counts`);
 }
 
@@ -2630,9 +2637,10 @@ export async function withdrawDeletionRequest(nestId: string, id: string) {
   );
 }
 
-/** Create a folder with nothing in it — no placeholder document. */
+/** Create a folder with nothing in it — no placeholder document. `created` is
+ *  false when it was already there. */
 export async function createFolder(nestId: string, folder: string) {
-  return request<{ folder: string }>(`/nests/${nestId}/folders`, {
+  return request<{ folder: string; created: boolean }>(`/nests/${nestId}/folders`, {
     method: "POST",
     body: JSON.stringify({ folder }),
   });
@@ -2794,6 +2802,8 @@ export type ActivityLogType =
   | "commented"
   | "comment_resolved"
   | "deleted"
+  | "moved"
+  | "tags_changed"
   | "read"
   | "retrieved"
   | "exported";
@@ -2972,6 +2982,8 @@ export interface AnnotationComment {
   createdAt: string;
   /** Set when an agent run posted it: links to its trace. */
   runId?: string;
+  /** When its author last edited it. */
+  editedAt?: string;
 }
 
 export interface AnnotationThread {
@@ -3082,6 +3094,28 @@ export async function createAnnotation(
   return request<{ thread: AnnotationThread; comment_id?: string; mentions?: PostedMention[] }>(
     `/nests/${nestId}/nodes/${nodeId}/annotations`,
     { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+/** Change one's own comment. */
+export async function editAnnotationComment(
+  nestId: string,
+  nodeId: string,
+  threadId: string,
+  commentId: string,
+  body: string,
+) {
+  return request<{ thread: AnnotationThread | null }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/comments/${commentId}/edit`,
+    { method: "POST", body: JSON.stringify({ body }) },
+  );
+}
+
+/** Remove one's own comment; `thread` is null when nothing is left in it. */
+export async function deleteAnnotationComment(nestId: string, nodeId: string, threadId: string, commentId: string) {
+  return request<{ thread: AnnotationThread | null }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/comments/${commentId}/delete`,
+    { method: "POST", body: JSON.stringify({}) },
   );
 }
 
@@ -3726,6 +3760,8 @@ export type ActivityType =
   | "edit_proposed"
   | "review_requested"
   | "review_resolved"
+  | "moved"
+  | "tags_changed"
   | "task_activity";
 
 export interface ActivityEntry {
@@ -4677,6 +4713,9 @@ export interface RunSummary {
   trace?: { error?: string; [k: string]: unknown } | null;
 }
 
+/** A listener run stored as succeeded before its unusable verdict counted as a failure. */
+export const unusableVerdict = (r: Pick<RunSummary, "trace">) => r.trace?.kind === "surfaces_judge" && r.trace?.verdict === "error_schema";
+
 /** A run is only really running once a runner has claimed it. */
 export const isQueued = (r: Pick<RunSummary, "status" | "claimed_by">) =>
   r.status === "running" && !r.claimed_by;
@@ -5587,6 +5626,8 @@ export interface SurfacesStatus {
   bindings: { total: number; active: number; paused_guard: number; paused_by_member: number; removed: number };
   org_name: string | null;
   slack_hosted: boolean;
+  /** This server hosts several organizations. */
+  shared_deployment?: boolean;
   disclosure: string;
   /** po-1444: server admins only. What Slack setup needs from this server. */
   readiness?: {
@@ -5598,6 +5639,18 @@ export interface SurfacesStatus {
   };
 }
 
+export interface SurfacesJudgeTuning {
+  name: string | null;
+  avatar: string | null;
+  folders: string[] | null;
+  max_turns: number | null;
+  max_items: number | null;
+  model: string | null;
+  max_output_tokens: number | null;
+  temperature: number | null;
+  timeout_seconds: number | null;
+}
+
 export interface SurfacesBinding {
   id: string;
   install_id: string;
@@ -5607,6 +5660,16 @@ export interface SurfacesBinding {
   status: "active" | "paused_guard" | "paused_by_member" | "removed";
   /** A nest admin paused it on purpose (po-1437). */
   paused_by_admin?: boolean;
+  listener_agent_node_id?: string | null;
+  /** The listener's own settings; null = the default. */
+  judge?: SurfacesJudgeTuning;
+  /** What each unset setting means right now. */
+  judge_defaults?: SurfacesJudgeTuning;
+  /** The folders its starter gave it: what `judge.folders` may narrow. */
+  listener_folders?: string[];
+  /** What the listener is called; null = no better name than its id. */
+  listener_name?: string | null;
+  conversation_kind?: string;
   [k: string]: unknown;
 }
 
@@ -5641,8 +5704,8 @@ export interface SurfacesBindingPreview {
       reason: "not_in_channel" | "no_slack_link" | "no_account" | "not_linked";
       match_reason?: string | null;
     }>;
-    /** `slack_email`: the confirmed email Slack has, for a member with no account match (po-1445). */
-    members_not_readers: Array<{ surface_user_id: string; name: string | null; community_user_id: string | null; email: string | null; slack_email?: string | null }>;
+    /** `slack_email`: the confirmed email Slack has, for a member with no account match (po-1445). `is_bot`: another app's bot. */
+    members_not_readers: Array<{ surface_user_id: string; name: string | null; community_user_id: string | null; email: string | null; slack_email?: string | null; is_bot?: boolean }>;
     universe_cause: "public" | "link" | "shared_deployment" | null;
   };
 }
@@ -5698,6 +5761,13 @@ export const createSlackInstall = (homeNestId: string) =>
   request<{ install_id: string; manifest: unknown }>("/surfaces/slack/installs", surfacesJson({ home_nest_id: homeNestId }));
 export const getSlackInstall = (id: string) =>
   request<{ install: SurfacesInstallRef & { credentials: Record<string, boolean> }; manifest: unknown | null }>(`/surfaces/slack/installs/${encodeURIComponent(id)}`);
+/** The server's one Slack app: manifest, the addresses it must keep, which keys are saved. */
+export const getSlackApp = () =>
+  request<{
+    manifest: unknown;
+    urls: { events: string; interactions: string; commands: string; redirect: string };
+    credentials: { client_id: boolean; client_secret: boolean; signing_secret: boolean };
+  }>("/surfaces/slack/app");
 /** Write-only: values go to the server and never come back. */
 export const putSlackCredentials = (id: string, creds: { client_id?: string; client_secret?: string; signing_secret?: string }) =>
   request<{ stored: string[]; credentials: Record<string, boolean> }>(`/surfaces/slack/installs/${encodeURIComponent(id)}/credentials`, {
@@ -5720,6 +5790,8 @@ const bindingAction = (id: string, action: "pause" | "resume", reason: string) =
   request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}/${action}`, surfacesJson({ reason }));
 export const pauseSurfacesBinding = (id: string, reason: string) => bindingAction(id, "pause", reason);
 export const resumeSurfacesBinding = (id: string, reason: string) => bindingAction(id, "resume", reason);
+export const updateSurfacesListener = (bindingId: string, judge: SurfacesJudgeTuning) =>
+  request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(bindingId)}`, { method: "PATCH", body: JSON.stringify({ judge }) });
 /** `movedToNestId`: the nest the channel is moving to; the server looks up its name for the history. */
 export const removeSurfacesBinding = (id: string, reason: string, movedToNestId?: string) =>
   request<{ binding: SurfacesBinding }>(`/surfaces/bindings/${encodeURIComponent(id)}`, {
@@ -5887,10 +5959,10 @@ export type DistillStart =
 export const getOnboarding = () => request<OnboardingState>("/onboarding");
 export const dismissOnboarding = () => request<OnboardingState>("/onboarding/dismiss", { method: "POST", body: "{}" });
 export const reopenOnboarding = () => request<OnboardingState>("/onboarding/reopen", { method: "POST", body: "{}" });
-export const createMyNest = (name?: string) =>
-  request<{ nest: { id: string; name: string; created: boolean }; state: OnboardingState }>("/onboarding/nest", {
+export const createMyNest = (name?: string, recipe?: string) =>
+  request<{ nest: { id: string; name: string; created: boolean; recipe?: RecipeApplied }; state: OnboardingState }>("/onboarding/nest", {
     method: "POST",
-    body: JSON.stringify(name ? { name } : {}),
+    body: JSON.stringify({ ...(name ? { name } : {}), ...(recipe ? { recipe } : {}) }),
   });
 export const getConnectionEvidence = (nestId: string, since: string) =>
   request<ConnectionEvidence>(`/onboarding/connection?nest_id=${encodeURIComponent(nestId)}&since=${encodeURIComponent(since)}`);

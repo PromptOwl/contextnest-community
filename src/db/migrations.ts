@@ -3,7 +3,7 @@ import { ANON_USER_ID } from "../shared/constants.js";
 import { surfacesS1Ddl, surfacesBindingHistoryDdl } from "../surfaces/schema-ddl.js";
 import { surfacesS2aDdl } from "../surfaces/schema-ddl-s2a.js";
 import { surfacesS2bDdl, surfacesS2bAlterSqlite } from "../surfaces/schema-ddl-s2b.js";
-import { surfacesS3Ddl, surfacesS3AlterSqlite } from "../surfaces/schema-ddl-s3.js";
+import { surfacesS3Ddl, surfacesS3AlterSqlite, seedItemKindsRebuildSqlite } from "../surfaces/schema-ddl-s3.js";
 import { onboardingDdl } from "../onboarding/schema-ddl.js";
 import { controlRoomLedgerIndexesAndBackfill } from "./control-room-ddl.js";
 import { runTotals } from "../workflow/run-totals.js";
@@ -2848,6 +2848,37 @@ export function runMigrations(db: Database.Database): void {
   if (!hasMigration("101_surface_binding_history")) {
     db.exec(surfacesBindingHistoryDdl("(datetime('now'))"));
     recordMigration("101_surface_binding_history");
+  }
+
+  // 102: who moved a document and who changed its tags (po-1400). Nothing to
+  //   backfill: earlier moves were not recorded anywhere.
+  if (!hasMigration("102_node_changes")) {
+    db.exec(`
+    CREATE TABLE IF NOT EXISTS node_changes (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('moved', 'tags_changed')),
+      actor TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      client_json TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_node_changes_node
+      ON node_changes(nest_id, node_id, created_at);
+    `);
+    recordMigration("102_node_changes");
+  }
+
+  // 103: recipes (PO-1411). A seed also writes a board, a channel and the
+  //   nest's task stages, so surface_seed_items.kind takes three more values.
+  //   SQLite can't alter a CHECK: rebuild the table when it has the old one.
+  if (!hasMigration("103_seed_item_kinds")) {
+    db.transaction(() => {
+      const t = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='surface_seed_items'").get() as { sql?: string } | undefined;
+      if (t?.sql && !t.sql.includes("'task_rules'")) db.exec(seedItemKindsRebuildSqlite("(datetime('now'))"));
+    })();
+    recordMigration("103_seed_item_kinds");
   }
 }
 

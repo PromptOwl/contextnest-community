@@ -30,6 +30,7 @@ import {
 } from "../onboarding/service.js";
 import { getDistillJob, startDistill } from "../onboarding/distill.js";
 import type { ToolResult } from "./tools.js";
+import { listRecipes, parseRecipeRef, recipeAppliedText } from "../nests/recipe-service.js";
 
 export const ONBOARDING_TOOL_DEFINITIONS = [
   {
@@ -54,9 +55,16 @@ export const ONBOARDING_TOOL_DEFINITIONS = [
       properties: {
         action: { type: "string", enum: ["dismiss", "reopen", "create_nest"], description: "What to do." },
         name: { type: "string", description: "create_nest only: the nest name. Default \"<Name>'s nest\"." },
+        recipe: { type: "string", description: "create_nest only: a recipe id from context_recipes (product-factory, gtm-factory, operations, ideation) to pre-populate the new nest. Default blank." },
       },
       required: ["action"],
     },
+  },
+  {
+    name: "context_recipes",
+    description:
+      "Lists the recipes a new nest can start from (the same catalog as GET /recipes): Product factory, GTM factory, Operations, Ideation and Blank. Each has a name, a one-line purpose and what you get — folders, starter documents, boards with their stage columns, team chat channels and the agents worth hiring. Pass a recipe's id to nest_create or context_onboarding_update (create_nest).",
+    inputSchema: { type: "object" as const, properties: {} },
   },
   {
     name: "context_distill",
@@ -74,7 +82,7 @@ export const ONBOARDING_TOOL_DEFINITIONS = [
 ];
 
 export const ONBOARDING_TOOL_NAMES = new Set(ONBOARDING_TOOL_DEFINITIONS.map((t) => t.name));
-export const ONBOARDING_READ_TOOL_NAMES = ["context_onboarding"];
+export const ONBOARDING_READ_TOOL_NAMES = ["context_onboarding", "context_recipes"];
 
 interface Ctx {
   userId: string;
@@ -82,6 +90,8 @@ interface Ctx {
   baseUrl: string;
   nestScope: string | null;
   contributorCredential: boolean;
+  /** The API key the call came with, for the push-confirmation gate a recipe's writes honour. */
+  apiKeyId?: string | null;
   /** The server endpoint's nest resolver, gated on the caller's read access. */
   resolveNest: (ref: string) => Promise<{ id: string } | null>;
 }
@@ -126,11 +136,21 @@ export async function handleOnboardingTool(name: string, args: Record<string, an
       else if (action === "reopen") await reopenOnboarding(ctx.userId);
       else if (action === "create_nest") {
         if (!ctx.contributorCredential) return "Creating your nest needs your own full credential (a session, an OAuth grant or a read-write personal key).";
-        const nest = await createMyNest(ctx.userId, typeof args.name === "string" ? args.name : undefined);
-        return json(`${nest.created ? "Created" : "You already have"} "${nest.name}" (id: ${nest.id}).`, { nest });
+        const recipe = parseRecipeRef(args.recipe);
+        const nest = await createMyNest(ctx.userId, typeof args.name === "string" ? args.name : undefined, recipe, ctx.apiKeyId ?? null, true);
+        const recipeLine = nest.recipe ? ` ${recipeAppliedText(nest.recipe)}` : recipe && !nest.created ? " The recipe was not applied: it only applies to a nest this call creates." : "";
+        return json(`${nest.created ? "Created" : "You already have"} "${nest.name}" (id: ${nest.id}).${recipeLine}`, { nest });
       } else return 'action must be "dismiss", "reopen" or "create_nest".';
       const state = await getOnboardingState(ctx.userId, ctx.baseUrl);
       return json(`Welcome screen: ${state.show ? "shown" : "not shown"}.`, state);
+    }
+    if (name === "context_recipes") {
+      const recipes = await listRecipes(ctx.userId);
+      const lines = recipes.map((r) => {
+        const board = r.gets.boards[0];
+        return `- ${r.id}: ${r.name} — ${r.purpose}${board ? ` Board "${board.name}": ${board.stages.join(" → ")}.` : ""}${r.gets.channels.length ? ` Channels: ${r.gets.channels.map((c) => `#${c.name}`).join(", ")}.` : ""}${r.gets.agents.length ? ` Agents: ${r.gets.agents.map((a) => `@${a.handle}`).join(", ")}.` : ""}`;
+      });
+      return json(lines.join("\n"), { recipes });
     }
     if (name === "context_distill") {
       if (!ctx.contributorCredential) return "Distilling needs your own full credential (a session, an OAuth grant or a read-write personal key).";

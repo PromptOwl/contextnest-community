@@ -12,7 +12,7 @@
  * The end-to-end path (window → ledger → MCP) is in surfaces-s2a-judge-r1.test.ts.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { classifyJudgeFailure, JUDGE_FAILURE_CODES, JudgeRunError, judgeFailureLogLine } from "../src/surfaces/services/judge-failure.js";
+import { classifyJudgeFailure, JUDGE_FAILURE_CODES, JudgeRunError, judgeFailureLogLine, ruleText } from "../src/surfaces/services/judge-failure.js";
 import { SlackApiError } from "../src/surfaces/adapters/slack/api.js";
 import { SurfaceRateLimited } from "../src/surfaces/contract.js";
 import { reasonLabel, whatCell, type LedgerEntry } from "../ui/src/lib/control-room-overview.js";
@@ -67,6 +67,23 @@ describe("classifyJudgeFailure", () => {
     const line = judgeFailureLogLine("w3", classifyJudgeFailure(new JudgeRunError(ZERO, viaLiteLlm), "model"));
     expect(line).toMatch(/reason=model_billing status=400$/);
     expect(line).not.toMatch(/credit|Anthropic|litellm/i);
+  });
+
+  it("a model the key can't use, or that doesn't exist, is model_unavailable; a refused key stays model_auth", () => {
+    for (const [status, message] of [
+      [401, "key not allowed to access model. This key can only access models=['default-openai/gpt-5']. Tried to access cgdfgdg"],
+      [403, "team_model_access_denied"],
+      [400, "Invalid model name passed in model=cgdfgdg"],
+      [404, "The model `cgdfgdg` does not exist or you do not have access to it."],
+    ] as const)
+      expect(classifyJudgeFailure(new JudgeRunError(ZERO, apiError(status, message)), "model").code, message).toBe("model_unavailable");
+    expect(classifyJudgeFailure(new JudgeRunError(ZERO, apiError(401, "invalid x-api-key")), "model").code).toBe("model_auth");
+    expect(classifyJudgeFailure(new JudgeRunError(ZERO, apiError(400, "messages: roles must alternate")), "model").code).toBe("model_rejected");
+  });
+
+  it("every rule of a decision reads as words", () => {
+    for (const r of ["items: proposed has none", "title", "target_folder", "summary", "evidence_message_ids"]) expect(ruleText(r)).not.toMatch(/≥|_|^part of it/);
+    expect(ruleText("brand new rule")).toMatch(/brand new rule/);
   });
 
   it("the status is carried for the log; the message never is", () => {

@@ -73,7 +73,7 @@ export function agentView(a: MetacognitionAgent, managed?: ManagedBy) {
     managed_by: managed ? { ...managed, folders: listenerFoldersView(a) } : null,
     node_id: a.node_id,
     enabled: a.enabled,
-    persona: { name: a.persona.name, avatar: a.persona.avatar, email: a.persona.email },
+    persona: { name: managed?.name ?? a.persona.name, avatar: a.persona.avatar, email: a.persona.email },
     scope: a.config.scope,
     caps: a.config.caps,
     feeds: a.config.feeds,
