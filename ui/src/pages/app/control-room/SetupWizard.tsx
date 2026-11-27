@@ -9,24 +9,23 @@
  * answers with saved / not saved, never a value.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Check, CircleAlert, Download, ExternalLink, FolderPlus, Hash, Lock, RefreshCw } from "lucide-react";
+import { Check, CircleAlert, ExternalLink, FolderPlus, Hash, Lock, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { EmailDomains } from "./EmailDomains";
+import { SlackAppCard } from "./SlackAppCard";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { SearchableSelect } from "@/components/SearchableSelect";
 import { Checkbox } from "@/components/ui/checkbox";
-import { CopyButton } from "@/components/ui/copy-button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   addCollaborator,
   applySurfacesSeed,
   createNest,
-  createSlackInstall,
   createSurfacesBinding,
   disconnectSurfacesInstall,
-  getSlackInstall,
   getSurfacesSeedStatus,
   getSurfacesSettings,
   getSurfacesStatus,
@@ -42,9 +41,7 @@ import {
   getSurfacesBindingActivity,
   type SurfacesBindingActivity,
   type SurfacesBindingHistoryEntry,
-  putSlackCredentials,
   slackHostedOAuthStartUrl,
-  slackOAuthStartUrl,
   type SurfacesBinding,
   type SurfacesChannel,
   type SurfacesInstallRef,
@@ -119,7 +116,7 @@ export function useSetupState(): SetupState {
   const [previews, setPreviewsNow] = useState<Record<string, GuardView | "loading">>({});
   const inflight = useRef(new Set<string>());
 
-  const install = useMemo(() => pickInstall(status?.installs ?? []), [status]);
+  const install = useMemo(() => pickInstall(status?.installs ?? [], !!status?.slack_hosted), [status]);
 
   const reload = useCallback(async () => {
     try {
@@ -129,7 +126,7 @@ export function useSetupState(): SetupState {
         listSurfacesBindings().catch(() => [] as SurfacesBinding[]),
         listNests().catch(() => ({ nests: [] as any[] })),
       ]);
-      const inst = pickInstall(st.installs);
+      const inst = pickInstall(st.installs, st.slack_hosted);
       const live = bs.filter((b) => b.install_id === inst?.id && b.status !== "removed");
       const seedChecks = await Promise.all(
         [...new Set(live.map((b) => b.nest_id))].map((n) =>
@@ -208,7 +205,7 @@ function StepHeading({ title, lede }: { title: string; lede: string }) {
   return (
     <>
       <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
-      <p className="mb-4 mt-1 max-w-2xl text-sm text-foreground/80">{lede}</p>
+      <p className="mb-4 mt-1 text-sm text-foreground/80">{lede}</p>
     </>
   );
 }
@@ -339,25 +336,20 @@ function WillNever({ settings }: { settings: SurfacesSettingsView | null }) {
   );
 }
 
-function NestSelect({ id, value, nests, onChange, label, className }: { id?: string; value: string; nests: NestRef[]; onChange: (v: string) => void; label: string; className?: string }) {
+export function NestSelect({ id, value, nests, onChange, label, className }: { id?: string; value: string; nests: NestRef[]; onChange: (v: string) => void; label: string; className?: string }) {
   return (
-    <select
+    <SearchableSelect
       id={id}
-      aria-label={label}
+      ariaLabel={label}
       value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className={cn(
-        "h-10 rounded-md border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-        className,
-      )}
-    >
-      {!nests.some((n) => n.id === value) && <option value={value}>{value ? "Choose a nest" : "Choose a nest"}</option>}
-      {nests.map((n) => (
-        <option key={n.id} value={n.id}>
-          {n.name}
-        </option>
-      ))}
-    </select>
+      onChange={onChange}
+      options={nests.map((n) => ({ value: n.id, label: n.name }))}
+      searchValues={false}
+      placeholder="Choose a nest"
+      searchPlaceholder="Search nests…"
+      emptyText="No nests match."
+      className={className ?? "w-56 max-w-full"}
+    />
   );
 }
 
@@ -440,23 +432,6 @@ export function SetupWizard({ state, onDone, onHow }: { state: SetupState; onDon
 
 // ─── 1. Connect Slack ───────────────────────────────────────────────────────
 
-const CRED_FIELDS = [
-  { key: "client_id", label: "Client ID" },
-  { key: "client_secret", label: "Client secret" },
-  { key: "signing_secret", label: "Signing secret" },
-] as const;
-
-function downloadJson(name: string, data: unknown) {
-  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
 /** po-1437: the channels a disconnect stops, named, and what each channel is told. */
 export function DisconnectChannels({ bindings }: { bindings: SurfacesBinding[] }) {
   const live = bindings.filter((b) => b.status !== "removed" && b.conversation_kind !== "dm");
@@ -481,84 +456,28 @@ export function DisconnectChannels({ bindings }: { bindings: SurfacesBinding[] }
 export function ConnectStep({ state, next }: { state: SetupState; next: () => void }) {
   const inst = state.install;
   const connected = inst?.status === "active";
-  const hosted = !!state.status?.slack_hosted;
   const org = state.status?.org_name;
   const [homeNest, setHomeNest] = useState<string>(inst?.home_nest_id ?? state.nests[0]?.id ?? "");
-  const [creds, setCreds] = useState<Record<string, boolean>>({});
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [manifest, setManifest] = useState<unknown>(null);
+  const [appReady, setAppReady] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  // A nest that is gone (deleted, archived, not yours) can't be the target: the server refuses it.
   useEffect(() => {
-    if (!homeNest && state.nests[0]) setHomeNest(state.nests[0].id);
+    if (state.nests[0] && !state.nests.some((n) => n.id === homeNest)) setHomeNest(state.nests[0].id);
   }, [state.nests, homeNest]);
 
-  useEffect(() => {
-    if (!inst || inst.mode !== "manifest" || connected) return;
-    let live = true;
-    getSlackInstall(inst.id)
-      .then((r) => {
-        if (!live) return;
-        setCreds(r.install.credentials ?? {});
-        setManifest(r.manifest ?? null);
-      })
-      // Without this read every field shows "Not saved": say so, or the admin re-enters secrets.
-      .catch((e) => live && toast.error(errText(e, "Couldn't read the saved Slack values. Reload to try again.")));
-    return () => {
-      live = false;
-    };
-  }, [inst, connected]);
-
-  const allCreds = CRED_FIELDS.every((f) => creds[f.key]);
   const readiness = state.status?.readiness;
   // The server refuses too; this keeps the admin from leaving for a Slack error page.
   const here = typeof window === "undefined" ? null : window.location.origin;
   const urlBad = !!readiness && (!!readiness.public_url || !!wrongAddress(readiness, here));
   const homeName = state.nests.find((n) => n.id === inst?.home_nest_id)?.name;
-
-  const download = async () => {
-    setBusy(true);
-    try {
-      let m = manifest;
-      if (!inst) {
-        if (!homeNest) throw new Error("Choose the nest saved notes land in first.");
-        const r = await createSlackInstall(homeNest);
-        m = r.manifest;
-        setManifest(m);
-        await state.reload();
-      }
-      if (m) downloadJson("nest-slack-manifest.json", m);
-    } catch (e) {
-      toast.error(errText(e, "Couldn't start the install."));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const saveCreds = async () => {
-    if (!inst) return;
-    const body = Object.fromEntries(Object.entries(values).filter(([, v]) => v.trim()));
-    if (!Object.keys(body).length) return;
-    setBusy(true);
-    try {
-      const r = await putSlackCredentials(inst.id, body);
-      setCreds(r.credentials);
-      setValues({});
-      toast.success("Saved. The values are stored encrypted and won't be shown again.");
-    } catch (e) {
-      toast.error(errText(e, "Couldn't save the values."));
-    } finally {
-      setBusy(false);
-    }
-  };
+  const sharedDeployment = !!state.status?.shared_deployment;
+  // Not connected yet: the connect is homed on the picked nest, never a stale install's.
+  const domainsNest = connected ? inst?.home_nest_id : homeNest;
 
   const approve = () => {
-    if (hosted) {
-      if (!homeNest) return toast.error("Choose the nest saved notes land in first.");
-      window.location.assign(slackHostedOAuthStartUrl(homeNest));
-      return;
-    }
-    if (inst) window.location.assign(slackOAuthStartUrl(inst.id));
+    if (!homeNest) return toast.error("Choose the nest saved notes land in first.");
+    window.location.assign(slackHostedOAuthStartUrl(homeNest));
   };
 
   const [confirmOff, setConfirmOff] = useState(false);
@@ -581,10 +500,13 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
     <>
       <StepHeading
         title="Connect Slack"
-        lede={`This installs ${org ? `${org}'s` : "your"} own copy of the Nest app in your Slack workspace. Installing it doesn't read anything: you pick channels in the next step.`}
+        lede={`This installs ${org ? `${org}'s` : "your"} copy of the Nest app in your Slack workspace. Installing it doesn't read anything: you pick channels in the next step.`}
       />
       <WillNever settings={state.settings} />
       {readiness && !connected && <ReadinessChecklist readiness={readiness} here={here} />}
+      {sharedDeployment && domainsNest && (
+        <EmailDomains nestId={domainsNest} nestName={state.nests.find((n) => n.id === domainsNest)?.name} onSaved={() => state.setPreviews(() => ({}))} />
+      )}
       {connected ? (
         <Note tone="ok" icon="check" testId="setup-connected">
           <b>Connected to Slack.</b> {homeName ? `Saved notes land in ${homeName} unless a channel says otherwise.` : "Saved notes land in the nest each channel is bound to."}
@@ -598,7 +520,7 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
               <DialogHeader>
                 <DialogTitle>Disconnect Slack?</DialogTitle>
                 <DialogDescription>
-                  Nest stops listening in every channel. Pending review cards are withdrawn, the Slack token is revoked, and channel bindings, drafts and linked Slack users are removed. Approved notes, nest access and the audit history stay. You can connect again later.
+                  Nest stops listening in every channel. Pending review cards are withdrawn, the Slack token is revoked, and channel bindings, drafts and linked Slack users are removed. Approved notes, nest access and the audit history stay. The Slack app and its keys stay, so you can connect again later.
                 </DialogDescription>
               </DialogHeader>
               <DisconnectChannels bindings={state.bindings} />
@@ -614,87 +536,30 @@ export function ConnectStep({ state, next }: { state: SetupState; next: () => vo
           </Dialog>
         </Note>
       ) : (
-        <div className="rounded-lg border p-4">
-          {!inst && (
+        <div className="space-y-4 rounded-lg border p-4">
+          <SlackAppCard onReady={setAppReady} />
+          <div className="border-t pt-4">
+            {/* Always choosable before connecting: a deleted nest must never trap the setup. */}
             <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
               <Label htmlFor="setup-home-nest" className="text-sm font-normal">
                 Saved notes land in
               </Label>
               <NestSelect id="setup-home-nest" label="Nest saved notes land in" value={homeNest} nests={state.nests} onChange={setHomeNest} />
             </div>
-          )}
-          <ol className="list-decimal space-y-1.5 pl-5 text-sm leading-relaxed">
-            {hosted ? (
-              <li>Approve the install in Slack. Slack shows exactly which permissions it asks for.</li>
-            ) : (
-              <>
-                <li>Create the app from our manifest. Slack shows exactly which permissions it asks for.</li>
-                <li>
-                  Paste the three values Slack gives you. They are stored encrypted and never shown again.
-                  {inst && (
-                    <div className="mt-2 grid gap-2 sm:grid-cols-3" data-testid="setup-credentials">
-                      {CRED_FIELDS.map((f) => (
-                        <div key={f.key} className="min-w-0">
-                          <Label htmlFor={`cred-${f.key}`} className="flex items-center justify-between text-sm font-normal">
-                            {f.label}
-                            <span className={cn("text-sm", creds[f.key] ? "text-green-700" : "text-muted-foreground")} data-testid={`cred-state-${f.key}`}>
-                              {creds[f.key] ? "Saved" : "Not saved"}
-                            </span>
-                          </Label>
-                          <Input
-                            id={`cred-${f.key}`}
-                            type="password"
-                            autoComplete="off"
-                            spellCheck={false}
-                            className="mt-1 h-9"
-                            placeholder={creds[f.key] ? "Replace the saved value" : ""}
-                            value={values[f.key] ?? ""}
-                            onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
-                          />
-                        </div>
-                      ))}
-                      <div className="sm:col-span-3">
-                        <Button variant="outline" className={small} onClick={saveCreds} disabled={busy || !Object.values(values).some((v) => v.trim())}>
-                          Save values
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                </li>
-                <li>Approve the install in Slack.</li>
-              </>
-            )}
-          </ol>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {!hosted && (
-              <Button variant="outline" onClick={download} disabled={busy || urlBad || (!inst && !homeNest)}>
-                <Download className="mr-1.5 h-4 w-4" aria-hidden />
-                Download manifest
-              </Button>
-            )}
-            <Button onClick={approve} disabled={busy || urlBad || (hosted ? !homeNest : !inst || !allCreds)}>
+            <Button onClick={approve} disabled={busy || urlBad || !appReady || !homeNest}>
               Open Slack to approve
             </Button>
+            {!appReady && (
+              <p className="mt-2 text-sm text-muted-foreground" data-testid="setup-keys-needed">
+                Save the Slack app&apos;s three keys above first.
+              </p>
+            )}
+            {urlBad && (
+              <p className="mt-2 text-sm text-red-800" data-testid="setup-url-blocked">
+                Slack can&apos;t connect from here yet. Fix the address problem above first.
+              </p>
+            )}
           </div>
-          {urlBad && (
-            <p className="mt-2 text-sm text-red-800" data-testid="setup-url-blocked">
-              Slack can&apos;t connect from here yet. Fix the address problem above first.
-            </p>
-          )}
-          {readiness?.redirect_url && !urlBad && (
-            <div className="mt-3 text-sm" data-testid="setup-redirect-url">
-              <p className="text-muted-foreground">Your Slack app must list this exact address under OAuth &amp; Permissions → Redirect URLs:</p>
-              <div className="mt-1 flex min-w-0 items-center gap-2">
-                <code className="min-w-0 truncate rounded bg-muted px-1.5 py-0.5">{readiness.redirect_url}</code>
-                <CopyButton text={readiness.redirect_url} toastMessage="Redirect URL copied" />
-              </div>
-            </div>
-          )}
-          {!hosted && (
-            <p className="mt-2 text-sm text-muted-foreground" data-testid="setup-manifest-note">
-              The manifest uses this server&apos;s current address. If that address changes, download it again and update the app&apos;s URLs in Slack.
-            </p>
-          )}
         </div>
       )}
       <FootBar
@@ -924,7 +789,11 @@ export function ChannelActivity({ activity, quietMinutes }: { activity: Surfaces
         ))}
       </ul>
       <Note tone="info">
-        <b>Testing?</b> Lower the quiet window to 5 minutes in Server settings → Surfaces, or react 🧠 to a message to have that thread judged right away.
+        <b>Testing?</b> Lower the quiet window to 5 minutes in{" "}
+        <a href="/settings" className="underline underline-offset-2">
+          Server settings
+        </a>{" "}
+        → Surfaces, or react 🧠 to a message to have that thread judged right away.
       </Note>
     </div>
   );
@@ -1025,8 +894,8 @@ export function BindingManage({
     } catch (e) {
       toast.error(errText(e, "That didn't work. Try again."));
       // Part of it may have happened (a move that removed but couldn't re-bind): show what is true now.
-      await Promise.resolve(state.reload()).catch(() => {});
-      await Promise.resolve(onChanged()).catch(() => {});
+      await Promise.resolve(state.reload()).catch(() => { });
+      await Promise.resolve(onChanged()).catch(() => { });
     } finally {
       setBusy(false);
     }
@@ -1199,6 +1068,7 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const { viewFor, recheck } = usePreviews(state);
+  const sharedDeployment = !!state.status?.shared_deployment;
 
   // One request at a time: "Check again" is disabled while a list is loading,
   // so repeated clicks can't stack up Slack calls.
@@ -1240,13 +1110,16 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
         title="Choose channels"
         lede="Start with two or three busy channels. Each channel saves into one nest. The status on the right is a live check. Nothing is saved until you continue."
       />
+      {sharedDeployment && inst?.home_nest_id && (
+        <EmailDomains nestId={inst.home_nest_id} nestName={nestName(inst.home_nest_id)} onSaved={() => state.setPreviews(() => ({}))} />
+      )}
       {err && <Note tone="bad">{err}</Note>}
       {channels === null ? (
         <div className="py-8 text-center text-sm text-muted-foreground">Loading channels…</div>
       ) : channels.length === 0 && !err ? (
         <div className="rounded-lg border border-dashed px-5 py-8 text-center text-sm">
           <p className="mx-auto max-w-md text-muted-foreground">
-            Nest isn't in any channel yet. In Slack, open a channel, type <code className="rounded bg-muted px-1">/invite</code> and pick Nest. It can only listen where it was added.
+            Nest isn't in any channel yet. In Slack, open a channel, type <code className="rounded bg-muted px-1">/invite</code> and pick your Slack app. It can only listen where it was added.
           </p>
           <Button variant="outline" className="mt-3" onClick={load} disabled={loading}>
             <RefreshCw className="mr-1.5 h-4 w-4" aria-hidden />
@@ -1255,66 +1128,66 @@ function ChannelsStep({ state, back, next }: { state: SetupState; back: () => vo
         </div>
       ) : (
         <>
-        <div className="mb-2 flex justify-end">
-          {/* po-1445: a channel Nest was just invited to shows without a page reload. */}
-          <Button variant="ghost" className={small} onClick={load} disabled={loading} data-testid="setup-channels-refresh">
-            <RefreshCw className="mr-1.5 h-4 w-4" aria-hidden />
-            {loading ? "Refreshing…" : "Refresh list"}
-          </Button>
-        </div>
-        <div className="rounded-lg border px-4" data-testid="setup-channels">
-          {channels.map((ch) => {
-            const p = pickOf(ch);
-            const bound = ch.binding;
-            const on = !!bound || !!p?.on;
-            const nest = bound?.nest_id ?? p?.nestId ?? defaultNest;
-            return (
-              <div
-                key={ch.id}
-                className="grid grid-cols-[24px_minmax(0,1fr)] gap-x-3 gap-y-2 border-b py-3 last:border-b-0 min-[801px]:grid-cols-[24px_minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1.6fr)] min-[801px]:items-start"
-                data-testid={`channel-row-${ch.id}`}
-              >
-                <input
-                  type="checkbox"
-                  className="mt-0.5 h-[18px] w-[18px] accent-[hsl(var(--primary))]"
-                  aria-label={`Listen in #${ch.name ?? ch.id}`}
-                  checked={on}
-                  disabled={!!bound}
-                  onChange={(e) => update(ch, { on: e.target.checked, nestId: nest })}
-                />
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1 font-medium">
-                    {ch.is_private || ch.is_ext_shared ? <Lock className="h-3.5 w-3.5 shrink-0" aria-hidden /> : <Hash className="h-3.5 w-3.5 shrink-0" aria-hidden />}
-                    <span className="truncate">{ch.name ?? ch.id}</span>
+          <div className="mb-2 flex justify-end">
+            {/* po-1445: a channel Nest was just invited to shows without a page reload. */}
+            <Button variant="ghost" className={small} onClick={load} disabled={loading} data-testid="setup-channels-refresh">
+              <RefreshCw className="mr-1.5 h-4 w-4" aria-hidden />
+              {loading ? "Refreshing…" : "Refresh list"}
+            </Button>
+          </div>
+          <div className="rounded-lg border px-4" data-testid="setup-channels">
+            {channels.map((ch) => {
+              const p = pickOf(ch);
+              const bound = ch.binding;
+              const on = !!bound || !!p?.on;
+              const nest = bound?.nest_id ?? p?.nestId ?? defaultNest;
+              return (
+                <div
+                  key={ch.id}
+                  className="grid grid-cols-[24px_minmax(0,1fr)] gap-x-3 gap-y-2 border-b py-3 last:border-b-0 min-[801px]:grid-cols-[24px_minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1.6fr)] min-[801px]:items-start"
+                  data-testid={`channel-row-${ch.id}`}
+                >
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 h-[18px] w-[18px] accent-[hsl(var(--primary))]"
+                    aria-label={`Listen in #${ch.name ?? ch.id}`}
+                    checked={on}
+                    disabled={!!bound}
+                    onChange={(e) => update(ch, { on: e.target.checked, nestId: nest })}
+                  />
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1 font-medium">
+                      {ch.is_private || ch.is_ext_shared ? <Lock className="h-3.5 w-3.5 shrink-0" aria-hidden /> : <Hash className="h-3.5 w-3.5 shrink-0" aria-hidden />}
+                      <span className="truncate">{ch.name ?? ch.id}</span>
+                    </div>
+                    <div className="text-sm text-muted-foreground">{channelMeta(ch)}</div>
                   </div>
-                  <div className="text-sm text-muted-foreground">{channelMeta(ch)}</div>
+                  <div className="col-start-2 min-[801px]:col-start-auto">
+                    {bound ? (
+                      <span className="text-sm text-muted-foreground">Into {nestName(bound.nest_id)}</span>
+                    ) : (
+                      <NestSelect label={`Nest for #${ch.name ?? ch.id}`} value={nest} nests={state.nests} onChange={(v) => update(ch, { nestId: v, on: true })} className="w-full" />
+                    )}
+                  </div>
+                  <div className="col-start-2 min-[801px]:col-start-auto">
+                    {bound ? (
+                      <BindingManage channel={ch} binding={bound} state={state} onChanged={load} />
+                    ) : (
+                      <GuardCell
+                        view={p?.on ? viewFor(p) : undefined}
+                        channel={ch}
+                        addTo={(() => {
+                          const v = p?.on ? viewFor(p) : undefined;
+                          if (!p || !v || v === "loading" || !v.add?.length) return null;
+                          return <AddToNest members={v.add} nestId={p.nestId} nestName={nestName(p.nestId)} channel={ch.name ?? ch.id} onAdded={() => recheck(p)} />;
+                        })()}
+                      />
+                    )}
+                  </div>
                 </div>
-                <div className="col-start-2 min-[801px]:col-start-auto">
-                  {bound ? (
-                    <span className="text-sm text-muted-foreground">Into {nestName(bound.nest_id)}</span>
-                  ) : (
-                    <NestSelect label={`Nest for #${ch.name ?? ch.id}`} value={nest} nests={state.nests} onChange={(v) => update(ch, { nestId: v, on: true })} className="w-full" />
-                  )}
-                </div>
-                <div className="col-start-2 min-[801px]:col-start-auto">
-                  {bound ? (
-                    <BindingManage channel={ch} binding={bound} state={state} onChanged={load} />
-                  ) : (
-                    <GuardCell
-                      view={p?.on ? viewFor(p) : undefined}
-                      channel={ch}
-                      addTo={(() => {
-                        const v = p?.on ? viewFor(p) : undefined;
-                        if (!p || !v || v === "loading" || !v.add?.length) return null;
-                        return <AddToNest members={v.add} nestId={p.nestId} nestName={nestName(p.nestId)} channel={ch.name ?? ch.id} onAdded={() => recheck(p)} />;
-                      })()}
-                    />
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
         </>
       )}
       {truncated && <p className="mt-2 text-sm text-muted-foreground">Nest is in more channels than this list shows, so some may be missing here.</p>}
@@ -1374,7 +1247,7 @@ function CheckStep({ state, back, toChannels, next }: { state: SetupState; back:
     <>
       <StepHeading
         title="Check who can read"
-        lede="A channel can only save into a nest if everyone who can read that nest is in the channel. Otherwise people who were never in the conversation could read what was said in it."
+        lede="A privacy check before anything is saved. Everyone who can read the nest must already be in the channel; otherwise people who were never in the conversation could read what was said in it. Green means it passed, and why is listed under each channel."
       />
       {state.bindings.length > 0 && on.length === 0 && (
         <div className="mb-3">
@@ -1427,8 +1300,26 @@ function CheckStep({ state, back, toChannels, next }: { state: SetupState; back:
           <Note tone="ok" icon="check" testId="setup-check-ok">
             <b>
               {okList.length} {okList.length === 1 ? "channel" : "channels"} can listen:
-            </b>{" "}
-            {okList.map((p) => `#${p.channelName} → ${nestName(p.nestId)}`).join(", ")}.
+            </b>
+            <ul className="mt-2 space-y-3">
+              {okList.map((p) => {
+                const v = viewFor(p);
+                return (
+                  <li key={p.channelId} data-testid={`check-ok-${p.channelId}`}>
+                    <div className="font-medium">
+                      #{p.channelName} → {nestName(p.nestId)}
+                    </div>
+                    {v && v !== "loading" && !!v.passed?.length && (
+                      <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                        {v.passed.map((t) => (
+                          <li key={t}>{t}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
           </Note>
         )}
       </div>
@@ -1475,7 +1366,7 @@ function StarterStep({ state, back, next }: { state: SetupState; back: () => voi
       if (state.seeded.includes(n)) continue;
       getSurfacesSeedStatus(n)
         .then((r) => live && !r.no_seed && state.markSeeded(n))
-        .catch(() => {});
+        .catch(() => { });
     }
     return () => {
       live = false;
@@ -1680,7 +1571,7 @@ function ListenStep({ state, back, onDone, onHow }: { state: SetupState; back: (
         title="Turn on listening"
         lede="Each channel gets one notice, now. After that the bot speaks only when it has something worth one reviewer's click. Most days, in most channels, that is never."
       />
-      <div className="max-w-[620px] rounded-lg border p-4 text-sm" data-testid="setup-notice">
+      <div className="rounded-lg border p-4 text-sm" data-testid="setup-notice">
         <div className="mb-2 text-muted-foreground">
           {toBind.length ? `Notice posted to ${toBind.map((p) => `#${p.channelName}`).join(", ")}` : "The notice each channel gets"}
         </div>

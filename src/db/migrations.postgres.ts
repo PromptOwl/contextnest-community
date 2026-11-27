@@ -128,6 +128,7 @@ export const HISTORICAL_MIGRATIONS = [
   "099_agent_profiles",
   "100_hired_agents",
   "101_surface_binding_history",
+  "102_node_changes",
 ];
 
 /** Migration ids whose Postgres backfill must run once, not on every boot. */
@@ -1580,6 +1581,22 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
 
   // Migration 101 parity: Surfaces binding history (po-1437).
   await db.exec(surfacesBindingHistoryDdl(NOW));
+
+  // Migration 102 parity: document moves and tag changes (see migrations.ts).
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS node_changes (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('moved', 'tags_changed')),
+      actor TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      client_json TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_node_changes_node
+      ON node_changes(nest_id, node_id, created_at);
+  `);
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(

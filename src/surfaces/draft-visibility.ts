@@ -18,6 +18,7 @@
  */
 import { getDb } from "../db/client.js";
 import { resolveNestPermission, permissionLevel } from "../shared/access.js";
+import { logCaught } from "./log.js";
 
 /** Marker: the hidden set couldn't be read — treat every node as hidden. */
 export const HIDE_ALL = Symbol("hide-all");
@@ -47,6 +48,7 @@ async function load(nestId: string, op: "new" | "edit"): Promise<HiddenSet> {
     return new Set(rows.map((r) => r.id));
   } catch (err) {
     if (missingTable(err)) return new Set();
+    logCaught("guard", err, { nest: nestId, call: "hidden_drafts" }); // failing closed: hide every draft
     const all = new Set<string>() as HiddenSet;
     all[HIDE_ALL] = true;
     return all;
@@ -75,7 +77,8 @@ export function anyHidden(set: HiddenSet): boolean {
 export async function seesSurfaceDrafts(nestId: string, userId: string): Promise<boolean> {
   try {
     return permissionLevel(await resolveNestPermission(nestId, userId)) >= permissionLevel("write");
-  } catch {
+  } catch (err) {
+    logCaught("guard", err, { nest: nestId, call: "sees_drafts" }, "warn");
     return false;
   }
 }

@@ -195,4 +195,10 @@ describe("nodes: empty folders", () => {
     );
     expect(missing.status).toBe(404);
   });
+
+  it("po-1028: says whether the folder was created or was already there", async () => {
+    const make = () => jsonRequest(app, "POST", `/nests/${nestId}/folders`, { folder: "Dup Name" }, dev.apiKey);
+    expect((await make()).data).toEqual({ folder: "dup-name", created: true });
+    expect((await make()).data).toEqual({ folder: "dup-name", created: false });
+  });
 });

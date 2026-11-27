@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
 
@@ -48,6 +50,30 @@ describe("write I/O summary", () => {
     } finally {
       log.mockRestore();
     }
+  });
+
+  it("po-1247: a move does not wait for the index update; the queue applies it", async () => {
+    const created = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Mover", content: "m", folder: "from" }, apiKey);
+    const { getDb } = await import("../src/db/client.js");
+    const { hasPendingSeals, sealedFor } = await import("../src/nodes/seal-queue.js");
+    const { engineCache } = await import("../src/nodes/engine.js");
+    await sealedFor(nestId);
+    const { storage } = await engineCache.get(nestId);
+    const toIndex = () => {
+      const path = join((storage as any).root, "nodes", "to", "INDEX.md");
+      return existsSync(path) ? readFileSync(path, "utf-8") : "";
+    };
+    // Another instance holds the nest's seal lease: nothing here can seal.
+    await getDb().run("INSERT INTO nest_seal_leases (nest_id, owner, expires_at) VALUES (?, 'other', ?)", [nestId, Date.now() + 60_000]);
+    const moved = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${encodeURIComponent(created.data.node.id)}/move`, { folder: "to" }, apiKey);
+    expect(moved.status).toBe(200);
+    expect(await hasPendingSeals(nestId)).toBe(true);
+    expect(toIndex()).not.toContain("Mover");
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/to/mover`, undefined, apiKey)).status).toBe(200);
+
+    await getDb().run("DELETE FROM nest_seal_leases WHERE nest_id = ?", [nestId]);
+    await sealedFor(nestId);
+    expect(toIndex()).toContain("Mover");
   });
 
   // With the discovery cache warm, a save returns the document from the cache

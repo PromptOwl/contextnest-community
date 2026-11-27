@@ -613,6 +613,11 @@ describe("AC-C2-08: private channels — create, invite, join, leave, members, m
     const gm = await jsonRequest(app, "GET", `/nests/${nestId}/channels/general/members`, undefined, sam.apiKey);
     expect(gm.data.private).toBe(false);
     expect(gm.data.members.map((x: any) => x.email)).toContain(rita.email);
+    // po-1451: whoever else can read and post is the audience; a document share (bob) is not access.
+    const audience = gm.data.audience.map((x: any) => x.email);
+    expect(audience).toEqual(expect.arrayContaining([alice.email, sam.email]));
+    for (const u of [rita, bob, stranger]) expect(audience).not.toContain(u.email);
+    expect((await jsonRequest(app, "GET", `/nests/${nestId}/channels/secret/members`, undefined, alice.apiKey)).data.audience).toEqual([]);
   });
 
   it("AC-C2-08 leave; the last member of a private channel can't leave (409); the list and reads carry private/member", async () => {

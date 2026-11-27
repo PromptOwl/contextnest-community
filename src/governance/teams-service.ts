@@ -172,6 +172,25 @@ function managementRank(
 }
 
 /**
+ * Refuse a name another team already has (any case), among the teams its owner
+ * can see: on a shared deployment another organization's team name is free to
+ * reuse, and is not revealed.
+ */
+async function assertTeamNameFree(name: string, ownerId: string, exceptId?: string): Promise<void> {
+  const taken = (await getDb().all("SELECT id, name, owner_id, members FROM teams WHERE LOWER(TRIM(name)) = LOWER(?)", [
+    name,
+  ])) as Array<Pick<TeamRow, "id" | "name" | "owner_id" | "members">>;
+  const clash = taken.some(
+    (t) =>
+      t.id !== exceptId &&
+      (teamsAreServerWide() ||
+        t.owner_id === ownerId ||
+        parseMembers(t.members).some((m) => m.userId === ownerId)),
+  );
+  if (clash) throw new ConflictError("A team with this name already exists.");
+}
+
+/**
  * Create a team owned by `ownerId`. `source`/`externalId` mark it as imported
  * from another system and are the key a re-import matches on
  * (findTeamByExternalId); both stay null for a team created here by hand.
@@ -184,6 +203,8 @@ export async function createTeam(params: {
 }): Promise<Team> {
   const name = params.name?.trim();
   if (!name) throw new ValidationError("Team name is required");
+  // An import keeps its upstream name, whatever it is called there.
+  if (!params.externalId) await assertTeamNameFree(name, params.ownerId);
   const db = getDb();
   const now = new Date().toISOString();
   const id = uuid();
@@ -275,6 +296,8 @@ export async function renameTeam(params: {
   name: string;
   callerUserId: string;
   allowAdmin?: boolean;
+  /** A re-import following its upstream name: a taken name is allowed. */
+  fromImport?: boolean;
 }): Promise<Team> {
   const name = params.name?.trim();
   if (!name) throw new ValidationError("Team name is required");
@@ -282,6 +305,7 @@ export async function renameTeam(params: {
   if (managementRank(row, params.callerUserId, !!params.allowAdmin) < ROLE_RANK.admin) {
     throw new ForbiddenError("Only a team admin or the owner can rename this team.");
   }
+  if (!params.fromImport) await assertTeamNameFree(name, row.owner_id, row.id);
 
   const db = getDb();
   // Rename + cached-name refresh land together, so the roster can't be left

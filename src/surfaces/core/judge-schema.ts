@@ -95,7 +95,7 @@ export function validateVerdict(raw: unknown, w: JudgeWindowView, n: NestIndex):
   if (!Array.isArray(r.items) || r.items.length > 3) return fail("items");
   if (r.verdict === "propose" && r.items.length < 1) return fail("items: propose needs ≥ 1");
   if (r.verdict === "no_op" && r.items.length > 0) return fail("items: no_op has none");
-  if (w.forced && r.items.length < 1 && r.reason_code !== "sensitive") return fail("items: forced needs ≥ 1");
+  if (w.forced && r.items.length < 1 && r.reason_code === "proposed") return fail("items: proposed has none");
   let ask: string | null = null;
   if (r.ask_signature !== undefined && r.ask_signature !== null) {
     if (!isStr(r.ask_signature, 1, 60) || r.ask_signature !== r.ask_signature.toLowerCase()) return fail("ask_signature");

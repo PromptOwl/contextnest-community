@@ -88,7 +88,7 @@ export function HowItWorks({ settings, orgName, onAgents }: { settings: Surfaces
               <b className="text-foreground">It never saves</b> anything about pay, health, performance or personal life.
             </p>
             <p className="leading-relaxed text-foreground/80">
-              <b className="text-foreground">You can</b> say <code className="font-mono">@Nest skip me</code> to keep your messages out, or ask an admin to remove it from a channel.
+              <b className="text-foreground">You can</b> mention the app and say <code className="font-mono">skip me</code> to keep your messages out, or ask an admin to remove it from a channel.
             </p>
           </div>
           <a href="/about/surfaces" target="_blank" rel="noopener noreferrer" className="mt-3 inline-flex items-center gap-1 text-sm text-primary underline underline-offset-2">

@@ -37,6 +37,7 @@ import type { BindingRow } from "./binding-service.js";
 import { installRef, type InstallRow } from "./install-store.js";
 import { recordNotice } from "./notices.js";
 import type { WindowRow } from "./window-service.js";
+import { logCaught } from "../log.js";
 
 export const PROPOSAL_TTL_MS = 7 * 24 * 3600_000;
 export const DRAFT_SUMMARY = "A draft is waiting for a reviewer in the nest.";
@@ -137,7 +138,10 @@ export async function createProposal(input: {
     const { item } = p;
     const evidence = item.evidence_message_ids.map((id) => input.rows.get(id)).filter((r): r is { id: string; ts: string } => !!r);
     let link: string | null = null;
-    if (connector?.permalink && evidence[0]) link = await connector.permalink(installRef(install), binding.conversation_id, evidence[0].id).catch(() => null);
+    if (connector?.permalink && evidence[0]) link = await connector.permalink(installRef(install), binding.conversation_id, evidence[0].id).catch((err) => {
+        logCaught("card", err, { binding: binding.id, call: "permalink" }, "warn");
+        return null;
+      });
     const where = binding.conversation_name ? `#${binding.conversation_name.replace(/^#/, "")}` : "a conversation";
     const provenance = [`Source: ${install.surface === "slack" ? "Slack" : install.surface} · ${where} · ${rangeUtc(evidence.map((e) => e.ts))}`, link]
       .filter(Boolean)
@@ -159,7 +163,8 @@ export async function createProposal(input: {
           : p.expectedId
             ? await proposeNewDraft(ctx, { folder: p.folder, title: item.title, content, note, ...(item.tags?.length ? { tags: item.tags } : {}) }, { id: p.expectedId, bypassHold: forced })
             : { ok: false as const, message: "no free id" };
-    } catch {
+    } catch (err) {
+      logCaught("judge", err, { binding: binding.id, nest: binding.nest_id, call: "draft" });
       r = { ok: false as const, message: "error" };
     }
     if (!r.ok) {
@@ -218,7 +223,8 @@ export async function editTargetIsDocument(nestId: string, nodeId: string): Prom
     const { storage } = await engineCache.get(nestId);
     const doc = await storage.readDocument(nodeId);
     return isPlainDocumentType(doc.frontmatter?.type as string | undefined);
-  } catch {
+  } catch (err) {
+    if (!(err instanceof DocumentNotFoundError)) logCaught("judge", err, { nest: nestId, call: "edit_target" }, "warn");
     return false;
   }
 }
@@ -269,7 +275,8 @@ export async function withdrawProposalItems(proposalId: string, reason = "bindin
         [reason, iso(Date.now()), iso(Date.now()), it.id],
       );
       if (r.changes) done++;
-    } catch {
+    } catch (err) {
+      logCaught("lifecycle", err, { proposal: proposalId, call: "withdraw" }, "warn"); // retried automatically
       failed++;
     }
   }
@@ -286,7 +293,7 @@ export async function withdrawProposalItems(proposalId: string, reason = "bindin
       detail: { items: failed },
       subject: "Nest couldn't withdraw some proposals yet",
       text: `${failed} proposal(s) from a conversation that stopped capturing couldn't be withdrawn yet. They stay hidden from readers, and Nest retries automatically.`,
-    }).catch(() => "");
+    }).catch((err) => logCaught("notice", err, { proposal: proposalId, call: "withdraw_failed" }));
   }
   const left = (await db.get("SELECT COUNT(*) AS n FROM surface_proposal_items WHERE proposal_id = ? AND state IN ('creating', 'pending')", [proposalId])) as { n: number | string };
   if (Number(left.n) === 0) {
@@ -344,7 +351,9 @@ export async function resolveStaleCreating(nowMs = Date.now()): Promise<number> 
       n += (await db.run("UPDATE surface_proposal_items SET state = 'pending', review_id = ?, updated_at = ? WHERE id = ? AND state = 'creating'", [reviewId, iso(nowMs), r.id])).changes;
       continue;
     }
-    if (r.node_id && r.persona_email) await discardDraftIfOurs(r.nest_id, r.node_id, r.persona_email).catch(() => {});
+    if (r.node_id && r.persona_email) {
+      await discardDraftIfOurs(r.nest_id, r.node_id, r.persona_email).catch((err) => logCaught("lifecycle", err, { nest: r.nest_id, call: "discard_draft" }, "warn"));
+    }
     n += (await db.run("UPDATE surface_proposal_items SET state = 'dropped', title = NULL, updated_at = ? WHERE id = ? AND state = 'creating'", [iso(nowMs), r.id])).changes;
   }
   return n;

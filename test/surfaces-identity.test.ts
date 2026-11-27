@@ -199,7 +199,7 @@ describe("auto-match (all six conditions)", () => {
     const p6 = await person("Org Six");
     process.env.SHARED_DEPLOYMENT = "true";
     fake.profiles.set("U_MARCUS2", profile("U_MARCUS2", { email: p6.email }));
-    expect(await I.evaluateAutoMatch(installId, "U_MARCUS2")).toEqual({ ok: false, reason: "no_match" });
+    expect(await I.evaluateAutoMatch(installId, "U_MARCUS2")).toEqual({ ok: false, reason: "org_domain" });
     await DB.getDb().run("UPDATE nests SET org_domains = ? WHERE id = ?", [JSON.stringify(["idn.test"]), homeNest]);
     expect(await I.evaluateAutoMatch(installId, "U_MARCUS2")).toEqual({ ok: true, userId: p6.userId });
     await DB.getDb().run("UPDATE nests SET org_domains = NULL WHERE id = ?", [homeNest]);

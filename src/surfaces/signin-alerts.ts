@@ -25,6 +25,7 @@ import { createHash, randomUUID } from "crypto";
 import { getDb } from "../db/client.js";
 import { ownsSealedNest, missingSealedTable } from "./sealed.js";
 import { track } from "./services/work.js";
+import { logCaught } from "./log.js";
 
 export type SignInMethod = "sso" | "oidc" | "password" | "reset" | "agent" | "token_exchange" | "key_exchange";
 
@@ -55,7 +56,8 @@ async function alertsOn(): Promise<boolean> {
   try {
     const { getSettings } = await import("./services/settings-service.js");
     return (await getSettings()).signin_alerts !== false;
-  } catch {
+  } catch (err) {
+    logCaught("alert", err, { call: "settings" }, "warn");
     return true; // fail toward telling the owner
   }
 }
@@ -111,13 +113,13 @@ async function tellOwner(userId: string, subject: string, text: string, onlyInst
           if (!ch) continue;
           await slackCall("chat.postMessage", { channel: ch, text }, { token: tk });
           dms++;
-        } catch {
-          /* next link */
+        } catch (err) {
+          logCaught("alert", err, { install: l.install_id, call: "slack_dm" }, "warn"); // next link
         }
       }
     }
-  } catch {
-    /* Slack unavailable — email still goes */
+  } catch (err) {
+    logCaught("alert", err, { call: "slack_links" }, "warn"); // email still goes
   }
   let emails = 0;
   try {
@@ -126,8 +128,8 @@ async function tellOwner(userId: string, subject: string, text: string, onlyInst
       const { sendPlainEmail } = await import("../notify/email.js");
       if ((await sendPlainEmail(u.email, subject, text)) === "sent") emails++;
     }
-  } catch {
-    /* counted below */
+  } catch (err) {
+    logCaught("alert", err, { call: "email" }, "warn"); // counted below
   }
   console.log(`[surfaces] owner alert: dms=${dms} emails=${emails}`);
   return { dms, emails };
@@ -176,8 +178,8 @@ export async function alertSealedOwnerSignIn(
     if (!(await alertsOn())) return;
     if (!(await shouldAlert(userId, method, opts.userAgent, opts.client))) return;
     await tellOwner(userId, "New sign-in to your Nest account", `New sign-in to your Nest account via ${METHOD_LABEL[method]} at ${stamp()}. ${NOT_YOU}`);
-  } catch {
-    console.error("[surfaces] sign-in alert failed (1)");
+  } catch (err) {
+    logCaught("alert", err, { user: userId, call: "sign_in" });
   }
 }
 
@@ -261,8 +263,8 @@ export async function alertSealedOwnersConfigChanged(what: string): Promise<void
     if (!(await alertsOn())) return;
     const text = `An admin changed this Nest server's sign-in or email settings (${what}) at ${stamp()}. Whoever controls those settings could sign in as you. If you didn't expect this, ask whoever runs your Nest server.`;
     await enqueue(await sealedOwnerIds(), "Your Nest server's sign-in or email settings changed", text);
-  } catch {
-    console.error("[surfaces] config-change alert failed (1)");
+  } catch (err) {
+    logCaught("alert", err, { call: "config_change" });
   }
 }
 
@@ -271,8 +273,8 @@ export async function alertSealedOwnersAlertsOff(): Promise<void> {
   try {
     const text = `An admin turned off sign-in alerts on this Nest server at ${stamp()}. You won't be told about new sign-ins to your account until they're turned back on. If you didn't expect this, ask whoever runs your Nest server.`;
     await enqueue(await sealedOwnerIds(), "Sign-in alerts were turned off", text);
-  } catch {
-    console.error("[surfaces] alerts-off notice failed (1)");
+  } catch (err) {
+    logCaught("alert", err, { call: "alerts_off" });
   }
 }
 
@@ -289,8 +291,8 @@ export async function alertSealedOwnerSlackRemoval(userId: string, installId: st
         ? `An admin is removing your Nest Slack connection at ${stamp()}. You'll stop getting sign-in alerts in Slack; they'll still come by email. If you didn't expect this, ask whoever runs your Nest server.`
         : `An admin is disconnecting Nest from Slack at ${stamp()}. You'll stop getting sign-in alerts in Slack; they'll still come by email. If you didn't expect this, ask whoever runs your Nest server.`;
     await tellOwner(userId, kind === "link" ? "Your Nest Slack connection is being removed" : "Nest is being disconnected from Slack", text, installId);
-  } catch {
-    console.error("[surfaces] slack-removal notice failed (1)");
+  } catch (err) {
+    logCaught("alert", err, { install: installId, call: "slack_removal" });
   }
 }
 
@@ -304,7 +306,8 @@ export async function sealedOwnersLinkedTo(installId: string): Promise<string[]>
       [installId],
     )) as Array<{ id: string }>;
     return rows.map((r) => r.id);
-  } catch {
+  } catch (err) {
+    if (!missingSealedTable(err instanceof Error ? err.message : String(err))) logCaught("alert", err, { install: installId, call: "sealed_owners" });
     return [];
   }
 }

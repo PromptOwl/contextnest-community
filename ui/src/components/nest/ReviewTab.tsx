@@ -14,7 +14,7 @@ import { keys, reads } from "../../lib/queries";
 import { BULK_REVIEW_LIMIT } from "../../lib/constants";
 import { FEED_PAGE, useFeedComments } from "./feed-query";
 import { ReviewQueue, ReviewPane, ReasonDialog, type ReviewRequest } from "../governance";
-import { displayedChangeOrder, nextReviewNodeId } from "../../lib/review-pane";
+import { displayedChangeOrder, nextReviewNodeId, skipReviewNodeId } from "../../lib/review-pane";
 import { AgentActivityPanel } from "./AgentActivityPanel";
 import { ExternalEditsTab } from "./ExternalEditsTab";
 import { Badge } from "@/components/ui/badge";
@@ -161,6 +161,11 @@ export function ReviewTab({
       ? openFound.canReview
       : false,
   };
+  // Skip: the next change in the order the queue shows, wrapping round, only for
+  // a change you can decide (a submission of your own has nothing to skip).
+  const skipTarget = openReviewId
+    ? skipReviewNodeId(displayedChangeOrder(reviewableQueue, feedFilter !== "changes"), openReviewId)
+    : null;
   // A decision moves straight on to the next change in the queue.
   const decideAndAdvance = async (nodeId: string, run: () => Promise<void>) => {
     const shown = displayedChangeOrder(reviewableQueue, feedFilter !== "changes");
@@ -551,6 +556,11 @@ export function ReviewTab({
           onReject={
             onReject
               ? (note) => decideAndAdvance(openRequest.nodeId, () => onReject(openRequest.nodeId, note))
+              : undefined
+          }
+          onSkip={
+            skipTarget
+              ? () => onOpenReview(skipTarget)
               : undefined
           }
           onEditDraft={() => onOpenDocument(openRequest.nodeId)}

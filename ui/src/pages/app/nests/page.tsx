@@ -36,6 +36,7 @@ import { pendingInviteNestIds } from "../../../lib/pending-invites";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
+import { InviteActions, type InviteBusy } from "../../../components/InviteActions";
 import { Button } from "@/components/ui/button";
 import { PageTitle } from "@/components/ui/page-title";
 import { Input } from "@/components/ui/input";
@@ -1787,7 +1788,9 @@ function PendingInvites({
 }) {
   const qc = useQueryClient();
   const { data } = useQuery(reads.unreadNotifications());
-  const [busy, setBusy] = useState<string | null>(null);
+  // Per row: two invites can be answered at the same time.
+  const [busy, setBusy] = useState<Record<string, InviteBusy>>({});
+  const mark = (nestId: string, b: InviteBusy) => setBusy((prev) => ({ ...prev, [nestId]: b }));
   const invites = (data?.notifications ?? []).filter((n) => n.kind === "nest_invite");
   // One row per nest, even if it was shared more than once.
   const pendingIds = pendingInviteNestIds(data?.notifications);
@@ -1800,14 +1803,19 @@ function PendingInvites({
     qc.invalidateQueries({ queryKey: reads.unreadNotifications().queryKey });
 
   const accept = async (nest: any) => {
-    setBusy(nest.id);
-    await settle(nest.id).catch(() => {});
-    await refresh();
-    setBusy(null);
-    onOpen(nest);
+    mark(nest.id, "accept");
+    try {
+      await settle(nest.id);
+      await refresh();
+      onOpen(nest);
+    } catch (e: any) {
+      toast.error(e?.message || "Couldn't accept this invite");
+    } finally {
+      mark(nest.id, undefined);
+    }
   };
   const decline = async (nest: any) => {
-    setBusy(nest.id);
+    mark(nest.id, "decline");
     try {
       const { left } = await api.leaveNest(nest.id);
       if (left) {
@@ -1820,7 +1828,7 @@ function PendingInvites({
       toast.error(e?.message || "Couldn't decline this invite");
     } finally {
       await refresh();
-      setBusy(null);
+      mark(nest.id, undefined);
     }
   };
 
@@ -1837,17 +1845,7 @@ function PendingInvites({
                 {invites.find((i) => i.nest_id === nest.id)?.message}
               </div>
             </div>
-            <Button size="sm" disabled={busy === nest.id} onClick={() => accept(nest)}>
-              Accept
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy === nest.id}
-              onClick={() => decline(nest)}
-            >
-              Decline
-            </Button>
+            <InviteActions busy={busy[nest.id]} onAccept={() => accept(nest)} onDecline={() => decline(nest)} />
           </div>
         ))}
       </CardContent>

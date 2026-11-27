@@ -225,7 +225,8 @@ export async function getNestFeed(params: {
             `SELECT COUNT(*) AS c
                FROM annotation_comments c
                JOIN annotation_threads t ON t.id = c.thread_id
-              WHERE t.nest_id = ? AND t.node_id IN (${placeholders})${statusClause}`,
+              WHERE t.nest_id = ? AND t.node_id IN (${placeholders})${statusClause}
+                AND c.deleted_at IS NULL`,
             [params.nestId, ...ids],
           )) as { c: number | string }
         ).c,
@@ -243,6 +244,7 @@ export async function getNestFeed(params: {
              FROM annotation_comments c
              JOIN annotation_threads t ON t.id = c.thread_id
             WHERE t.nest_id = ? AND t.node_id IN (${placeholders})${statusClause}
+              AND c.deleted_at IS NULL
             ORDER BY c.created_at DESC, c.id DESC
             LIMIT ?`,
           [params.nestId, ...ids, fetchWindow],

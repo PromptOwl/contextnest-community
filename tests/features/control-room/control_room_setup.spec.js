@@ -102,18 +102,21 @@ test.describe('Control room: setup', () => {
     ]) await expect(cr.willNever).toContainText(t);
     for (let i = 1; i <= 5; i++) await expect(cr.stepButton(i)).toContainText(/\w/);
 
-    // Install: manifest → credentials (write-only) → stubbed Slack OAuth.
+    // Install: the server's one Slack app (po-1447) — manifest and the
+    // addresses it must keep → its three keys (write-only) → stubbed Slack OAuth.
     const download = page.waitForEvent('download');
     await cr.button('Download manifest').click();
     expect((await download).suggestedFilename()).toBe('nest-slack-manifest.json');
-    await expect(page.getByTestId('setup-manifest-note')).toContainText("this server's current address");
-    for (const [id, v] of [['cred-client_id', 'cid.123'], ['cred-client_secret', 'shh-secret'], ['cred-signing_secret', 'sign-secret']]) {
+    await expect(page.getByTestId('slack-app-urls')).toContainText('https://example.test/surfaces/slack/events');
+    await expect(page.getByTestId('setup-keys-needed')).toBeVisible();
+    await expect(cr.button('Open Slack to approve')).toBeDisabled();
+    for (const [id, v] of [['slack-app-client_id', 'cid.123'], ['slack-app-client_secret', 'shh-secret'], ['slack-app-signing_secret', 'sign-secret']]) {
       await page.locator(`#${id}`).fill(v);
       await expect(page.locator(`#${id}`)).toHaveAttribute('type', 'password');
     }
-    await cr.button('Save values').click();
-    await expect(page.getByTestId('cred-state-signing_secret')).toHaveText('Saved');
-    await expect(page.locator('#cred-client_secret')).toHaveValue('');
+    await cr.button('Save keys').click();
+    await expect(page.getByTestId('slack-app-state-signing_secret')).toHaveText('Saved');
+    await expect(page.locator('#slack-app-client_secret')).toHaveValue('');
     await cr.button('Open Slack to approve').click();
     await page.waitForURL(/\/control-room\?section=setup/);
     // Back from Slack, the page works out where it is: step 1 done, on step 2.
@@ -141,7 +144,7 @@ test.describe('Control room: setup', () => {
 
     // Step 5: the notice, then turn on.
     await expect(page.getByTestId('setup-notice')).toContainText('Notice posted to #acme-renewal, #revops');
-    await expect(page.getByTestId('setup-notice')).toContainText('@Nest skip me');
+    await expect(page.getByTestId('setup-notice')).toContainText('Mention the app and say "skip me"');
     expect(fake.calls.filter((c) => c.method === 'POST' && c.path === '/surfaces/bindings')).toHaveLength(0);
     await page.getByTestId('setup-turn-on').click();
     await expect(page.getByTestId('setup-listening')).toContainText('Listening in 2 channels');
@@ -291,14 +294,14 @@ test.describe('Control room: superadmins only', () => {
 });
 
 test.describe('Control room: member page', () => {
-  test('CN-CR-007 / AC-CR-16: /about/surfaces opens without signing in, with the never list and "@Nest skip me", and no nest, channel or user names', async ({ browser }) => {
+  test('CN-CR-007 / AC-CR-16: /about/surfaces opens without signing in, with the never list and how to skip, and no nest, channel or user names', async ({ browser }) => {
     const ctx = await browser.newContext();
     const page = await ctx.newPage();
     test.skip(!surfacesOn, 'Surfaces is off on this server, so /about/surfaces 404s.');
     const res = await page.goto('/about/surfaces');
     expect(res?.status()).toBe(200);
     await expect(page.getByRole('heading', { name: 'How Nest handles your messages' })).toBeVisible();
-    await expect(page.locator('body')).toContainText('@Nest skip me');
+    await expect(page.locator('body')).toContainText('mention the app and say skip me');
     for (const t of ["Read DMs between people, or channels it isn't in", 'Import channel history', 'Post recaps or summaries in the channel', 'Propose pay, health, performance or personal matters']) {
       await expect(page.locator('ul')).toContainText(t);
     }
