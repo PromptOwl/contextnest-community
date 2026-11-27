@@ -504,6 +504,31 @@ describe.each(["app_uninstalled", "tokens_revoked"])("AC-INS-09 (%s)", (event) =
   });
 });
 
+describe.each(["app_uninstalled", "tokens_revoked"])("a stale %s (a late Slack retry from before this install) is ignored", (event) => {
+  it(`${event} dated before the install leaves the install, its token and its bindings live`, async () => {
+    const team = event === "app_uninstalled" ? "TS1" : "TS2";
+    const bot = `UBOT_${team}`;
+    slack.users.set(`UA_${team}`, { id: `UA_${team}`, team_id: team, email: "alice@surf.test", name: "Alice" });
+    slack.users.set(`UB_${team}`, { id: `UB_${team}`, team_id: team, email: "bob@surf.test", name: "Bob" });
+    slack.users.set(bot, { id: bot, team_id: team, name: "nest", is_bot: true });
+    const inst = await installWorkspace(team, N, { botUserId: bot, authedUser: `UR_${team}` });
+    expect(inst.status).toBe(200);
+    await S.identity.linkExplicit({ installId: inst.id, surfaceUserId: `UA_${team}`, communityUserId: alice.userId });
+    await S.identity.linkExplicit({ installId: inst.id, surfaceUserId: `UB_${team}`, communityUserId: bob.userId });
+    const ch = `CS_${team}`;
+    setChannel(ch, [`UA_${team}`, `UB_${team}`, bot]);
+    const b = await jsonRequest(app, "POST", "/surfaces/bindings", { install_id: inst.id, conversation_id: ch, nest_id: N }, alice.apiKey);
+    expect(b.status, JSON.stringify(b.data)).toBe(201);
+    const stale = { ...envelope({ type: event, ...(event === "tokens_revoked" ? { tokens: { bot: [bot] } } : {}) }, team), event_time: Math.floor(Date.now() / 1000) - 600 };
+    const res = await postEvent(`/surfaces/slack/${inst.id}/events`, stale);
+    expect(res.status).toBe(200);
+    await S.work.waitForSurfacesWork();
+    expect((await one("SELECT status FROM surface_installs WHERE id = ?", [inst.id])).status).toBe("active");
+    expect(await one("SELECT 1 AS x FROM surface_secrets WHERE install_id = ? AND name = 'bot_token'", [inst.id])).toBeTruthy();
+    expect((await one("SELECT status FROM surface_bindings WHERE id = ?", [b.data.binding.id])).status).toBe("active");
+  });
+});
+
 // ═══ 2. AC-JDG-13: the remaining read paths ═════════════════════════════════
 
 describe("AC-JDG-13: sync/pull and other agents never see a pending Surfaces draft", () => {
