@@ -36,6 +36,7 @@ import {
   ruleFailingWebhooks,
   ruleIdleKeys,
   rulePromoteHotspots,
+  ruleRecipeAgents,
   ruleUnansweredQuestions,
   ruleUnmatchedMentions,
   type MentionRow,
@@ -48,7 +49,7 @@ export type { Recommendation } from "./rules.js";
 
 const DISMISS_KIND = "recommendation";
 /** A recommendation id as the rules mint them. */
-const REC_ID_RE = /^(hootie:unanswered|watcher:[a-z0-9][a-z0-9-]{0,62}|mention:[a-z0-9][a-z0-9._-]{0,62}|webhook-fix:[a-z0-9][a-z0-9._-]{0,62}|key-idle:[a-z0-9][a-z0-9._-]{0,62})$/;
+const REC_ID_RE = /^(hootie:unanswered|watcher:[a-z0-9][a-z0-9-]{0,62}|mention:[a-z0-9][a-z0-9._-]{0,62}|webhook-fix:[a-z0-9][a-z0-9._-]{0,62}|key-idle:[a-z0-9][a-z0-9._-]{0,62}|recipe:[a-z0-9][a-z0-9._-]{0,62})$/;
 /** Most rows one computation reads per rule. */
 const SCAN = 500;
 
@@ -193,7 +194,23 @@ export async function computeRecommendations(caller: HireCaller, channels: Chann
   if (adminLike) out.push(...ruleFailingWebhooks(await webhookHealth(nestId), { nestId }));
   const keys = keyRows.filter((k) => adminLike || k.user_id === caller.userId);
   out.push(...ruleIdleKeys(keys, { now, nestId }));
+  // Last: what the nest's recipe suggested (PO-1411), behind anything the nest's own activity asks for.
+  out.push(...(await recipeAgentRecommendations(caller, channels, agents, keyRows, hootieHired)));
   return out.filter((r) => !dismissed.has(r.id)).slice(0, MAX_RECOMMENDATIONS);
+}
+
+async function recipeAgentRecommendations(caller: HireCaller, channels: ChannelRef[], agents: Agents, keyRows: KeyAgentRow[], hootieHired: boolean): Promise<Recommendation[]> {
+  // Loaded on use: the seed engine sits below the hire module's importers.
+  const { suggestedAgentsFor } = await import("../surfaces/services/seed-service.js");
+  const suggested = await suggestedAgentsFor(caller.nestId, caller.userId);
+  if (suggested.length === 0) return [];
+  const { serverUnavailableReason } = await import("./catalog.js");
+  return ruleRecipeAgents(suggested, {
+    nestId: caller.nestId,
+    known: await knownHandles(caller.nestId, agents, keyRows, hootieHired),
+    channels: new Set(channels.map((c) => c.name)),
+    available: (kind) => serverUnavailableReason(kind) === null,
+  });
 }
 
 /** Open recommendations per channel name, for the channel list's badge. */

@@ -1,4 +1,5 @@
 import { cleanTaskRules } from "../nodes/task-rules.js";
+import { applyRecipe, assertRecipe, parseRecipeRef } from "./recipe-service.js";
 import { backfillTicketNumbers } from "../nodes/ticket-backfill.js";
 import { syncTicketCounters } from "../nodes/ticket-numbers.js";
 import { Hono } from "hono";
@@ -397,14 +398,22 @@ nestRoutes.get("/", async (c) => {
 });
 
 // POST /nests
+// POST /nests {name, description?, recipe?} — `recipe` is an id from GET
+// /recipes (PO-1411). It is checked before the nest exists (an unknown one is
+// 404 and nothing is created), then applied through the seed engine; the
+// result says what it made. "blank" or no recipe: the nest as before.
 nestRoutes.post("/", async (c) => {
-  const body = await c.req.json<{ name?: string; description?: string }>();
+  const body = await c.req.json<{ name?: string; description?: string; recipe?: unknown }>();
   if (!body.name) {
     throw new ValidationError("name is required");
   }
+  const ref = parseRecipeRef(body.recipe);
+  if (ref) await assertRecipe(ref, c.get("userId"));
 
   const nest = await createNest(c.get("userId"), body.name, body.description);
-  return c.json({ nest: withParsedBranding(nest) }, 201);
+  if (!ref) return c.json({ nest: withParsedBranding(nest) }, 201);
+  const recipe = await applyRecipe(nest.id, ref, c.get("userId"), { keyId: c.get("apiKeyId") ?? null, agentSurface: false });
+  return c.json({ nest: withParsedBranding(nest), recipe }, 201);
 });
 
 /** Run one import step; anything unexpected surfaces naming the step, not as a

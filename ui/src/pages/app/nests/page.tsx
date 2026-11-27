@@ -18,6 +18,10 @@ import { ANON_USER_ID } from "../../../lib/constants";
 import { CopyButton } from "@/components/ui/copy-button";
 import { toast } from "sonner";
 import { AllNestsBar } from "../../../components/AllNestsBar";
+import { ConnectModal } from "../../../components/ConnectModal";
+import { RecipePicker, useRecipes } from "../../../components/recipes/RecipePicker";
+import { HarnessStep } from "../../../components/recipes/HarnessStep";
+import { BLANK_RECIPE_ID, appliedSummary, recipeParam, type HarnessKind, type RecipeApplied } from "../../../lib/recipes";
 import { relTime, formatServerDate, SHORT_DATE_TIME } from "../../../lib/dates";
 import { nestNameProblem } from "../../../lib/nest-name";
 import {
@@ -38,6 +42,7 @@ import {
 } from "@/components/ui/card";
 import { InviteActions, type InviteBusy } from "../../../components/InviteActions";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { PageTitle } from "@/components/ui/page-title";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -267,6 +272,13 @@ export default function NestsPage() {
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
+  // PO-1411: the recipe the new nest starts from, then the harness step.
+  const [newRecipe, setNewRecipe] = useState<string>(BLANK_RECIPE_ID);
+  const [creating, setCreating] = useState(false);
+  const [created, setCreated] = useState<{ id: string; name: string; anon: boolean; recipe: RecipeApplied | null; recipeName: string } | null>(null);
+  const [harness, setHarness] = useState<HarnessKind>("local");
+  const [connectFor, setConnectFor] = useState<{ id: string; name: string; anon: boolean } | null>(null);
+  const recipesQuery = useRecipes();
   // Nest ids with a pin write in flight — one click at a time per card.
   const [pinBusy, setPinBusy] = useState<Set<string>>(new Set());
   // Pending target sits in state so the modal can render the nest name in
@@ -373,19 +385,39 @@ export default function NestsPage() {
       return;
     }
     setCreateError(null);
+    setCreating(true);
     try {
-      const { nest } = await api.createNest(newName.trim(), newDesc.trim());
-      setNewName(""); setNewDesc(""); setShowCreate(false);
+      const { nest, recipe } = await api.createNest(newName.trim(), newDesc.trim(), recipeParam(newRecipe));
       fetchNests();
-      // Straight into the new nest — the next thing anyone does is add a
-      // document to it, and the grid would make them find it first.
-      onSelectNest(nest.id, nest.name, true, nest.user_id === ANON_USER_ID);
+      // Next: where its agents run (PO-1411). Opening the nest waits for that step.
+      const recipeName = recipesQuery.data?.recipes.find((r) => r.id === newRecipe)?.name ?? "The recipe";
+      setCreated({ id: nest.id, name: nest.name, anon: nest.user_id === ANON_USER_ID, recipe: recipe ?? null, recipeName });
+      setHarness("local");
     } catch (e) {
       console.error("[Dashboard] createNest failed", e);
       setCreateError(
         e instanceof Error ? e.message : "Failed to create nest",
       );
+    } finally {
+      setCreating(false);
     }
+  };
+
+  /** Close the New nest dialog and forget its draft (PO-1202). */
+  const resetCreate = () => {
+    setShowCreate(false);
+    setCreateError(null);
+    setNewName("");
+    setNewDesc("");
+    setNewRecipe(BLANK_RECIPE_ID);
+    setCreated(null);
+  };
+
+  /** Leave the harness step: straight into the new nest, the next thing anyone does there. */
+  const openCreated = () => {
+    const n = created;
+    resetCreate();
+    if (n) onSelectNest(n.id, n.name, true, n.anon);
   };
 
   /**
@@ -576,72 +608,135 @@ export default function NestsPage() {
             open={showCreate}
             onOpenChange={(open) => {
               if (open) return;
-              // Closing discards the draft, so the next New Nest starts empty (PO-1202).
-              setShowCreate(false);
-              setCreateError(null);
-              setNewName("");
-              setNewDesc("");
+              // Closing discards the draft, so the next New Nest starts empty
+              // (PO-1202). Closing after Create opens the nest that was made.
+              if (created) openCreated();
+              else resetCreate();
             }}
           >
-            <DialogContent className="sm:max-w-[480px]">
-              <DialogHeader>
-                <DialogTitle>New nest</DialogTitle>
-                <DialogDescription>
-                  A nest holds a set of documents and the governance around them.
-                </DialogDescription>
-              </DialogHeader>
-              <form onSubmit={handleCreate} className="space-y-3">
-                <div className="space-y-1">
-                  <Label>Name</Label>
-                  <Input
-                    placeholder="Team Knowledge"
-                    value={newName}
-                    onChange={(e) => {
-                      setNewName(e.target.value);
-                      if (createError) setCreateError(null);
-                    }}
-                    aria-invalid={!!createError}
-                    autoFocus
-                  />
-                  {/* Say why the button is dead as it happens — a name over the
-                      length cap only disabled Create, with nothing to read
-                      (CU-wdqcq018qx). The submit error still wins. */}
-                  {(createError ??
-                    (newName ? nestNameProblem(newName) : null)) && (
-                    <p className="text-xs text-destructive">
-                      {createError ?? nestNameProblem(newName)}
+            <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-[640px]" data-testid="new-nest-dialog">
+              {!created ? (
+                <>
+                  <DialogHeader>
+                    <DialogTitle>New nest</DialogTitle>
+                    <DialogDescription>
+                      A nest holds a set of documents and the governance around them. Start from a recipe, or from nothing.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <form onSubmit={handleCreate} className="space-y-4">
+                    <div className="space-y-1">
+                      <Label htmlFor="new-nest-name">Name</Label>
+                      <Input
+                        id="new-nest-name"
+                        placeholder="Team Knowledge"
+                        value={newName}
+                        onChange={(e) => {
+                          setNewName(e.target.value);
+                          if (createError) setCreateError(null);
+                        }}
+                        aria-invalid={!!createError}
+                        autoFocus
+                      />
+                      {/* Say why the button is dead as it happens — a name over the
+                          length cap only disabled Create, with nothing to read
+                          (CU-wdqcq018qx). The submit error still wins. */}
+                      {(createError ??
+                        (newName ? nestNameProblem(newName) : null)) && (
+                        <p className="text-xs text-destructive">
+                          {createError ?? nestNameProblem(newName)}
+                        </p>
+                      )}
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="new-nest-desc">Description (optional)</Label>
+                      <Textarea
+                        id="new-nest-desc"
+                        placeholder="Shared docs for the engineering team"
+                        value={newDesc}
+                        onChange={(e) => setNewDesc(e.target.value)}
+                        rows={2}
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label id="new-nest-recipe">Recipe</Label>
+                      <RecipePicker value={newRecipe} onChange={setNewRecipe} disabled={creating} compact />
+                    </div>
+                    <DialogFooter>
+                      <Button type="button" variant="outline" onClick={resetCreate}>
+                        Cancel
+                      </Button>
+                      <Button type="submit" disabled={!!nestNameProblem(newName) || creating} data-testid="new-nest-create">
+                        {creating && <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />}
+                        Create nest
+                      </Button>
+                    </DialogFooter>
+                  </form>
+                </>
+              ) : (
+                <>
+                  <DialogHeader>
+                    <DialogTitle>Connect a harness</DialogTitle>
+                    <DialogDescription>
+                      Choose where {created.name}'s agents run. You can change this later.
+                    </DialogDescription>
+                  </DialogHeader>
+                  {created.recipe && (
+                    <p
+                      className={cn(
+                        "rounded-md border px-3 py-2 text-xs",
+                        created.recipe.status === "failed" ? "border-destructive/40 text-destructive" : "text-muted-foreground",
+                      )}
+                      role="status"
+                      data-testid="recipe-applied"
+                    >
+                      {appliedSummary(created.recipe, created.recipeName)}
                     </p>
                   )}
-                </div>
-                <div className="space-y-1">
-                  <Label>Description (optional)</Label>
-                  <Textarea
-                    placeholder="Shared docs for the engineering team"
-                    value={newDesc}
-                    onChange={(e) => setNewDesc(e.target.value)}
-                    rows={3}
+                  <HarnessStep
+                    value={harness}
+                    onChange={setHarness}
+                    local={
+                      <Button
+                        type="button"
+                        onClick={() => {
+                          const n = created;
+                          resetCreate();
+                          setConnectFor({ id: n.id, name: n.name, anon: n.anon });
+                        }}
+                        data-testid="harness-local-connect"
+                      >
+                        Connect an agent
+                      </Button>
+                    }
                   />
-                </div>
-                <DialogFooter>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => {
-                      setShowCreate(false);
-                      setCreateError(null);
-                      setNewName("");
-                      setNewDesc("");
-                    }}
-                  >
-                    Cancel
-                  </Button>
-                  <Button type="submit" disabled={!!nestNameProblem(newName)}>
-                    Create Nest
-                  </Button>
-                </DialogFooter>
-              </form>
+                  <DialogFooter>
+                    <Button type="button" variant={harness === "local" ? "outline" : "default"} onClick={openCreated} data-testid="harness-skip">
+                      {harness === "local" ? "Skip for now" : "Open the nest"}
+                    </Button>
+                  </DialogFooter>
+                </>
+              )}
             </DialogContent>
           </Dialog>
+
+          {/* Local harness: the existing Connect dialog for the nest just made;
+              closing it lands in that nest (PO-1411). */}
+          {connectFor && (
+            <ConnectModal
+              isOpen
+              onClose={() => {
+                const n = connectFor;
+                setConnectFor(null);
+                onSelectNest(n.id, n.name, true, n.anon);
+              }}
+              nestId={connectFor.id}
+              nestName={connectFor.name}
+              onManageKeys={() => {
+                setConnectFor(null);
+                onManageKeys();
+              }}
+            />
+          )}
 
           {/* Grid controls — filter/sort the cards in place, the way the
               in-nest Documents browser does. Always shown, however many
