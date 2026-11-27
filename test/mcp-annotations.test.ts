@@ -19,6 +19,7 @@ const READ_ONLY = [
   "context_public_links",
   "nest_index",
   "context_onboarding",
+  "context_appearance",
   "context_init",
   "context_instructions_history",
   "context_overview",
@@ -89,6 +90,7 @@ const READ_ONLY = [
 
 /** Can overwrite or remove something that already exists. */
 const DESTRUCTIVE = [
+  "context_appearance_update",
   "context_public_link_update",
   "context_public_link_revoke",
   "context_instructions_update",

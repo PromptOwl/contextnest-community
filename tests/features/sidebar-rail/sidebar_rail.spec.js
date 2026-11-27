@@ -167,6 +167,49 @@ test.describe('Sidebar rail', () => {
   //   await expect(rail.row('stream')).toHaveCount(0);
   // });
 
+  test('CN-RAIL-010: the rail takes the server\'s navigation color, with readable text, and is navy by default', async ({ primary_user }) => {
+    await primary_user.initialize();
+    const { page, sidebarRailPage: rail } = primary_user;
+    const railEl = page.getByTestId('document-sidebar');
+    const styles = () =>
+      railEl.evaluate((el) => {
+        const row = el.querySelector('[data-testid="document-sidebar-all-nests"]');
+        return { bg: getComputedStyle(el).backgroundColor, text: getComputedStyle(row).color };
+      });
+    // Relative luminance of an "rgb(r, g, b)" string (WCAG).
+    const lum = (rgb) => {
+      const [r, g, b] = rgb.match(/\d+(\.\d+)?/g).slice(0, 3).map(Number).map((v) => {
+        const c = v / 255;
+        return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+
+    // A light color: the rail turns yellow and its text turns dark.
+    await stubHealth(page, { navColor: '#fde047' });
+    await rail.goto();
+    await expect(railEl).toHaveAttribute('data-nav-color', '#fde047');
+    const light = await styles();
+    expect(light.bg).toBe('rgb(253, 224, 71)');
+    expect(lum(light.text)).toBeLessThan(0.05);
+
+    // A dark color: white text.
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
+    await stubHealth(page, { navColor: '#115e59' });
+    await rail.goto();
+    await expect(railEl).toHaveAttribute('data-nav-color', '#115e59');
+    const dark = await styles();
+    expect(dark.bg).toBe('rgb(17, 94, 89)');
+    expect(lum(dark.text)).toBeGreaterThan(0.5);
+
+    // Unset: the navy the rail has always had.
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
+    await stubHealth(page, { navColor: null });
+    await rail.goto();
+    await expect(railEl).toHaveAttribute('data-nav-color', 'default');
+    expect((await styles()).bg).toBe('rgb(17, 34, 106)');
+  });
+
   // CN-RAIL-007 fails on dev since #582: the sidebar rail groups were removed and the account menu is mounted twice (PR #585).
   // test('CN-RAIL-007: the Message log appears in the Admin group only for superadmins', async ({ primary_user, secondary_user }) => {
   //   test.info().annotations.push({

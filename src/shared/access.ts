@@ -13,6 +13,15 @@ import { config } from "../config.js";
 export type NestPermission = "none" | "read" | "write" | "admin" | "owner";
 
 /**
+ * The /admin/* operator gate: open mode (the anonymous admin), the license
+ * admin, or a superadmin. One definition for REST (app.ts) and the MCP tools
+ * that mirror admin settings (PO-1430).
+ */
+export async function serverAdminAllowed(userId: string | undefined): Promise<boolean> {
+  return config.AUTH_MODE === "open" || (!!userId && (await isServerAdminUserId(userId)));
+}
+
+/**
  * Canonical server-admin check by user id: the license admin OR a superadmin
  * (access.yaml `super_admins` ∪ the DB-granted set). Use this for operator
  * surfaces (teammates, unsynced folders, /admin/*) so every gate resolves
