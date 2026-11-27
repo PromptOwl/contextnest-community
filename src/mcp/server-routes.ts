@@ -54,7 +54,8 @@ import {
   listPublicNests,
   createNest,
 } from "../nests/service.js";
-import { ValidationError, ForbiddenError } from "../shared/errors.js";
+import { ValidationError, ForbiddenError, NotFoundError } from "../shared/errors.js";
+import { applyRecipe, assertRecipe, parseRecipeRef, recipeAppliedText } from "../nests/recipe-service.js";
 import { isSuspended, getSuspensionReason, getOfflineLock } from "../auth/license.js";
 import {
   handleToolCall,
@@ -399,6 +400,11 @@ export const SERVER_TOOL_DEFINITIONS = [
       properties: {
         name: { type: "string", description: "Nest name" },
         description: { type: "string", description: "Optional description" },
+        recipe: {
+          type: "string",
+          description:
+            "Optional recipe id from context_recipes (product-factory, gtm-factory, operations, ideation): the nest starts with its folders, documents, boards, channels and suggested agents. Default blank.",
+        },
       },
       required: ["name"],
     },
@@ -523,6 +529,7 @@ async function handleServerToolCall(
       baseUrl,
       nestScope,
       contributorCredential,
+      apiKeyId,
       resolveNest: async (ref) => {
         const nest = await resolveNestRef(ref, userId);
         return nest && (await canRead(nest.id, userId)) ? nest : null;
@@ -540,15 +547,22 @@ async function handleServerToolCall(
       return "A system key cannot create nests. Ask a nest admin to grant this system the nest it needs.";
     }
     try {
+      // A recipe (PO-1411) is checked before the nest exists, as in POST /nests.
+      const ref = parseRecipeRef(args.recipe);
+      if (ref) await assertRecipe(ref, userId);
       const nest = await createNest(
         userId,
         String(args.name ?? ""),
         args.description ? String(args.description) : undefined,
       );
       const web = nestWebUrl(baseUrl, nest.id);
-      return `Created nest "${nest.name}" (id: ${nest.id}). Add documents with context_create, retrieve with the other tools.${web ? ` Open in the web app (the link for people): ${web}` : ""}`;
+      const created = `Created nest "${nest.name}" (id: ${nest.id}). Add documents with context_create, retrieve with the other tools.${web ? ` Open in the web app (the link for people): ${web}` : ""}`;
+      if (!ref) return created;
+      // MCP is an agent surface whatever it authenticated with (S7-R2 M1).
+      const recipe = await applyRecipe(nest.id, ref, userId, { keyId: apiKeyId ?? null, agentSurface: true });
+      return { text: `${created}\n${recipeAppliedText(recipe)}`, data: { nest: { id: nest.id, name: nest.name }, recipe } } as ToolResult;
     } catch (err) {
-      if (err instanceof ValidationError || err instanceof ForbiddenError) return err.message;
+      if (err instanceof ValidationError || err instanceof ForbiddenError || err instanceof NotFoundError) return err.message;
       throw err;
     }
   }
@@ -977,7 +991,7 @@ Streamable HTTP, stateless. Two endpoints:
     \`context_task_log\` (log what you did on a task: working / done / blocked),
     \`context_bulk_update\` (one change over up to 100 nodes)
   - Feed: \`context_stream\` (every document version across your nests, people and agents)
-  - First run: \`context_onboarding\`, \`context_onboarding_update\`, \`context_distill\` (fill a nest from a public site or repo)
+  - First run: \`context_onboarding\`, \`context_onboarding_update\`, \`context_distill\` (fill a nest from a public site or repo), \`context_recipes\` (what a new nest can start from; pass an id to \`nest_create\`)
   - Control room (workflow plane on): \`context_agent_ledger_org\`, \`context_agent_rollups_org\`
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, the full toolset. Same names as the
   server-level tools without the \`nest\` argument, plus:

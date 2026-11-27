@@ -558,6 +558,8 @@ export const MCP_READ_TOOLS = new Set<string>([
   "nest_index",
   // first-run onboarding reads (PO-1185)
   "context_onboarding",
+  // the recipe catalog (PO-1411)
+  "context_recipes",
   // workflow-plane read tools (only advertised when the feature flag is on)
   "workflow_run_get",
   "workflow_runs_list",

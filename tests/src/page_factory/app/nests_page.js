@@ -73,7 +73,12 @@ class NestsPage {
     this.createDescInput = this.createDialog.getByPlaceholder(
       'Shared docs for the engineering team'
     );
-    this.createSubmit = this.createDialog.getByRole('button', { name: 'Create Nest' });
+    this.createSubmit = this.createDialog.getByRole('button', { name: 'Create nest' });
+    // After Create: pick a recipe first, then "Connect a harness" (PO-1411).
+    this.recipeCard = (id) => this.createDialog.getByTestId(`recipe-${id}`);
+    this.harnessDialog = page.getByRole('dialog', { name: 'Connect a harness' });
+    this.harnessChoice = (id) => this.harnessDialog.getByTestId(`harness-${id}`);
+    this.harnessSkip = this.harnessDialog.getByTestId('harness-skip');
     this.createCancel = this.createDialog.getByRole('button', { name: 'Cancel' });
     this.createError = this.createDialog.locator('p.text-destructive');
 
