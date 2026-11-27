@@ -130,6 +130,7 @@ export const HISTORICAL_MIGRATIONS = [
   "101_surface_binding_history",
   "102_node_changes",
   "103_seed_item_kinds",
+  "104_surface_link_token_nest",
 ];
 
 /** Migration ids whose Postgres backfill must run once, not on every boot. */
@@ -1602,6 +1603,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
   // Migration 103 parity: a seed also writes boards, channels and task stages
   // (PO-1411). A fresh table already has the wider CHECK; an older one swaps it once.
   await db.exec(seedItemKindsPostgres());
+
+  // Migration 104 parity: the nest a link token came from.
+  await db.exec("ALTER TABLE surface_link_tokens ADD COLUMN IF NOT EXISTS nest_id TEXT;");
 
   // Migration 005 parity: anon-owned nests default to public visibility.
   await db.run(

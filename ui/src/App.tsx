@@ -40,7 +40,7 @@ import { nestPageForPath, nestPageForView, nestPages } from "./lib/nest-pages";
 import { DEFAULT_NEST_TAB, NEST_TAB_LABELS, nestTabFromParam } from "./lib/nest-tabs";
 import { NestPageProvider } from "./lib/nest-page-context";
 import { channelHistoryKey, readChannelDeepLink, writeChannelParams } from "./lib/channel-deep-link";
-import { nextFromSearch, parkNestReturn, signInAddress, takeNestReturn } from "./lib/sign-in-return";
+import { isLinkPage, nextFromSearch, parkNestReturn, signInAddress, takeNestReturn } from "./lib/sign-in-return";
 import { historyWrite, needsViewStamp, nextChannelLocation } from "./lib/view-history";
 import { channelNameOfDoc } from "./lib/channel-docs";
 import { channelForDocument } from "./lib/queries";
@@ -709,6 +709,7 @@ export default function App() {
   useEffect(() => {
     if (loading || !authenticated) return;
     const back = takeNestReturn() ?? nextFromSearch(window.location.search);
+    if (back && isLinkPage(back)) return window.location.assign(back);
     if (!back || nestIdFromLocation()) return;
     window.history.replaceState(null, "", back);
     setDeepLinkProbe({ status: "loading" });

@@ -286,6 +286,31 @@ describe("one-time link", () => {
     expect(post.status).toBe(403);
     expect(await activeLink("U_BOB4")).toBeUndefined();
   });
+
+  it("linking from a nest's card shares that nest as Viewer; the link page has a way back to the app", async () => {
+    const who = await person("Share Me");
+    fake.profiles.set("U_SHARE", profile("U_SHARE", { email: who.email, email_confirmed: true }));
+    const tok = await I.issueLinkToken({ installId, surfaceUserId: "U_SHARE", nestId: homeNest });
+    expect((await I.redeemLinkToken({ token: tok, userId: who.userId })).ok).toBe(true);
+    const row = (await DB.getDb().get("SELECT permission FROM nest_collaborators WHERE nest_id = ? AND user_id = ?", [homeNest, who.userId])) as any;
+    expect(row?.permission).toBe("read");
+    const page = await app.request(`/link/${await I.issueLinkToken({ installId, surfaceUserId: "U_SHARE" })}`, { headers: { Accept: "text/html" } });
+    expect(await page.text()).toContain('href="/">Back to ContextNest');
+  });
+
+  it("a signed-out browser gets a sign-in page that returns to the link, not 401 JSON", async () => {
+    fake.profiles.set("U_OUT", profile("U_OUT", { email: "out@idn.test", email_confirmed: true }));
+    const tok = await I.issueLinkToken({ installId, surfaceUserId: "U_OUT" });
+    const res = await app.request(`/link/${tok}`, { headers: { Accept: "text/html" } });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("out@idn.test");
+    expect(html).toContain(`/?next=${encodeURIComponent(`/link/${tok}`)}`);
+    // An API caller still gets the 401, and linking still needs a session.
+    expect((await app.request(`/link/${tok}`)).status).toBe(401);
+    expect((await app.request(`/link/${tok}`, { method: "POST", headers: { Accept: "text/html" } })).status).toBe(401);
+    expect(await activeLink("U_OUT")).toBeUndefined();
+  });
 });
 
 describe("first-use confirm (N3)", () => {

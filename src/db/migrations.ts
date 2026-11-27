@@ -2880,6 +2880,12 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("103_seed_item_kinds");
   }
+
+  // 104: the nest a Slack "Link my account" click came from, so linking can share it.
+  if (!hasMigration("104_surface_link_token_nest")) {
+    db.exec("ALTER TABLE surface_link_tokens ADD COLUMN nest_id TEXT;");
+    recordMigration("104_surface_link_token_nest");
+  }
 }
 
 /**
